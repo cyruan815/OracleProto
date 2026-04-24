@@ -49,6 +49,7 @@ coverage.xml
 # Environments
 .env
 .env.*
+!.env.example
 .venv/
 venv/
 env/
@@ -82,10 +83,13 @@ Thumbs.db
 # Local databases and logs
 logs/
 results.db
+results.db-*
 *.db-wal
 *.db-shm
 *.log
 *.sqlite3
+# Note: forecast_eval_set.db is intentionally NOT ignored — it is the source
+# dataset and must be tracked in git so source_db_hash stays reproducible.
 
 # Local Documentation
 openspec/
