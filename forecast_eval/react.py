@@ -92,6 +92,11 @@ async def run_react(
     t0 = time.monotonic()
     final_raw = ""
     steps_executed = 0
+    # ENABLE_WEB_SEARCH=false → LLM 看不到任何 tool schema, 循环会在首轮直接返回
+    # content 并 break, Tavily 完全不会被调用.
+    tool_schemas: list[dict[str, Any]] = (
+        [WEB_SEARCH_SCHEMA] if settings.ENABLE_WEB_SEARCH else []
+    )
 
     for step in range(settings.REACT_MAX_STEPS):
         steps_executed = step + 1
@@ -99,7 +104,7 @@ async def run_react(
             model=model,
             messages=messages,
             settings=settings,
-            tools=[WEB_SEARCH_SCHEMA],
+            tools=tool_schemas,
         )
         _accumulate_tokens(tokens, resp)
         assistant_msg = resp.message

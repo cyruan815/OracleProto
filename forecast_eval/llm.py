@@ -71,16 +71,19 @@ def _assert_no_browsing(*, model: str, tools: list[dict[str, Any]], extra_body: 
         raise ValueError(
             f"model {model!r} ends with ':online' — provider-native browsing is not allowed"
         )
-    if not tools or len(tools) != 1:
-        raise ValueError("tools must contain exactly one schema: web_search")
-    schema = tools[0]
-    if schema is not WEB_SEARCH_SCHEMA:
-        # allow callers to pass the same dict by identity; otherwise check shape
-        func = schema.get("function", {}) if isinstance(schema, dict) else {}
-        if func.get("name") != "web_search":
-            raise ValueError(
-                "the only allowed tool schema is web_search; provider-native retrieval is forbidden"
-            )
+    # Empty tools is allowed (ENABLE_WEB_SEARCH=false) — the LLM gets no tool
+    # schema at all, which is strictly stricter than the single-tool baseline.
+    if tools:
+        if len(tools) != 1:
+            raise ValueError("tools must contain at most one schema: web_search")
+        schema = tools[0]
+        if schema is not WEB_SEARCH_SCHEMA:
+            # allow callers to pass the same dict by identity; otherwise check shape
+            func = schema.get("function", {}) if isinstance(schema, dict) else {}
+            if func.get("name") != "web_search":
+                raise ValueError(
+                    "the only allowed tool schema is web_search; provider-native retrieval is forbidden"
+                )
     if extra_body and "plugins" in extra_body:
         raise ValueError("plugins field is forbidden (provider-native browsing)")
 
@@ -146,10 +149,14 @@ async def chat(
     base_kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "tools": tools,
         "max_tokens": max_tokens if max_tokens is not None else settings.LLM_MAX_TOKENS,
         "timeout": timeout if timeout is not None else settings.LLM_TIMEOUT_S,
     }
+    # Omit the `tools` key entirely when empty — some OpenAI-compatible providers
+    # reject an empty list with 400, and "no tools" is exactly what we want when
+    # ENABLE_WEB_SEARCH=false.
+    if tools:
+        base_kwargs["tools"] = tools
     if not skip_sampling:
         base_kwargs["temperature"] = (
             temperature if temperature is not None else settings.LLM_TEMPERATURE

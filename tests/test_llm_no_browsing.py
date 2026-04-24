@@ -142,7 +142,7 @@ async def test_extra_tool_rejected_pre_flight() -> None:
         "type": "function",
         "function": {"name": "python", "parameters": {"type": "object", "properties": {}}},
     }
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(ValueError, match="at most one"):
         await chat(
             model="openai/gpt-4o-mini",
             messages=[{"role": "user", "content": "x"}],

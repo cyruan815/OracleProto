@@ -93,8 +93,12 @@ class Settings(BaseSettings):
         default_factory=lambda: ["o1", "o3", "o4", "r1", "qwq"]
     )
 
+    # Web search master switch: when False, the ReAct loop runs with no tool
+    # schema at all — Tavily is never hit and TAVILY_API_KEY becomes optional.
+    ENABLE_WEB_SEARCH: bool = True
+
     # Tavily
-    TAVILY_API_KEY: str
+    TAVILY_API_KEY: str = ""
     TAVILY_MAX_RESULTS: int = 5
     TAVILY_INCLUDE_RAW_CONTENT: bool = False
     TAVILY_END_DATE_OFFSET_DAYS: int = -1
@@ -171,7 +175,10 @@ class Settings(BaseSettings):
                     f"MODELS entry {slug!r} must not end with ':online' — "
                     "provider-native browsing is not allowed (see information-barrier spec)"
                 )
-        for key_name in ("LLM_API_KEY", "TAVILY_API_KEY"):
+        required_keys = ["LLM_API_KEY"]
+        if self.ENABLE_WEB_SEARCH:
+            required_keys.append("TAVILY_API_KEY")
+        for key_name in required_keys:
             value = getattr(self, key_name)
             if not value:
                 raise ValueError(f"{key_name} must not be empty")
