@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     LLM_BACKOFF_NETWORK_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [2, 5, 15, 30, 60])
     LLM_BACKOFF_RATE_LIMIT_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [10, 30, 60, 120, 300])
     LLM_BACKOFF_SERVER_5XX_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [5, 15, 30, 60, 120])
+    # 推理类模型 slug 子串列表: 匹配到的模型调用时将不传 temperature / top_p
+    # (o-series / deepseek-r1 / qwq 等推理模型不接受自定义采样参数, 会直接报 400)
+    LLM_REASONING_MODEL_PATTERNS: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["o1", "o3", "o4", "r1", "qwq"]
+    )
 
     # Tavily
     TAVILY_API_KEY: str
@@ -133,6 +138,11 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return [int(x) for x in v]
         return _parse_csv_int(v)
+
+    @field_validator("LLM_REASONING_MODEL_PATTERNS", mode="before")
+    @classmethod
+    def _parse_reasoning_patterns(cls, v: Any) -> list[str]:
+        return _parse_csv(v)
 
     @field_validator("MODEL_TRAINING_CUTOFFS", mode="before")
     @classmethod

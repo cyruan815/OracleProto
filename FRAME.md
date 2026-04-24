@@ -565,6 +565,10 @@ LLM_TIMEOUT_S=120
 LLM_TEMPERATURE=0.7
 LLM_TOP_P=1.0
 
+# 推理模型 slug 子串列表: 命中后 **不传** temperature / top_p
+# (o-series / deepseek-r1 / qwq 等推理模型对自定义采样参数会直接报 400)
+LLM_REASONING_MODEL_PATTERNS=o1,o3,o4,r1,qwq
+
 # LLM 并发 & 重试 (与 OpenRouter 配套)
 LLM_MAX_CONCURRENCY=10
 LLM_RETRY_MAX=5

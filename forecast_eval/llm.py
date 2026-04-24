@@ -55,6 +55,12 @@ def get_client(settings: Settings) -> AsyncOpenAI:
     return _client
 
 
+def _is_reasoning_model(model: str, patterns: list[str]) -> bool:
+    """推理模型 slug 子串匹配. 匹配到的模型调用时会跳过 temperature / top_p."""
+    lower = model.lower()
+    return any(p.lower() in lower for p in patterns if p)
+
+
 def _assert_no_browsing(*, model: str, tools: list[dict[str, Any]], extra_body: dict[str, Any] | None) -> None:
     """Hard gate: refuse to send a request that would leak information via
     provider-native browsing. These checks duplicate the startup-time Settings
@@ -133,18 +139,27 @@ async def chat(
     attempt = 0
     last_exc: BaseException | None = None
 
+    # 推理模型不接受自定义 temperature / top_p (o-series / deepseek-r1 / qwq 等会返回 400),
+    # 命中 pattern 时显式不传这两个字段.
+    reasoning_patterns = getattr(settings, "LLM_REASONING_MODEL_PATTERNS", []) or []
+    skip_sampling = _is_reasoning_model(model, reasoning_patterns)
+    base_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "max_tokens": max_tokens if max_tokens is not None else settings.LLM_MAX_TOKENS,
+        "timeout": timeout if timeout is not None else settings.LLM_TIMEOUT_S,
+    }
+    if not skip_sampling:
+        base_kwargs["temperature"] = (
+            temperature if temperature is not None else settings.LLM_TEMPERATURE
+        )
+        base_kwargs["top_p"] = top_p if top_p is not None else settings.LLM_TOP_P
+
     while True:
         attempt += 1
         try:
-            raw = await c.chat.completions.with_raw_response.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                temperature=temperature if temperature is not None else settings.LLM_TEMPERATURE,
-                top_p=top_p if top_p is not None else settings.LLM_TOP_P,
-                max_tokens=max_tokens if max_tokens is not None else settings.LLM_MAX_TOKENS,
-                timeout=timeout if timeout is not None else settings.LLM_TIMEOUT_S,
-            )
+            raw = await c.chat.completions.with_raw_response.create(**base_kwargs)
         except BaseException as exc:  # noqa: BLE001 — we re-raise after classification
             kind = classify(exc)
             if kind is ErrorKind.AUTH:

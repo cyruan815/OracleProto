@@ -18,6 +18,7 @@ from forecast_eval.tools import WEB_SEARCH_SCHEMA
 class _StubSettings:
     LLM_API_KEY: str = "sk-or-v1-TEST"
     LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
+    LLM_REASONING_MODEL_PATTERNS: list[str] = None  # type: ignore[assignment]
     LLM_TEMPERATURE: float = 0.7
     LLM_TOP_P: float = 1.0
     LLM_MAX_TOKENS: int = 128
@@ -33,6 +34,8 @@ class _StubSettings:
             self.LLM_BACKOFF_RATE_LIMIT_S = [0, 0, 0]
         if self.LLM_BACKOFF_SERVER_5XX_S is None:
             self.LLM_BACKOFF_SERVER_5XX_S = [0, 0, 0]
+        if self.LLM_REASONING_MODEL_PATTERNS is None:
+            self.LLM_REASONING_MODEL_PATTERNS = ["o1", "o3", "o4", "r1", "qwq"]
 
 
 def _success_body() -> dict[str, object]:
@@ -92,6 +95,33 @@ async def test_outbound_request_has_no_browsing_knobs() -> None:
     assert resp.usage.prompt_tokens == 12
     assert resp.usage.completion_tokens == 4
     assert resp.usage.reasoning_tokens == 0
+
+    # (4) non-reasoning model: temperature / top_p ARE sent
+    assert "temperature" in body
+    assert "top_p" in body
+
+
+@respx.mock
+async def test_reasoning_model_omits_sampling_params() -> None:
+    route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
+        return_value=httpx.Response(200, json=_success_body())
+    )
+    settings = _StubSettings()
+    client = _new_client(settings)
+
+    await chat(
+        model="deepseek/deepseek-r1",
+        messages=[{"role": "user", "content": "hi"}],
+        settings=settings,
+        client=client,
+    )
+
+    body = json.loads(route.calls.last.request.content.decode("utf-8"))
+    # "r1" matches LLM_REASONING_MODEL_PATTERNS → temperature/top_p must NOT be sent
+    assert "temperature" not in body
+    assert "top_p" not in body
+    # max_tokens still sent
+    assert body.get("max_tokens") == settings.LLM_MAX_TOKENS
 
 
 async def test_online_suffix_rejected_pre_flight() -> None:
