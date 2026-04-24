@@ -59,4 +59,19 @@ stderr and `logs/{run_id}.log`.
 
 ## Smoke test baseline
 
-_To be filled after first real-API smoke run (see task 11.3)._
+First real-API smoke on 2026-04-24 against `qwen3.6-plus-2026-04-02` (via
+dashscope OpenAI-compatible endpoint) + Tavily search, `SAMPLING_N=1`,
+`REACT_MAX_STEPS=10`, `REACT_MAX_SEARCH_CALLS=8`.
+
+| run_id | filter | cutoff | eligible | pass@1 | wall | avg latency | avg steps | avg tool calls | tokens (p/c/r) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `20260424-104322-35e4` | `--question-type binary_named` | 2026-04-02 | 1 | 1/1 (100%) | 68s | 67.5s | 2.0 | 3.0 | 5.5k / 3.4k / 2.9k |
+| `20260424-104547-252c` | `--question-type yes_no` | 2026-04-11 | 3 | 2/3 (66.7%) | 6m33s | 333.4s | 5.7 | 5.7 | 161k / 52.5k / 50.8k |
+
+Notes:
+- `skipped_training_cutoff` rows: 10 + 90; all cutoff rows persist without
+  calling the LLM, as expected.
+- `runs.finished_at` populated; `pass@1` computed as `correct / eligible`.
+- `messages_trace` is valid JSON (6 / 12–13 turns per sample); every
+  `search_calls` entry carries `end_date` injected from `q.end_time`.
+- 0 row-level errors across 4 live samples.
