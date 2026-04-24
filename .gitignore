@@ -86,3 +86,7 @@ results.db
 *.db-shm
 *.log
 *.sqlite3
+
+# Local Documentation
+openspec/
+tavily_doc/
