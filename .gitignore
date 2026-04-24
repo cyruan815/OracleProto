@@ -90,3 +90,5 @@ results.db
 # Local Documentation
 openspec/
 tavily_doc/
+CLAUDE.md
+Agent.md
