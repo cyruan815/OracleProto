@@ -23,6 +23,8 @@ conda activate forecast
 ```bash
 cp .env.example .env
 # Edit .env and fill LLM_API_KEY + TAVILY_API_KEY.
+# LLM_BASE_URL accepts any OpenAI-compatible endpoint (OpenRouter / 阿里百炼 /
+# OpenAI / DeepSeek / SiliconFlow / local vLLM — see .env.example comments).
 # Also adjust MODELS and MODEL_TRAINING_CUTOFFS for the models you want to
 # compare; every model you evaluate should have a cutoff declared so that
 # training-data leakage is filtered consistently.

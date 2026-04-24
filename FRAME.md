@@ -547,7 +547,9 @@ Forecast/
 # =============================================================
 
 # -------- LLM Endpoint (OpenAI-compatible) --------
-LLM_API_KEY=sk-or-v1-REPLACE_ME
+# LLM_BASE_URL 示例: OpenRouter / 阿里百炼 / OpenAI / DeepSeek / SiliconFlow / 本地 vLLM
+# 详见 .env.example 注释
+LLM_API_KEY=REPLACE_ME
 LLM_BASE_URL=https://openrouter.ai/api/v1
 
 # 要评测的模型列表, 逗号分隔 (笛卡尔积: 每个模型都会跑所有题目 × 所有 sample)
@@ -559,9 +561,9 @@ MODELS=openai/gpt-5,anthropic/claude-sonnet-4.5,google/gemini-2.5-pro,deepseek/d
 # 建议对每个参评模型都显式声明, 以保证评测公平
 MODEL_TRAINING_CUTOFFS=openai/gpt-5=2024-10-01,anthropic/claude-sonnet-4.5=2025-03-01,google/gemini-2.5-pro=2025-01-01,deepseek/deepseek-r1=2024-07-01
 
-# LLM 调用参数
-LLM_MAX_TOKENS=4096
-LLM_TIMEOUT_S=120
+# LLM 调用参数 (max_tokens 已给足 reasoning + output 预算)
+LLM_MAX_TOKENS=12000
+LLM_TIMEOUT_S=240
 LLM_TEMPERATURE=0.7
 LLM_TOP_P=1.0
 
@@ -569,8 +571,8 @@ LLM_TOP_P=1.0
 # (o-series / deepseek-r1 / qwq 等推理模型对自定义采样参数会直接报 400)
 LLM_REASONING_MODEL_PATTERNS=o1,o3,o4,r1,qwq
 
-# LLM 并发 & 重试 (与 OpenRouter 配套)
-LLM_MAX_CONCURRENCY=10
+# LLM 并发 & 重试
+LLM_MAX_CONCURRENCY=5
 LLM_RETRY_MAX=5
 # 不同错误类型的退避序列 (秒), 用完仍失败则跳过该 sample 并记 error
 LLM_BACKOFF_NETWORK_S=2,5,15,30,60
@@ -995,7 +997,7 @@ dependencies:
 conda env create -f environment.yml
 conda activate forecast
 cp .env.example .env
-# 编辑 .env 填入 LLM_API_KEY 和 TAVILY_API_KEY
+# 编辑 .env 填入 LLM_API_KEY 和 TAVILY_API_KEY (LLM_BASE_URL 可指任意 OpenAI 兼容 endpoint)
 python evaluation.py --question-type yes_no
 ```
 

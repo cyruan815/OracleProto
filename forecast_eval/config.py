@@ -78,11 +78,11 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     MODELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     MODEL_TRAINING_CUTOFFS: Annotated[dict[str, date], NoDecode] = Field(default_factory=dict)
-    LLM_MAX_TOKENS: int = 4096
-    LLM_TIMEOUT_S: int = 120
+    LLM_MAX_TOKENS: int = 12000
+    LLM_TIMEOUT_S: int = 240
     LLM_TEMPERATURE: float = 0.7
     LLM_TOP_P: float = 1.0
-    LLM_MAX_CONCURRENCY: int = 10
+    LLM_MAX_CONCURRENCY: int = 5
     LLM_RETRY_MAX: int = 5
     LLM_BACKOFF_NETWORK_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [2, 5, 15, 30, 60])
     LLM_BACKOFF_RATE_LIMIT_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [10, 30, 60, 120, 300])
