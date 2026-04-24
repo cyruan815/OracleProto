@@ -131,9 +131,21 @@ question.end_time = 2026-01-18
 
 可在 `.env` 改为 `0`（当天可见，更宽松）或 `-2`、`-3`（更保守）。项目统一以 `-1` 为基准，所有报表默认在 `-1` 下比较。
 
-### 3.3 原数据只读，结果自包含
+### 3.3 原数据只读，每次 run 独立成目录、每个模型独立成 DB
 
-`forecast_eval_set.db` 不动。`results.db` 独立文件，内部**复制 questions 表 + prompt_templates 表**，保证 `results.db` 单文件即可完整复盘和分析（详见 §5）。
+`forecast_eval_set.db` 不动。每次 `python evaluation.py` 启动都会在 `RUNS_ROOT`
+(默认 `./runs`) 下创建一个独立的 `{run_id}/` 子目录，内部结构：
+
+```
+{run_id}/
+  manifest.json     # run 级元信息 (run_id, sampling_n, models, filters, hashes...)
+  db/<model_slug>.db  # 每个参评模型一个 sqlite 文件, 内部自带 questions + prompt_templates 副本
+  analysis/         # 跑完后由 forecast_eval.analysis 生成的 CSV / MD / JSON
+  logs/{run_id}.log
+```
+
+DB 层只存**原始记录**，不做任何聚合/统计。pass@1、pass_any@N、majority 等指标
+由后置的 `analysis/` 过程单独计算并写回磁盘（详见 §5 / §11）。
 
 ### 3.4 严格匹配评分（字母集合层面）
 
@@ -362,19 +374,28 @@ labels  = [opts[ord(L) - ord('A')] for L in letters]
 
 ---
 
-## 5. 数据库设计 (`results.db`)
+## 5. 数据库设计 (`runs/{run_id}/db/<model_slug>.db`)
+
+每个 run × model 对应**一个独立的 sqlite 文件**。文件内部自带
+`questions` / `prompt_templates` 副本，便于单文件独立复盘。聚合/统计**不落库**，
+跑完由 `forecast_eval.analysis` 另写到 `analysis/` 目录。
 
 ### 5.1 schema
 
 ```sql
--- ① 复制源题库（让 results.db 自包含）
--- 字段名/含义与 forecast_eval_set 表一致, 加 imported_at 便于追溯
+-- ⓪ schema 版本表
+CREATE TABLE schema_version (
+    version    INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
+-- ① 源题库副本 (每个 model DB 各存一份, 便于自包含分发)
 CREATE TABLE questions (
     id            TEXT PRIMARY KEY,
     choice_type   TEXT NOT NULL CHECK (choice_type IN ('single','multi')),
     question_type TEXT NOT NULL CHECK (question_type IN ('yes_no','binary_named','multiple_choice')),
     event         TEXT NOT NULL,
-    options       TEXT NOT NULL,             -- JSON array, e.g. ["Yes","No"] / ["Golden Knights","Kings"] / [...]
+    options       TEXT NOT NULL,             -- JSON array
     answer        TEXT NOT NULL,             -- 字母逗号串: 'A' / 'A, B'
     end_time      TEXT NOT NULL,             -- YYYY-MM-DD
     imported_at   TEXT NOT NULL
@@ -382,66 +403,54 @@ CREATE TABLE questions (
 CREATE INDEX idx_questions_choice_type   ON questions(choice_type);
 CREATE INDEX idx_questions_question_type ON questions(question_type);
 
--- ② 复制 prompt 模板（不依赖源 metadata 文件）
--- 至少包含: agent_role, guidance, prompt_template, outcomes_block_rule,
---           yes_no_output_format, binary_named_output_format, multiple_choice_output_format
+-- ② prompt 模板副本
 CREATE TABLE prompt_templates (
-    key          TEXT PRIMARY KEY,
-    value        TEXT NOT NULL,
-    imported_at  TEXT NOT NULL
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    imported_at TEXT NOT NULL
 );
 
--- ③ 一次跑的元信息
-CREATE TABLE runs (
-    run_id                 TEXT PRIMARY KEY,
-    config_snapshot        TEXT NOT NULL,    -- .env 解析后的 JSON, **脱敏后**: API Key 类字段只存 provider 标识 + 前 4 位 + 长度 + sha256[:12], 不落明文
-    filters_snapshot       TEXT NOT NULL,    -- CLI 过滤结果: {"question_types":[...]|null, "choice_types":[...]|null, "question_ids":[...], "question_count": N}
-    source_db_hash         TEXT NOT NULL,    -- sha256(forecast_eval_set.db 文件二进制), 用于确认源数据未变
-    metadata_hash          TEXT NOT NULL,    -- sha256(dataset_metadata.features_json 规范化字符串), prompt 模板源版本
-    prompt_templates_hash  TEXT NOT NULL,    -- sha256(本次 run 实际使用的 prompt_templates 表 key/value 规范化串)
-    started_at             TEXT NOT NULL,
-    finished_at            TEXT
+-- ③ 该 DB 对应的 (run, model) 唯一元信息, 只有一行
+CREATE TABLE run_meta (
+    run_id                TEXT PRIMARY KEY,
+    model                 TEXT NOT NULL,
+    sampling_n            INTEGER NOT NULL,
+    config_snapshot       TEXT NOT NULL,   -- 脱敏后的 .env JSON
+    filters_snapshot      TEXT NOT NULL,   -- {"question_types":..., "choice_types":..., "question_ids":[...], "question_count":N}
+    source_db_hash        TEXT NOT NULL,
+    metadata_hash         TEXT NOT NULL,
+    prompt_templates_hash TEXT NOT NULL,
+    training_cutoff       TEXT,            -- 该模型的 cutoff (YYYY-MM-DD), 未声明时为 NULL
+    started_at            TEXT NOT NULL,
+    finished_at           TEXT
 );
 
--- ⓪ 简单的 schema 版本表, 用于未来迁移
-CREATE TABLE schema_version (
-    version      INTEGER PRIMARY KEY,
-    applied_at   TEXT NOT NULL
-);
-
--- ④ 每个 sample 一行
+-- ④ 宽表: 每个问题一行, 每个 sample 一组 s{i}_* 列
+-- 动态生成 14 × SAMPLING_N 列; 下方仅列示 SAMPLING_N=3 的形状
 CREATE TABLE run_results (
-    run_id      TEXT NOT NULL,
-    question_id TEXT NOT NULL,
-    model       TEXT NOT NULL,
-    sample_idx  INTEGER NOT NULL,            -- 0..N-1
+    question_id TEXT PRIMARY KEY,
+    user_prompt TEXT,                      -- 所有 sample 共用 (COALESCE 写入, 首样本胜出)
 
-    -- 答题结果（统一以"字母集合"视角存储, 与 question_type 无关）
-    final_answer_letters TEXT,               -- JSON sorted list: ["A","B"]; NULL if parse_ok=0
-    final_answer_raw     TEXT,               -- LLM 最终消息原文（含 \boxed{...}）
-    correct              INTEGER,            -- 0/1; NULL if parse_ok=0
-    parse_ok             INTEGER NOT NULL,   -- 0/1
+    s0_final_answer_letters TEXT,
+    s0_final_answer_raw     TEXT,
+    s0_correct              INTEGER,
+    s0_parse_ok             INTEGER,
+    s0_tool_calls_count     INTEGER,
+    s0_react_steps          INTEGER,
+    s0_prompt_tokens        INTEGER,
+    s0_completion_tokens    INTEGER,
+    s0_reasoning_tokens     INTEGER,
+    s0_latency_ms           INTEGER,
+    s0_messages_trace       TEXT,
+    s0_search_calls         TEXT,
+    s0_error                TEXT,
+    s0_created_at           TEXT,
 
-    -- 过程指标
-    tool_calls_count   INTEGER NOT NULL,
-    react_steps        INTEGER NOT NULL,
-    prompt_tokens      INTEGER,
-    completion_tokens  INTEGER,
-    reasoning_tokens   INTEGER,
-    latency_ms         INTEGER NOT NULL,
+    -- ...相同的 s1_* / s2_* 字段组...
 
-    -- 调试 / 溯源
-    user_prompt    TEXT,                     -- 拼接后传给 LLM 的 user message（便于复盘渲染结果）
-    messages_trace TEXT,                     -- 完整 messages JSON; WRITE_MESSAGES_TRACE=false 时 NULL
-    search_calls   TEXT,                     -- JSON list: [{query, end_date, n_results, published_dates}]
-    error          TEXT,                     -- 非 NULL 表示这次 sample 失败; 分类见 §9
-    created_at     TEXT NOT NULL,
-
-    PRIMARY KEY (run_id, question_id, model, sample_idx),
-    FOREIGN KEY (question_id) REFERENCES questions(id),
-    FOREIGN KEY (run_id)      REFERENCES runs(run_id)
+    FOREIGN KEY (question_id) REFERENCES questions(id)
 );
-CREATE INDEX idx_run_results_lookup ON run_results(run_id, model, question_id);
+CREATE INDEX idx_run_results_question ON run_results(question_id);
 ```
 
 连接初始化 PRAGMA（所有 sqlite3 连接都执行一遍）：
@@ -454,27 +463,29 @@ PRAGMA busy_timeout = 5000;      -- 多 reader 场景下避免 SQLITE_BUSY
 
 ### 5.2 字段写入约定
 
-| 字段                      | 来源                                                                                                  |
-| ------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `final_answer_letters`    | `parser.parse_answer(final_raw, q)` 返回的 `frozenset[str]`，写入前 `sorted()` + `json.dumps`         |
-| `final_answer_raw`        | LLM 最后一条 assistant message 的 `content` 全文                                                      |
-| `correct`                 | `frozenset(final_answer_letters) == frozenset(answer_letters_from_q)` → `int`；parse 失败时 `NULL`    |
-| `parse_ok`                | `final_answer_letters is not None`                                                                    |
-| `user_prompt`             | `prompts.render_user_prompt(q, templates)` 的返回值（每个 sample 同 q 渲染一致，存便于直接重放）      |
-| `messages_trace`          | 完整 `messages` 列表（含 system/user/assistant/tool）的 JSON。开 `WRITE_MESSAGES_TRACE=false` 时 NULL |
-| `search_calls`            | 每次 `web_search` 调用的元数据 list（query / end_date / n_results / published_dates）                 |
-| `error`                   | retry 用尽后的错误分类码；正常完成（含 refusal / parse fail）为 NULL                                  |
+| 字段                          | 来源                                                                                                    |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `s{i}_final_answer_letters`   | `parser.parse_answer(final_raw, q)` 返回的 `frozenset[str]`，写入前 `sorted()` + `json.dumps`           |
+| `s{i}_final_answer_raw`       | LLM 最后一条 assistant message 的 `content` 全文                                                        |
+| `s{i}_correct`                | `frozenset == frozenset` → `int`；parse 失败或无法判分时 `NULL`                                         |
+| `s{i}_parse_ok`               | `final_answer_letters is not None`                                                                      |
+| `user_prompt`                 | `prompts.render_user_prompt(q, templates)` 的返回值；每个问题渲染一次，首样本写入后 COALESCE 保留       |
+| `s{i}_messages_trace`         | 完整 `messages` 列表 JSON；`WRITE_MESSAGES_TRACE=false` 时 NULL                                         |
+| `s{i}_search_calls`           | 每次 `web_search` 调用的元数据 list（query / end_date / n_results / published_dates）                   |
+| `s{i}_error`                  | retry 用尽后的错误分类码；正常完成（含 refusal / parse fail）为 NULL                                    |
+| `s{i}_created_at`             | 写入时刻的 UTC ISO-8601；作为"该 sample 槽是否被填过"的唯一信号                                         |
 
 ### 5.3 断点续跑
 
-跑之前执行：
+对每个 sample slot 独立判定：
 ```sql
-SELECT question_id, model, sample_idx
-FROM run_results
-WHERE run_id = ?
-  AND (error IS NULL OR error = 'skipped_training_cutoff');
+-- 对 i ∈ 0..N-1 各执行一次:
+SELECT question_id FROM run_results
+ WHERE s{i}_created_at IS NOT NULL
+   AND (s{i}_error IS NULL OR s{i}_error = 'skipped_training_cutoff');
 ```
-将查到的 `(question_id, model, sample_idx)` 集合从任务队列中剔除。
+结果合并成 `set[(question_id, sample_idx)]`，从任务队列中剔除。因为每个模型
+自己的 DB 里只有一个 run，`run_id` 不再进入筛选（`run_meta` 单行决定）。
 
 状态分类：
 | `error` 值                       | 含义                | 下次续跑是否重试 |
@@ -486,17 +497,20 @@ WHERE run_id = ?
 | `'content_policy'`               | provider 拒绝       | 可选：默认重试一次并覆盖原行 |
 
 规则：
-- 同 `run_id` 重跑 = 续跑
-- 换 `run_id` = 全新一跑
-- 需要覆盖（比如 content_policy 重试成功）时走 `INSERT OR REPLACE`，由 `(run_id, question_id, model, sample_idx)` 主键天然兜底
+- 同 `run_id` 重跑 = 续跑，会写入既有的 `runs/{run_id}/db/<slug>.db`
+- 换 `run_id` = 全新一跑，会创建新的 `runs/{new_run_id}/` 目录
+- 覆盖语义由 `INSERT ... ON CONFLICT(question_id) DO UPDATE SET s{i}_* = excluded.s{i}_*`
+  兜底，`user_prompt` 用 `COALESCE` 保留首样本值
 
 ### 5.4 并发写入策略
 
-- 启动时执行 §5.1 末尾的 PRAGMA 一组
-- **单 async writer task**（不是 thread）：所有 async worker 通过 `asyncio.Queue` 把结果塞给同一个 writer task
-- Writer task 每 `DB_COMMIT_BATCH` 条或 1 秒 flush 一次，短事务；单条 sqlite 写入用 `await asyncio.to_thread(conn.execute, ...)` 避免阻塞事件循环
-- 若坚持使用真正的 writer thread，必须改用 `queue.Queue`（线程安全）或 `janus.Queue`；`asyncio.Queue` 不是跨线程安全的，不要在文档基础上直接拿它跨线程消费
-- SQLite 单写入者 + WAL 已能并发 reader，无需多 writer
+- 每个 DB 连接启动时执行 PRAGMA `journal_mode=WAL / foreign_keys=ON / synchronous=NORMAL / busy_timeout=5000`
+- **每个模型一个 async writer task**：runner 为每个模型 DB 各开一个
+  `forecast_eval.db.AsyncWriter`，所有 worker 的结果通过该模型对应的 writer 入队
+- Writer task 每 `DB_COMMIT_BATCH` 条或 1 秒 flush 一次，短事务；sqlite 写入走
+  `await asyncio.to_thread(...)` 避免阻塞 event loop
+- 单模型 DB 只有一个 writer、多个 reader，WAL 下并发足够
+- 若改为跨线程消费，必须换成 `queue.Queue` / `janus.Queue`；`asyncio.Queue` 不是跨线程安全
 
 ---
 
@@ -510,30 +524,45 @@ Forecast/
 ├── environment.yml                # conda env 定义
 ├── README.md
 ├── FRAME.md                       # 本文档
-├── evaluation.py                  # 主入口: parse CLI flags, 调 runner.run()
-├── forecast_eval_set.db           # 原数据, 只读, **纳入 Git 管理**(方便随仓库分发 + 保证 source_db_hash 在 CI 可复现)
-├── results.db                     # 评测结果, 运行时创建 (gitignored)
-├── logs/                          # loguru 落盘
-│   └── {run_id}.log
+├── evaluation.py                  # 主入口: parse CLI flags -> runner.run -> analysis.run_analysis
+├── forecast_eval_set.db           # 原数据, 只读, **纳入 Git 管理** (确保 source_db_hash 可复现)
+├── runs/                          # 所有评测输出根目录 (gitignored)
+│   └── {run_id}/
+│       ├── manifest.json          # run 级元信息 + model_files 映射
+│       ├── db/
+│       │   └── {model_slug}.db    # 每个模型一个 sqlite; 自带 questions + prompt_templates 副本
+│       ├── analysis/              # 跑完后生成的统计产物
+│       │   ├── per_model_summary.csv / .md
+│       │   ├── per_model_by_question_type.csv
+│       │   ├── per_model_by_choice_type.csv
+│       │   ├── error_breakdown.csv
+│       │   └── overall.json
+│       └── logs/{run_id}.log
 ├── forecast_eval/
 │   ├── __init__.py
-│   ├── config.py                 # pydantic-settings 从 .env 读 (含 MODEL_TRAINING_CUTOFFS 解析)
-│   ├── db.py                     # SQLite WAL + PRAGMA + 单 async writer task + schema migration + hash 计算
-│   ├── loader.py                 # 从 forecast_eval_set.db 同步 questions + prompt_templates
+│   ├── config.py                 # pydantic-settings; RUNS_ROOT + MODEL_TRAINING_CUTOFFS 解析
+│   ├── db.py                     # per-model 宽表 schema + AsyncWriter + hash / 脱敏
+│   ├── loader.py                 # 从 forecast_eval_set.db 同步 questions + prompt_templates 到每个 DB
 │   ├── prompts.py                # 按 question_type 渲染 user message
-│   ├── llm.py                    # OpenRouter client + retry 分层 (明确禁用 provider-native browsing)
+│   ├── llm.py                    # OpenAI-compatible client + retry 分层 (明确禁用 provider-native browsing)
 │   ├── search.py                 # Tavily + end_date 注入 + retry
 │   ├── tools.py                  # web_search schema (LLM 可见部分, 不含日期)
 │   ├── react.py                  # ReAct loop (一个 sample)
 │   ├── parser.py                 # \boxed{} 解析 + 字母集合归一 + 严格匹配
 │   ├── errors.py                 # 错误分类 + 退避策略 (含 skipped_training_cutoff)
-│   └── runner.py                 # 任务编排 + 并发 + 进度 + 训练截止过滤
+│   ├── runner.py                 # 任务编排 + 多模型 writer + 训练截止过滤
+│   └── analysis.py               # 后置统计 (读 DB -> CSV / MD / JSON), 可独立 `python -m` 调用
 └── tests/                        # 单元测试 (§17)
     ├── test_prompts.py
     ├── test_parser.py
     ├── test_search.py
+    ├── test_db.py
+    ├── test_errors.py
+    ├── test_llm_no_browsing.py
     ├── test_runner_resume.py
-    └── test_training_cutoff.py
+    ├── test_training_cutoff.py
+    ├── test_analysis.py
+    └── test_smoke_dry_run.py
 ```
 
 ---
@@ -607,7 +636,8 @@ RESUME=true
 
 # -------- Database --------
 SOURCE_DB=./forecast_eval_set.db
-RESULTS_DB=./results.db
+# 每次评测会在 RUNS_ROOT 下创建独立 {run_id}/ 目录 (db/, analysis/, logs/)
+RUNS_ROOT=./runs
 DB_COMMIT_BATCH=10
 # false 不存完整 messages trace, 可减小 db 80% 体积
 WRITE_MESSAGES_TRACE=true
@@ -624,9 +654,10 @@ LOG_DIR=./logs
 - **`LLM_MAX_CONCURRENCY` vs `SEARCH_MAX_CONCURRENCY`**：分开控制，因为 Tavily 的 rate limit 通常比 LLM 紧。
 - **`LLM_BACKOFF_*` 三条退避序列**：对应不同错误类型（见 §9），序列长度决定最大重试次数。
 - **`TAVILY_END_DATE_OFFSET_DAYS`**：项目默认 `-1`（前一天，推荐的严格默认值）。数值越小越保守；`0` 仅调试用。所有报表默认在 `-1` 下比较。
-- **`RUN_ID` 自动生成格式**：`YYYYMMDD-HHMMSS-xxxx`，例如 `20260424-120344-a7k3`，`ls` 天然按时间排序。
+- **`RUN_ID` 自动生成格式**：`YYYYMMDD-HHMMSS-xxxx`，例如 `20260424-120344-a7k3`，`ls` 天然按时间排序；同时作为 `RUNS_ROOT/{run_id}/` 目录名。
+- **`RUNS_ROOT`**：评测产物根目录（默认 `./runs`），每个 run 占一个子目录。
 - **`WRITE_MESSAGES_TRACE`**：`true` 存完整 messages JSON（方便 debug 但 db 变大）；`false` 只存关键字段。
-- **脱敏**：`runs.config_snapshot` 写入前 `config.py` 必须对 `LLM_API_KEY` / `TAVILY_API_KEY` 等敏感字段执行 redaction（只保留前 4 位 + 长度 + `sha256[:12]`），敏感明文一律不落库。
+- **脱敏**：`run_meta.config_snapshot` 写入前 `config.py` 必须对 `LLM_API_KEY` / `TAVILY_API_KEY` 等敏感字段执行 redaction（只保留前 4 位 + 长度 + `sha256[:12]`），敏感明文一律不落库。
 
 ---
 
@@ -643,8 +674,9 @@ LOG_DIR=./logs
 | `react.py`   | 一次 ReAct 推理 = 一个 sample，循环到无 tool_call 或超限                                                        | `run_react(q, model, sample_idx, cfg) -> SampleResult`                                                         |
 | `parser.py`  | 按 `question_type` 解析 `\boxed{...}` → 字母 `frozenset[str]`（yes_no: Yes/No→A/B；binary_named: label→letter；mc: split letters）；与 `q.answer` 解析出的字母集合做严格 frozenset 相等判对 | `parse_answer(text: str, q: Question) -> frozenset[str] \| None`, `parse_gt(answer: str) -> frozenset[str]`, `is_correct(pred, gt) -> bool` |
 | `errors.py`  | 把 httpx/openai 异常映射到错误分类；给出等待秒数                                                                | `classify(exc) -> ErrorKind`, `backoff_seconds(kind, attempt)`                                                 |
-| `db.py`      | 连接管理、WAL + PRAGMA、schema migration、单 async writer task、断点续跑查询、prompt_templates 写入、source/metadata/templates hash 计算、config 脱敏 | `DB.enqueue_result(row)`, `DB.load_completed(run_id)`, `DB.register_run(...)`, `DB.upsert_prompt_templates(d)`, `DB.compute_hashes()` |
-| `runner.py`  | 任务编排：笛卡尔积 → 去重 → **按 `MODEL_TRAINING_CUTOFFS` 过滤并落 skipped_training_cutoff 行** → asyncio 并发 → 进度 log | `run(cfg, filters: QFilter)`                                                                                   |
+| `db.py`      | 连接管理、WAL + PRAGMA、**per-model 宽表 schema 动态生成**（`init_schema(conn, sampling_n)` 建 `s{i}_*` 列）、`register_run_meta` / `finish_run_meta`、`AsyncWriter` 按 `(question_id, sample_idx)` UPSERT、`load_completed_samples`、source/metadata/templates hash 计算、config 脱敏、model slug 安全化 | `init_schema(conn, sampling_n)`, `AsyncWriter.enqueue_result`, `load_completed_samples`, `register_run_meta`, `upsert_sample_sync`, `model_slug_safe`, `compute_*_hash` |
+| `runner.py`  | 任务编排：笛卡尔积 → 去重（per-model completed 集）→ **按 `MODEL_TRAINING_CUTOFFS` 过滤并落 skipped_training_cutoff 行到对应 model DB** → asyncio 并发 → 进度 log → 收尾 `finish_run_meta` | `run(settings, filters, questions, templates, run_id, conns: dict[model, sqlite3.Connection]) -> RunStats`, `build_task_plan(...)` |
+| `analysis.py`| 后置统计：扫描 `runs/{run_id}/db/*.db` → 计算 §11 全部指标 → 写 `analysis/` CSV / MD / JSON。**不改 DB**。由 `evaluation.py` 自动调用，或独立 `python -m forecast_eval.analysis runs/{run_id}` 重刷 | `run_analysis(run_dir: Path) -> list[Path]` |
 
 `QFilter` 是 dataclass，包含 `question_types: set[str] | None` 和 `choice_types: set[str] | None`，`None` 表示不过滤。
 
@@ -868,7 +900,10 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
 
 ## 11. 评测指标定义
 
-一个 `(run_id, question_id, model)` 下有 N 个 sample（`N = SAMPLING_N`）。统计时**先排除** `error="skipped_training_cutoff"` 的行（它们是被剔除的题，不是模型答错）：
+指标**完全由 `forecast_eval.analysis` 在 run 结束后计算**，不存 DB。产物落在
+`runs/{run_id}/analysis/` 下（CSV / MD / JSON）。以下定义与源码实现一致。
+
+一个 `(question_id, model)` 下有 N 个 sample（`N = SAMPLING_N`）。统计时**先排除** `s{i}_error="skipped_training_cutoff"` 的行（它们是被剔除的题，不是模型答错）：
 
 | 指标                            | 定义                                                                              | 说明                    |
 | ------------------------------- | --------------------------------------------------------------------------------- | ----------------------- |
@@ -885,7 +920,15 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
 
 > 指标命名变更：原文档里的 `pass@3 = sum(correct)≥3` 与业界通用的 `pass@k` 语义不一致（后者是 "any correct in k"），容易误读。现在明确用 `pass_any@N`（= any）与 `at_least_k_correct@N`（= 阈值）两个独立命名。
 
-报表切片维度：`model × question_type × choice_type`。具体报表生成由用户后续独立设计。
+报表切片维度：`model × question_type × choice_type`。产出表：
+
+| 文件                              | 内容                                                                              |
+| --------------------------------- | --------------------------------------------------------------------------------- |
+| `per_model_summary.csv` / `.md`   | 每模型一行，含上表全部指标                                                        |
+| `per_model_by_question_type.csv`  | `model × question_type` 切片，同指标集                                            |
+| `per_model_by_choice_type.csv`    | `model × choice_type` 切片，同指标集                                              |
+| `error_breakdown.csv`             | `model × error_kind` 计数 + 样本占比（含 `<ok>` 与 `skipped_training_cutoff`）    |
+| `overall.json`                    | 全部切片的结构化聚合，方便二次处理                                                |
 
 ---
 
@@ -905,33 +948,41 @@ python evaluation.py --choice-type single
 
 # 组合过滤 (AND): 仅跑 multiple_choice 中的多选题 (37 道)
 python evaluation.py --question-type multiple_choice --choice-type multi
-```
 
-**没有其他参数**。所有可调项全部走 `.env`。
+# 不在 run 结束时生成 analysis/ (原始 DB 仍会落在 db/)
+python evaluation.py --skip-analysis
+
+# 独立重刷 analysis/ (不改 DB)
+python -m forecast_eval.analysis runs/{run_id}
+```
 
 `--question-type` 取值：`yes_no` / `binary_named` / `multiple_choice`，可重复，不传 = 不限制。
 `--choice-type`   取值：`single` / `multi`，可重复，不传 = 不限制。
+除 `--skip-analysis` 以外，所有可调项仍走 `.env`。
 
 ### 12.2 流程
 
 ```
-1. argparse 解析 --question-type / --choice-type, 组装为 QFilter
-2. Settings.from_env() 加载并校验 .env (含 MODEL_TRAINING_CUTOFFS)
-3. 计算 source_db_hash / metadata_hash, 生成或复用 run_id
-4. loader.sync_prompt_templates() 把模板平铺到 results.db.prompt_templates
-   → 计算 prompt_templates_hash
-5. loader.sync_questions(filter) 从 forecast_eval_set.db 同步到 results.db.questions
-6. register_run: 写 runs 行 (含 filters_snapshot / 三个 hash / 脱敏后的 config_snapshot)
-7. db.load_completed(run_id) 查出已完成集合 (含 skipped_training_cutoff)
-8. runner.run(cfg, filter) 启动 asyncio event loop
-   a. 生成笛卡尔积: questions × MODELS × range(SAMPLING_N)
-   b. 剔除步骤 7 已完成的 (question_id, model, sample_idx)
-   c. §3.9 过滤: 对 MODEL_TRAINING_CUTOFFS 中声明的模型, 将 q.end_time <= cutoff 的
-      (q, model, idx) 直接写 skipped_training_cutoff 行, 不入 LLM 任务队列
+1. argparse 解析 --question-type / --choice-type / --skip-analysis, 组装为 QFilter
+2. Settings() 加载并校验 .env (含 MODEL_TRAINING_CUTOFFS + RUNS_ROOT)
+3. 生成或复用 run_id -> 确定 run_dir = RUNS_ROOT/{run_id}; 建 db/ / analysis/ / logs/
+4. 计算 source_db_hash / metadata_hash / prompt_templates_hash
+5. 对每个 MODELS[i]:
+   a. open conn = RUNS_ROOT/{run_id}/db/{safe_slug(model)}.db
+   b. db.init_schema(conn, SAMPLING_N)  # 动态建 s{i}_* 列
+   c. loader.sync_prompt_templates(src, conn) / loader.sync_questions(src, conn, filter)
+   d. db.register_run_meta(conn, run_id=..., model=..., hashes=..., training_cutoff=...)
+6. 写 manifest.json (run_id, models, model_files, sampling_n, filters, hashes, started_at)
+7. runner.run(..., conns={model: conn, ...}) 启动 asyncio event loop
+   a. 对每个模型 db.load_completed_samples(conn, SAMPLING_N) 作为 resume 基准
+   b. 生成笛卡尔积: questions × MODELS × range(SAMPLING_N); 扣除 resume 集
+   c. §3.9 过滤: 把 q.end_time <= cutoff 的 (q, model, idx) 直接写 skipped_training_cutoff 行
+      到对应 model 的 writer, 不入 LLM 任务队列
    d. 剩余任务: Semaphore 限流 (LLM / Search 各一个) 并发
-   e. 每条完成 → writer queue → 批量 commit
+   e. 每条完成 → 路由到该模型的 writer → 批量 UPSERT s{i}_* 列
    f. 每完成一条打一行 log: [x/xx] q=.. qt=.. ct=.. model=.. idx=.. correct=..
-9. runs.finished_at 更新, 退出
+8. 每个模型 db.finish_run_meta(conn, run_id); 收尾 manifest.finished_at
+9. 除非 --skip-analysis: 调用 forecast_eval.analysis.run_analysis(run_dir), 写 analysis/
 ```
 
 ---
@@ -1014,23 +1065,26 @@ python evaluation.py --question-type yes_no
 7. **Prompt 拼接由 `prompts.py` 完成**：从 `dataset_metadata` 拉模板 → 按 `question_type` 渲染 `outcomes_block` 与 `output_format`（binary_named 时替换 `<options[i]>` 占位符）；>26 选项走源数据 ASCII 续接兼容模式（§3.7 警告）
 8. **评测 = 字母集合 frozenset 严格相等**，漏选/多选都算错
 9. **Parse 失败 ≠ error**，单独统计 refusal / format_failure rate
-10. **多模型一次 run 笛卡尔积**，通过 `run_id` 断点续跑；`runs` 表记录 `filters_snapshot` + `source_db_hash` + `metadata_hash` + `prompt_templates_hash` + **脱敏**后的 `config_snapshot`（API Key 明文不落库）
+10. **多模型一次 run 笛卡尔积**，通过 `run_id` 断点续跑；每个模型一个 DB，`run_meta`
+    单行记录 `filters_snapshot` + `source_db_hash` + `metadata_hash` + `prompt_templates_hash`
+    + `training_cutoff` + **脱敏**后的 `config_snapshot`（API Key 明文不落库）
 11. **Auth 错误整个 run 停止**；其他错误按退避分层重试，retry 用完 skip + 记 `error`
 12. **Content policy violation 不重试**，直接标记
-13. **所有灵活参数在 `.env`**，CLI 仅 `--question-type` / `--choice-type` 两个过滤 flag
-14. **主入口 `evaluation.py`**，跑完进 `results.db` 结束；不做报表（后续独立设计）
+13. **所有灵活参数在 `.env`**，CLI 仅 `--question-type` / `--choice-type` / `--skip-analysis`
+14. **主入口 `evaluation.py`**：创建 `RUNS_ROOT/{run_id}/`、跑 runner、跑 analysis（除非 `--skip-analysis`）
 15. **Conda + Python 3.12 + loguru**，进度 `[x/xx]` 打 log
-16. **SQLite WAL + `PRAGMA foreign_keys=ON` + 单 async writer task**，避免并发写入锁竞争；不用跨线程 `asyncio.Queue`
-17. **`results.db` 自包含**：内置 `questions` + `prompt_templates` 副本，可独立分发与复盘渲染
+16. **SQLite WAL + `PRAGMA foreign_keys=ON` + 每模型一个 async writer task**，避免并发写入锁竞争
+17. **每个 model DB 自包含**：内置 `questions` + `prompt_templates` 副本 + `run_meta`，可独立分发与复盘
 18. **指标命名**：业界 `pass@k` 对应本项目 `pass_any@N`；原阈值口径改名 `at_least_k_correct@N`
+19. **记录与分析拆开**：DB 里只存原始 sample 记录；pass@1 / pass_any@N / majority / parse_failure / cutoff_skip 等全部由 `analysis.py` 后置计算，写到 `analysis/` 下的 CSV / MD / JSON
 
 ---
 
 ## 16. 待落地模块顺序（建议）
 
 1. `environment.yml` + `.env.example` + `.gitignore`
-2. `forecast_eval/config.py`（Settings 类）
-3. `forecast_eval/db.py`（schema + writer thread + resume 查询 + prompt_templates 表）
+2. `forecast_eval/config.py`（Settings 类，含 `RUNS_ROOT`）
+3. `forecast_eval/db.py`（per-model 宽表 schema + `AsyncWriter` + resume 查询 + prompt_templates 表 + model_slug_safe）
 4. `forecast_eval/loader.py`（同步 questions + prompt_templates）
 5. `forecast_eval/prompts.py`（按 question_type 渲染 user message，**单元测试覆盖三种类型**）
 6. `forecast_eval/parser.py`（`\boxed{}` 解析 + 字母集合归一 + 严格匹配，**单元测试覆盖三种类型 + edge case**）
@@ -1039,8 +1093,9 @@ python evaluation.py --question-type yes_no
 9. `forecast_eval/tools.py`（schema + execute_tool_call）
 10. `forecast_eval/llm.py`（OpenRouter client + retry）
 11. `forecast_eval/react.py`（单 sample ReAct loop）
-12. `forecast_eval/runner.py`（编排 + 并发 + 进度）
-13. `evaluation.py`（main）
+12. `forecast_eval/runner.py`（编排 + 并发 + 多模型 writer + 进度）
+13. `forecast_eval/analysis.py`（后置统计, 读 DB -> CSV / MD / JSON）
+14. `evaluation.py`（main, 建目录 + register_run_meta + runner + analysis）
 
 先用 `--question-type yes_no` + `MODELS=openai/gpt-4o-mini` + `SAMPLING_N=1` 跑通 smoke test（93 道，最便宜的题型），验证 `prompts.render_user_prompt` 输出与 `parser.parse_answer` 归一无误后，再放开完整评测。
 
@@ -1050,20 +1105,21 @@ python evaluation.py --question-type yes_no
 
 评测单次成本较高（322 题 × 模型数 × N samples），测试先站稳能省下大量 API 费用。所有测试 **不联网**、**不烧 API**：Tavily / OpenRouter 均以 fixture 或 mock 替身存在。
 
-| 测试文件                    | 覆盖对象              | 关键用例                                                                                      |
-| --------------------------- | --------------------- | --------------------------------------------------------------------------------------------- |
-| `test_prompts.py`           | `prompts.py`          | ① `yes_no` / `binary_named` / `multiple_choice`（≤26 选项）三种模板渲染 snapshot；② `binary_named` 占位符替换正确；③ `multiple_choice` >26 选项（用数据库里真实的 4 道题做 fixture）outcomes_block 标签准确且可在 markdown 中保留 |
-| `test_parser.py`            | `parser.py`           | ① 三种题型的 `\boxed{}` 正解路径；② 多 `\boxed{}` 取最后一个；③ 大小写、空格、逗号/空格分隔混排；④ 非法字母越界；⑤ >26 选项 label↔letter round-trip；⑥ `parse_gt` 对 `"A, B"` 解析；⑦ 软性拒绝 → None 不报错 |
-| `test_search.py`            | `search.py` + `tools.py` | ① `web_search` schema LLM 可见字段 **不含** `end_date`；② `tavily_search` 注入的 `end_date = q.end_time + OFFSET`（mock httpx）；③ Tavily 报错走 `SEARCH_BACKOFF_S` 重试；④ 重试用完后返回错误 payload 而不抛 |
-| `test_db.py`                | `db.py`               | ① schema 建表 + PRAGMA 生效（含 `foreign_keys=ON`）；② `source_db_hash` / `metadata_hash` / `prompt_templates_hash` 计算稳定；③ `config_snapshot` 脱敏 API Key 明文不出现；④ `INSERT OR REPLACE` 主键覆盖语义 |
-| `test_runner_resume.py`     | `runner.py`           | ① 同 `run_id` 已完成行被剔除；② `error='network'` 的行会被重试；③ `error='skipped_training_cutoff'` 的行 **不**被重试；④ 换 `run_id` = 全新跑 |
-| `test_training_cutoff.py`   | §3.9 过滤逻辑         | ① `q.end_time <= cutoff` 的 `(q, model)` 全部 N samples 都写 skipped_training_cutoff；② 未在 `MODEL_TRAINING_CUTOFFS` 声明的模型不过滤；③ 跨日期边界（`end_time == cutoff`）判定正确（当前规则：`≤` 即跳） |
-| `test_llm_no_browsing.py`   | `llm.py`              | mock OpenRouter 客户端，断言 `chat(...)` 发出的 payload 里**没有** `plugins`、`tools` 里没有 provider-native web_search、model 名字不以 `:online` 结尾 |
-| `test_errors.py`            | `errors.py`           | 各类 `httpx` / OpenAI 异常 → 正确 `ErrorKind`；`Retry-After` header 优先于默认退避                                                                  |
-| `test_smoke_dry_run.py`     | 端到端 dry-run        | 用 httpx stub 替换 OpenRouter + Tavily，跑 3 道题 × 1 模型 × 1 sample，验证 `results.db` 字段齐全、`messages_trace` 格式正确、`search_calls` 记录 `end_date` |
+| 测试文件                    | 覆盖对象              | 关键用例                                                                                                                                                                                                                |
+| --------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test_prompts.py`           | `prompts.py`          | ① `yes_no` / `binary_named` / `multiple_choice`（≤26 选项）三种模板渲染 snapshot；② `binary_named` 占位符替换正确；③ `multiple_choice` >26 选项（用数据库里真实的 4 道题做 fixture）outcomes_block 标签准确                  |
+| `test_parser.py`            | `parser.py`           | ① 三种题型的 `\boxed{}` 正解路径；② 多 `\boxed{}` 取最后一个；③ 大小写、空格、逗号/空格分隔混排；④ 非法字母越界；⑤ >26 选项 label↔letter round-trip；⑥ `parse_gt` 对 `"A, B"` 解析；⑦ 软性拒绝 → None 不报错               |
+| `test_search.py`            | `search.py` + `tools.py` | ① `web_search` schema LLM 可见字段 **不含** `end_date`；② `tavily_search` 注入的 `end_date = q.end_time + OFFSET`；③ Tavily 报错走 `SEARCH_BACKOFF_S` 重试；④ 重试用完后返回错误 payload 而不抛                             |
+| `test_db.py`                | `db.py`               | ① per-model schema 按 `sampling_n` 动态建 `s{i}_*` 列 + PRAGMA；② schema `N` mismatch 时 fail-fast；③ `model_slug_safe` 规则；④ hash 计算稳定；⑤ `config_snapshot` 脱敏；⑥ UPSERT 按 `(qid, sample_idx)` 覆盖；⑦ `AsyncWriter` 分桶批量提交 |
+| `test_runner_resume.py`     | `runner.py`           | ① `load_completed_samples` 排除 retryable error；② `build_task_plan` 按 per-model completed 去重；③ 未在 `completed` 中声明的模型默认空集（全部入队）                                                                    |
+| `test_training_cutoff.py`   | §3.9 过滤逻辑         | ① `q.end_time <= cutoff` 全部 N samples 都写 skipped_training_cutoff；② 未声明 cutoff 的模型不过滤；③ resume 优先于 cutoff；④ 写入后 `load_completed_samples` 命中                                                       |
+| `test_llm_no_browsing.py`   | `llm.py`              | mock 客户端断言请求 payload 里**没有** `plugins`、`tools` 里没有 provider-native web_search、model 名字不以 `:online` 结尾                                                                                              |
+| `test_errors.py`            | `errors.py`           | 各类 `httpx` / OpenAI 异常 → 正确 `ErrorKind`；`Retry-After` header 优先于默认退避                                                                                                                                      |
+| `test_analysis.py`          | `analysis.py`         | ① 手工造宽表 fixture；② pass@1 / pass_any@N / ≥majority / ≥all / majority_vote / parse_failure / error_rate / cutoff_skip 数值正确；③ `overall.json` 与 CSV 对齐；④ `error_breakdown.csv` 汇总                           |
+| `test_smoke_dry_run.py`     | 端到端 dry-run        | 用 httpx stub 替换 OpenRouter + Tavily，跑 3 道题 × 1 模型 × 1 sample，验证宽表 `s0_*` 字段齐全、`messages_trace` 合法 JSON、`search_calls` 记录 `end_date`                                                               |
 
 运行：
 ```bash
 pytest tests/ -q
 ```
-CI 最低要求：`test_prompts.py` / `test_parser.py` / `test_training_cutoff.py` / `test_llm_no_browsing.py` 四项必须绿灯（核心语义 + 安全边界）。
+CI 最低要求：`test_prompts.py` / `test_parser.py` / `test_training_cutoff.py` / `test_llm_no_browsing.py` / `test_analysis.py` 五项必须绿灯（核心语义 + 安全边界 + 统计正确性）。

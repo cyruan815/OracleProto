@@ -82,6 +82,7 @@ Thumbs.db
 
 # Local databases and logs
 logs/
+runs/
 results.db
 results.db-*
 *.db-wal
