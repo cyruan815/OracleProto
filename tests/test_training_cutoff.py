@@ -43,7 +43,7 @@ def test_cutoff_skips_produce_rows_without_running_llm() -> None:
     todo, cutoff_rows, stats = build_task_plan(
         questions=questions,
         settings=settings,
-        completed=set(),
+        completed={"m/cutoff": set(), "m/free": set()},
         run_id="run-1",
     )
 
@@ -54,15 +54,19 @@ def test_cutoff_skips_produce_rows_without_running_llm() -> None:
     # m/free runs all three questions, and m/cutoff runs only q-late
     assert stats.planned == (3 * 2) + (1 * 2)
 
-    cutoff_keys = {(r["question_id"], r["model"], r["sample_idx"]) for r in cutoff_rows}
+    # cutoff_rows is per-model: only m/cutoff has rows
+    assert cutoff_rows["m/free"] == []
+    cutoff_keys = {
+        (r["question_id"], r["sample_idx"]) for r in cutoff_rows["m/cutoff"]
+    }
     expected_cutoff = {
-        ("q-early", "m/cutoff", 0), ("q-early", "m/cutoff", 1),
-        ("q-on", "m/cutoff", 0), ("q-on", "m/cutoff", 1),
+        ("q-early", 0), ("q-early", 1),
+        ("q-on", 0), ("q-on", 1),
     }
     assert cutoff_keys == expected_cutoff
 
     # Rows must carry the required signal fields
-    for row in cutoff_rows:
+    for row in cutoff_rows["m/cutoff"]:
         assert row["error"] == "skipped_training_cutoff"
         assert row["parse_ok"] == 0
         assert row["correct"] is None
@@ -90,43 +94,49 @@ def test_model_without_cutoff_runs_every_question() -> None:
     todo, cutoff_rows, stats = build_task_plan(
         questions=questions,
         settings=settings,
-        completed=set(),
+        completed={"m/free": set()},
         run_id="run-1",
     )
     assert stats.skipped_cutoff == 0
-    assert not cutoff_rows
+    assert cutoff_rows == {"m/free": []}
     assert stats.planned == len(questions) * settings.SAMPLING_N
 
 
 def test_resume_wins_over_cutoff() -> None:
-    """An already-completed row must NOT be re-written as skipped_cutoff."""
+    """An already-completed sample must NOT be re-written as skipped_cutoff."""
     settings = _StubSettings()
     questions = [_q("q-early", "2025-01-15")]
-    completed = {("q-early", "m/cutoff", 0)}
+    completed = {
+        "m/cutoff": {("q-early", 0)},
+        "m/free": set(),
+    }
     todo, cutoff_rows, stats = build_task_plan(
         questions=questions,
         settings=settings,
         completed=completed,
         run_id="run-1",
     )
-    cutoff_keys = {(r["question_id"], r["model"], r["sample_idx"]) for r in cutoff_rows}
-    assert ("q-early", "m/cutoff", 0) not in cutoff_keys
+    cutoff_keys = {(r["question_id"], r["sample_idx"]) for r in cutoff_rows["m/cutoff"]}
+    assert ("q-early", 0) not in cutoff_keys
     # The other sample_idx for the same (q, model) still gets skipped
-    assert ("q-early", "m/cutoff", 1) in cutoff_keys
+    assert ("q-early", 1) in cutoff_keys
 
 
 def test_cutoff_rows_persist_through_writer(tmp_path: Path) -> None:
-    """Smoke: actually flush a cutoff row into results.db via _insert_rows_sync."""
+    """Smoke: actually flush a cutoff row into a per-model DB."""
     conn = dbmod.connect(tmp_path / "r.db")
-    dbmod.init_schema(conn)
-    dbmod.register_run(
+    dbmod.init_schema(conn, sampling_n=2)
+    dbmod.register_run_meta(
         conn,
         run_id="run-1",
+        model="m/cutoff",
+        sampling_n=2,
         filters_snapshot={},
         config_snapshot={},
         source_db_hash="a" * 64,
         metadata_hash="b" * 64,
         prompt_templates_hash="c" * 64,
+        training_cutoff="2025-03-01",
     )
     conn.execute(
         "INSERT INTO questions (id, choice_type, question_type, event, options, answer, end_time, imported_at) "
@@ -138,9 +148,12 @@ def test_cutoff_rows_persist_through_writer(tmp_path: Path) -> None:
     _, cutoff_rows, _ = build_task_plan(
         questions=[_q("q-early", "2025-01-15")],
         settings=settings,
-        completed=set(),
+        completed={"m/cutoff": set(), "m/free": set()},
         run_id="run-1",
     )
-    dbmod._insert_rows_sync(conn, cutoff_rows)
-    completed = dbmod.load_completed(conn, "run-1")
-    assert completed == {(row["question_id"], row["model"], row["sample_idx"]) for row in cutoff_rows}
+    for row in cutoff_rows["m/cutoff"]:
+        dbmod.upsert_sample_sync(conn, 2, row)
+    completed = dbmod.load_completed_samples(conn, sampling_n=2)
+    assert completed == {
+        (row["question_id"], row["sample_idx"]) for row in cutoff_rows["m/cutoff"]
+    }

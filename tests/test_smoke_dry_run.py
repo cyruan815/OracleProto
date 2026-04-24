@@ -1,10 +1,10 @@
 """End-to-end smoke test: 3 questions × 1 model × 1 sample against mocked APIs.
 
 Mocks the OpenRouter chat/completions and Tavily /search endpoints via respx,
-then drives the full runner. Verifies `results.db` contains rows with the right
-shape: messages_trace is valid JSON, search_calls carry end_date, the
-information-barrier injected end_date matches end_time + OFFSET, and
-provider-native browsing stays disabled.
+then drives the full runner against a RUNS_ROOT/{run_id}/db/<slug>.db layout.
+Verifies the wide `run_results` table contains the expected per-sample fields,
+that `messages_trace` is valid JSON, and that Tavily was called with the
+information-barrier-injected end_date.
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def _make_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("SEARCH_BACKOFF_S", "0")
     monkeypatch.setenv("SEARCH_RETRY_MAX", "1")
     monkeypatch.setenv("SOURCE_DB", str(SOURCE_DB))
-    monkeypatch.setenv("RESULTS_DB", str(tmp_path / "results.db"))
+    monkeypatch.setenv("RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("DB_COMMIT_BATCH", "2")
     monkeypatch.setenv("WRITE_MESSAGES_TRACE", "true")
@@ -53,7 +53,6 @@ def _make_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
 
 
 def _llm_body_with_tool_call() -> dict:
-    """Two-step conversation: LLM first requests a web_search, then answers."""
     return {
         "id": "chatcmpl-1",
         "object": "chat.completion",
@@ -129,30 +128,39 @@ async def test_smoke_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         return_value=httpx.Response(200, json=_tavily_body())
     )
 
-    # Use 3 yes_no questions
-    conn = dbmod.connect(settings.results_db_path())
-    dbmod.init_schema(conn)
-    templates = loader.sync_prompt_templates(SOURCE_DB, conn)
+    # Create run dir manually, mimicking what evaluation.py would do.
+    run_id = "20260424-120000-abcd"
+    run_dir = settings.run_dir(run_id)
+    (run_dir / "db").mkdir(parents=True, exist_ok=True)
 
+    # Pull 3 yes_no questions from the source DB
     src = sqlite3.connect(f"file:{SOURCE_DB}?mode=ro", uri=True)
     src.row_factory = sqlite3.Row
     rows = src.execute(
-        "SELECT id FROM forecast_eval_set WHERE question_type='yes_no' ORDER BY end_time LIMIT 3"
+        "SELECT id, choice_type, question_type, event, options, answer, end_time "
+        "FROM forecast_eval_set WHERE question_type='yes_no' ORDER BY end_time LIMIT 3"
     ).fetchall()
-    ids = [r["id"] for r in rows]
     src.close()
+    ids = tuple(r["id"] for r in rows)
 
-    # Only fetch those 3 questions via the loader
-    ids_tuple = tuple(ids)
-    placeholders = ",".join("?" * len(ids_tuple))
-    conn.execute("DELETE FROM questions")  # keep the test scope tight
+    # Filter the source DB down to exactly those 3 questions via a fresh loader
+    model = settings.MODELS[0]
+    slug = dbmod.model_slug_safe(model)
+    model_db = run_dir / "db" / f"{slug}.db"
+    conn = dbmod.connect(model_db)
+    dbmod.init_schema(conn, settings.SAMPLING_N)
+    templates = loader.sync_prompt_templates(SOURCE_DB, conn)
+
+    # Re-load just the 3 targeted questions
     src = dbmod.connect(SOURCE_DB)
+    placeholders = ",".join("?" * len(ids))
     questions_rows = src.execute(
         f"SELECT id, choice_type, question_type, event, options, answer, end_time "
         f"FROM forecast_eval_set WHERE id IN ({placeholders}) ORDER BY end_time",
-        ids_tuple,
+        ids,
     ).fetchall()
     src.close()
+
     now = dbmod.utcnow_iso()
     conn.executemany(
         "INSERT OR REPLACE INTO questions (id, choice_type, question_type, event, options, answer, end_time, imported_at) "
@@ -177,10 +185,11 @@ async def test_smoke_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         for r in questions_rows
     ]
 
-    run_id = "20260424-120000-abcd"
-    dbmod.register_run(
+    dbmod.register_run_meta(
         conn,
         run_id=run_id,
+        model=model,
+        sampling_n=settings.SAMPLING_N,
         filters_snapshot={"question_types": ["yes_no"], "question_count": len(questions)},
         config_snapshot=dbmod.snapshot_settings(settings),
         source_db_hash=dbmod.compute_source_db_hash(SOURCE_DB),
@@ -194,45 +203,42 @@ async def test_smoke_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         questions=questions,
         templates=templates,
         run_id=run_id,
-        conn=conn,
+        conns={model: conn},
     )
 
     assert stats.planned == 3
     assert stats.done == 3
     assert stats.errors == {}
 
-    # Every written row must have the expected shape
+    # Every written row must have the expected shape (wide table: s0_*)
     written = conn.execute(
-        "SELECT * FROM run_results WHERE run_id=? ORDER BY sample_idx", (run_id,)
+        "SELECT * FROM run_results ORDER BY question_id"
     ).fetchall()
     assert len(written) == 3
     for row in written:
-        assert row["error"] is None
-        assert row["parse_ok"] == 1
-        assert row["final_answer_letters"] is not None
-        assert row["messages_trace"] is not None
-        assert row["search_calls"] is not None
+        assert row["s0_error"] is None
+        assert row["s0_parse_ok"] == 1
+        assert row["s0_final_answer_letters"] is not None
+        assert row["s0_messages_trace"] is not None
+        assert row["s0_search_calls"] is not None
         assert row["user_prompt"]
-        # messages_trace must be JSON-decodable
-        msgs = json.loads(row["messages_trace"])
+        msgs = json.loads(row["s0_messages_trace"])
         assert isinstance(msgs, list) and msgs[0]["role"] == "user"
-        # search_calls carry end_date
-        calls = json.loads(row["search_calls"])
+        calls = json.loads(row["s0_search_calls"])
         assert calls and all("end_date" in c for c in calls)
-        # latency/tokens populated
-        assert row["latency_ms"] >= 0
-        assert (row["prompt_tokens"] or 0) + (row["completion_tokens"] or 0) > 0
+        assert row["s0_latency_ms"] >= 0
+        assert (row["s0_prompt_tokens"] or 0) + (row["s0_completion_tokens"] or 0) > 0
 
     # Tavily must have been called with the correct end_date (= end_time + OFFSET)
     assert tavily_route.called
     first_call_body = json.loads(tavily_route.calls[0].request.content.decode("utf-8"))
-    first_question_end = questions[0].end_time  # sorted by end_time
+    first_question_end = questions[0].end_time
     from datetime import date, timedelta
     expected_end_date = (date.fromisoformat(first_question_end) + timedelta(days=-1)).isoformat()
     assert first_call_body["end_date"] == expected_end_date
-    # raw_content is not included in the request
     assert first_call_body["include_raw_content"] is False
 
-    # runs.finished_at must be set on normal completion
-    r = conn.execute("SELECT finished_at FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    # run_meta.finished_at set on normal completion
+    r = conn.execute("SELECT finished_at FROM run_meta WHERE run_id=?", (run_id,)).fetchone()
     assert r["finished_at"] is not None
+    conn.close()
