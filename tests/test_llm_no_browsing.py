@@ -16,8 +16,8 @@ from forecast_eval.tools import WEB_SEARCH_SCHEMA
 
 @dataclass
 class _StubSettings:
-    OPENROUTER_API_KEY: str = "sk-or-v1-TEST"
-    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    LLM_API_KEY: str = "sk-or-v1-TEST"
+    LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     LLM_TEMPERATURE: float = 0.7
     LLM_TOP_P: float = 1.0
     LLM_MAX_TOKENS: int = 128
@@ -54,8 +54,8 @@ def _success_body() -> dict[str, object]:
 
 def _new_client(settings: _StubSettings) -> AsyncOpenAI:
     return AsyncOpenAI(
-        api_key=settings.OPENROUTER_API_KEY,
-        base_url=settings.OPENROUTER_BASE_URL,
+        api_key=settings.LLM_API_KEY,
+        base_url=settings.LLM_BASE_URL,
     )
 
 

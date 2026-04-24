@@ -12,7 +12,7 @@ from forecast_eval.config import Settings
 
 
 def _make_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-ABCDEFGHIJKLMNOP0123")
+    monkeypatch.setenv("LLM_API_KEY", "sk-or-v1-ABCDEFGHIJKLMNOP0123")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-ABCDEFGH01234567")
     monkeypatch.setenv("MODELS", "openai/gpt-5,anthropic/claude-sonnet-4.5")
     monkeypatch.setenv(
@@ -75,8 +75,8 @@ def test_hash_changes_when_content_changes(tmp_path: Path) -> None:
 
 def test_redact_api_key_hides_plaintext() -> None:
     raw = "sk-or-v1-ABCDEFGHIJKL"
-    red = dbmod.redact_api_key(raw, "openrouter")
-    assert red["provider"] == "openrouter"
+    red = dbmod.redact_api_key(raw, "llm")
+    assert red["provider"] == "llm"
     assert red["prefix"] == "sk-o"
     assert red["length"] == len(raw)
     assert len(red["sha256_12"]) == 12
@@ -89,13 +89,13 @@ def test_snapshot_settings_redacts_all_keys(tmp_path: Path, monkeypatch: pytest.
     s = _make_settings(tmp_path, monkeypatch)
     snap = dbmod.snapshot_settings(s)
     blob = json.dumps(snap)
-    assert s.OPENROUTER_API_KEY not in blob
+    assert s.LLM_API_KEY not in blob
     assert s.TAVILY_API_KEY not in blob
-    assert snap["OPENROUTER_API_KEY"]["provider"] == "openrouter"
+    assert snap["LLM_API_KEY"]["provider"] == "llm"
     assert snap["TAVILY_API_KEY"]["provider"] == "tavily"
     assert snap["MODEL_TRAINING_CUTOFFS"]["openai/gpt-5"] == "2024-10-01"
     # repr must also be safe for logs
-    assert s.OPENROUTER_API_KEY not in repr(s)
+    assert s.LLM_API_KEY not in repr(s)
     assert s.TAVILY_API_KEY not in repr(s)
 
 

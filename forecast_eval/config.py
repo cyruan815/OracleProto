@@ -73,9 +73,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # OpenRouter / LLM
-    OPENROUTER_API_KEY: str
-    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    # LLM (任意 OpenAI-compatible endpoint)
+    LLM_API_KEY: str
+    LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     MODELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     MODEL_TRAINING_CUTOFFS: Annotated[dict[str, date], NoDecode] = Field(default_factory=dict)
     LLM_MAX_TOKENS: int = 4096
@@ -158,7 +158,7 @@ class Settings(BaseSettings):
                     f"MODELS entry {slug!r} must not end with ':online' — "
                     "provider-native browsing is not allowed (see information-barrier spec)"
                 )
-        for key_name in ("OPENROUTER_API_KEY", "TAVILY_API_KEY"):
+        for key_name in ("LLM_API_KEY", "TAVILY_API_KEY"):
             value = getattr(self, key_name)
             if not value:
                 raise ValueError(f"{key_name} must not be empty")

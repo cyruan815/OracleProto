@@ -29,7 +29,7 @@ TAVILY_URL = re.compile(r"https://api\.tavily\.com/search")
 
 
 def _make_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-TEST_ABCDEFGH")
+    monkeypatch.setenv("LLM_API_KEY", "sk-or-v1-TEST_ABCDEFGH")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-TEST_ABCDEFGH")
     monkeypatch.setenv("MODELS", "openai/gpt-4o-mini")
     monkeypatch.setenv("MODEL_TRAINING_CUTOFFS", "")

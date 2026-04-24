@@ -22,7 +22,7 @@ conda activate forecast
 
 ```bash
 cp .env.example .env
-# Edit .env and fill OPENROUTER_API_KEY + TAVILY_API_KEY.
+# Edit .env and fill LLM_API_KEY + TAVILY_API_KEY.
 # Also adjust MODELS and MODEL_TRAINING_CUTOFFS for the models you want to
 # compare; every model you evaluate should have a cutoff declared so that
 # training-data leakage is filtered consistently.

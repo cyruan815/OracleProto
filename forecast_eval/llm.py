@@ -49,8 +49,8 @@ def get_client(settings: Settings) -> AsyncOpenAI:
     global _client
     if _client is None:
         _client = AsyncOpenAI(
-            api_key=settings.OPENROUTER_API_KEY,
-            base_url=settings.OPENROUTER_BASE_URL,
+            api_key=settings.LLM_API_KEY,
+            base_url=settings.LLM_BASE_URL,
         )
     return _client
 

@@ -195,7 +195,7 @@ def redact_api_key(raw: str | None, provider: str) -> dict[str, Any]:
 
 
 _API_KEY_FIELDS = {
-    "OPENROUTER_API_KEY": "openrouter",
+    "LLM_API_KEY": "llm",
     "TAVILY_API_KEY": "tavily",
 }
 

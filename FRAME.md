@@ -546,9 +546,9 @@ Forecast/
 #  复制为 .env 后填入 API Key 即可运行: python evaluation.py
 # =============================================================
 
-# -------- OpenRouter / LLM --------
-OPENROUTER_API_KEY=sk-or-v1-REPLACE_ME
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+# -------- LLM Endpoint (OpenAI-compatible) --------
+LLM_API_KEY=sk-or-v1-REPLACE_ME
+LLM_BASE_URL=https://openrouter.ai/api/v1
 
 # 要评测的模型列表, 逗号分隔 (笛卡尔积: 每个模型都会跑所有题目 × 所有 sample)
 # ⚠️ 不要在 model slug 里追加 ":online", 也不要启用任何 provider-native browsing (参见 §3.8)
@@ -620,7 +620,7 @@ LOG_DIR=./logs
 - **`TAVILY_END_DATE_OFFSET_DAYS`**：项目默认 `-1`（前一天，推荐的严格默认值）。数值越小越保守；`0` 仅调试用。所有报表默认在 `-1` 下比较。
 - **`RUN_ID` 自动生成格式**：`YYYYMMDD-HHMMSS-xxxx`，例如 `20260424-120344-a7k3`，`ls` 天然按时间排序。
 - **`WRITE_MESSAGES_TRACE`**：`true` 存完整 messages JSON（方便 debug 但 db 变大）；`false` 只存关键字段。
-- **脱敏**：`runs.config_snapshot` 写入前 `config.py` 必须对 `OPENROUTER_API_KEY` / `TAVILY_API_KEY` 等敏感字段执行 redaction（只保留前 4 位 + 长度 + `sha256[:12]`），敏感明文一律不落库。
+- **脱敏**：`runs.config_snapshot` 写入前 `config.py` 必须对 `LLM_API_KEY` / `TAVILY_API_KEY` 等敏感字段执行 redaction（只保留前 4 位 + 长度 + `sha256[:12]`），敏感明文一律不落库。
 
 ---
 
@@ -991,7 +991,7 @@ dependencies:
 conda env create -f environment.yml
 conda activate forecast
 cp .env.example .env
-# 编辑 .env 填入 OPENROUTER_API_KEY 和 TAVILY_API_KEY
+# 编辑 .env 填入 LLM_API_KEY 和 TAVILY_API_KEY
 python evaluation.py --question-type yes_no
 ```
 
