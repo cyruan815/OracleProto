@@ -80,5 +80,9 @@ venv.bak/
 Thumbs.db
 
 # Local databases and logs
+logs/
+results.db
+*.db-wal
+*.db-shm
 *.log
 *.sqlite3
