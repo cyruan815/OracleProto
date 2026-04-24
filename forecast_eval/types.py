@@ -81,11 +81,16 @@ class SampleResult:
     created_at: str
 
     def to_row(self) -> dict[str, Any]:
+        """Shape matching `forecast_eval.db.AsyncWriter.enqueue_result`.
+
+        `run_id` and `model` are bound to the target DB (run_meta row) and are
+        intentionally omitted from the per-sample row so there's no possibility
+        of mis-routing a sample into the wrong model's file.
+        """
         return {
-            "run_id": self.run_id,
             "question_id": self.question_id,
-            "model": self.model,
             "sample_idx": self.sample_idx,
+            "user_prompt": self.user_prompt,
             "final_answer_letters": self.final_answer_letters,
             "final_answer_raw": self.final_answer_raw,
             "correct": self.correct,
@@ -96,7 +101,6 @@ class SampleResult:
             "completion_tokens": self.completion_tokens,
             "reasoning_tokens": self.reasoning_tokens,
             "latency_ms": self.latency_ms,
-            "user_prompt": self.user_prompt,
             "messages_trace": self.messages_trace,
             "search_calls": self.search_calls,
             "error": self.error,

@@ -113,7 +113,10 @@ class Settings(BaseSettings):
 
     # Database
     SOURCE_DB: str = "./forecast_eval_set.db"
-    RESULTS_DB: str = "./results.db"
+    # Every evaluation gets its own folder at RUNS_ROOT/{run_id}/, containing one
+    # SQLite file per model under db/, plus analysis/ (post-run statistics) and
+    # logs/. The old single-file RESULTS_DB layout is gone — see FRAME.md §5/§6.
+    RUNS_ROOT: str = "./runs"
     DB_COMMIT_BATCH: int = 10
     WRITE_MESSAGES_TRACE: bool = True
 
@@ -196,8 +199,11 @@ class Settings(BaseSettings):
     def source_db_path(self) -> Path:
         return Path(self.SOURCE_DB).expanduser().resolve()
 
-    def results_db_path(self) -> Path:
-        return Path(self.RESULTS_DB).expanduser().resolve()
+    def runs_root_path(self) -> Path:
+        return Path(self.RUNS_ROOT).expanduser().resolve()
+
+    def run_dir(self, run_id: str) -> Path:
+        return self.runs_root_path() / run_id
 
     def log_dir_path(self) -> Path:
         return Path(self.LOG_DIR).expanduser().resolve()

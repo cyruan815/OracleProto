@@ -1,3 +1,13 @@
+"""Top-level orchestration for one evaluation run.
+
+Contracts:
+- `evaluation.py` prepares per-model SQLite connections under
+  `RUNS_ROOT/{run_id}/db/` and hands them to `run()`.
+- This module owns the task queue, the async writers (one per model), the
+  cutoff-filter + resume logic, and the progress log.
+- The DB layer stores raw observations only; statistics are computed post-hoc
+  by `forecast_eval.analysis`.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +23,7 @@ from . import db as dbmod
 from .config import Settings
 from .db import AsyncWriter, utcnow_iso
 from .errors import AuthError, ErrorKind, classify
-from .llm import AuthError as _LLMAuthError  # re-export alias for callers
+from .llm import AuthError as _LLMAuthError  # noqa: F401 — re-exported for callers
 from .react import run_react
 from .types import QFilter, Question, SampleResult
 
@@ -40,16 +50,11 @@ def generate_run_id(now: datetime | None = None) -> str:
     return f"{ts}-{uuid.uuid4().hex[:4]}"
 
 
-def _skipped_cutoff_row(
-    run_id: str,
-    q: Question,
-    model: str,
-    sample_idx: int,
-) -> dict[str, Any]:
+def _skipped_cutoff_row(q: Question, sample_idx: int) -> dict[str, Any]:
     return SampleResult(
-        run_id=run_id,
+        run_id="",
         question_id=q.id,
-        model=model,
+        model="",
         sample_idx=sample_idx,
         final_answer_letters=None,
         final_answer_raw=None,
@@ -69,17 +74,11 @@ def _skipped_cutoff_row(
     ).to_row()
 
 
-def _error_row(
-    run_id: str,
-    q: Question,
-    model: str,
-    sample_idx: int,
-    error: str,
-) -> dict[str, Any]:
+def _error_row(q: Question, sample_idx: int, error: str) -> dict[str, Any]:
     return SampleResult(
-        run_id=run_id,
+        run_id="",
         question_id=q.id,
-        model=model,
+        model="",
         sample_idx=sample_idx,
         final_answer_letters=None,
         final_answer_raw=None,
@@ -103,34 +102,36 @@ def build_task_plan(
     *,
     questions: list[Question],
     settings: Settings,
-    completed: set[tuple[str, str, int]],
+    completed: dict[str, set[tuple[str, int]]],
     run_id: str,
-) -> tuple[list[Task], list[dict[str, Any]], RunStats]:
-    """Expand the cartesian product, remove resumed rows, then split into:
-       - `todo`: actual LLM work to dispatch
-       - `cutoff_rows`: `skipped_training_cutoff` rows to enqueue directly
+) -> tuple[list[Task], dict[str, list[dict[str, Any]]], RunStats]:
+    """Expand (questions × models × samples), drop resumed cells, then split:
+       - `todo`: LLM work to dispatch (per-model writers consume this)
+       - `cutoff_rows`: model -> list of pre-seeded rows marked
+         `error="skipped_training_cutoff"` (not counted as LLM work)
        - `stats`: counters for progress logging
 
-    Resume takes precedence over cutoff filtering — a question already completed
-    in a previous run must NOT be re-written as skipped_training_cutoff.
+    Resume takes precedence over cutoff filtering — a cell already completed
+    must never be re-emitted as skipped_training_cutoff.
     """
     stats = RunStats()
     todo: list[Task] = []
-    cutoff_rows: list[dict[str, Any]] = []
+    cutoff_rows: dict[str, list[dict[str, Any]]] = {m: [] for m in settings.MODELS}
 
     for q in questions:
         q_end = date.fromisoformat(q.end_time)
         for model in settings.MODELS:
             cutoff = settings.MODEL_TRAINING_CUTOFFS.get(model)
             is_cutoff_hit = cutoff is not None and q_end <= cutoff
+            done_for_model = completed.get(model, set())
             for s in range(settings.SAMPLING_N):
                 stats.total += 1
-                key = (q.id, model, s)
-                if key in completed:
+                key = (q.id, s)
+                if key in done_for_model:
                     stats.completed_preexisting += 1
                     continue
                 if is_cutoff_hit:
-                    cutoff_rows.append(_skipped_cutoff_row(run_id, q, model, s))
+                    cutoff_rows[model].append(_skipped_cutoff_row(q, s))
                     stats.skipped_cutoff += 1
                     continue
                 todo.append(Task(question=q, model=model, sample_idx=s))
@@ -148,10 +149,10 @@ async def _run_task_with_retry(
     llm_semaphore: asyncio.Semaphore,
     search_semaphore: asyncio.Semaphore,
 ) -> dict[str, Any]:
-    """Execute one sample, classify any terminal exception into an error row.
+    """Execute one sample; classify any terminal exception into an error row.
 
-    AUTH errors are re-raised so the caller can abort the whole run; everything
-    else produces a row with `error=...` we can keep running past.
+    AUTH errors re-raise so the caller aborts the whole run; everything else
+    produces a row with `error=...` the writer can still land.
     """
     try:
         async with llm_semaphore:
@@ -181,7 +182,7 @@ async def _run_task_with_retry(
             task.sample_idx,
             kind,
         )
-        return _error_row(run_id, task.question, task.model, task.sample_idx, error_str)
+        return _error_row(task.question, task.sample_idx, error_str)
 
 
 def _log_progress(
@@ -189,15 +190,11 @@ def _log_progress(
     run_id: str,
     done: int,
     total: int,
+    sampling_n: int,
     task: Task,
     row: dict[str, Any],
 ) -> None:
     error = row.get("error")
-    correct = row.get("correct")
-    parse_ok = row.get("parse_ok")
-    steps = row.get("react_steps")
-    tool_calls = row.get("tool_calls_count")
-    latency = row.get("latency_ms")
     q = task.question
     if error:
         logger.error(
@@ -210,12 +207,12 @@ def _log_progress(
             q.choice_type,
             task.model,
             task.sample_idx + 1,
-            "N",  # SAMPLING_N injected via settings at the runner call site below
+            sampling_n,
             error,
         )
     else:
         logger.info(
-            "[run={}] [{}/{}] q={} qt={} ct={} model={} sample={} correct={} parse_ok={} steps={} tool_calls={} latency={}ms",
+            "[run={}] [{}/{}] q={} qt={} ct={} model={} sample={}/{} correct={} parse_ok={} steps={} tool_calls={} latency={}ms",
             run_id,
             done,
             total,
@@ -223,12 +220,13 @@ def _log_progress(
             q.question_type,
             q.choice_type,
             task.model,
-            task.sample_idx,
-            correct,
-            parse_ok,
-            steps,
-            tool_calls,
-            latency,
+            task.sample_idx + 1,
+            sampling_n,
+            row.get("correct"),
+            row.get("parse_ok"),
+            row.get("react_steps"),
+            row.get("tool_calls_count"),
+            row.get("latency_ms"),
         )
 
 
@@ -239,10 +237,32 @@ async def run(
     questions: list[Question],
     templates: dict[str, str],
     run_id: str,
-    conn: sqlite3.Connection,
+    conns: dict[str, sqlite3.Connection],
 ) -> RunStats:
-    """Top-level orchestration. Assumes loader.sync_* + register_run are done."""
-    completed = dbmod.load_completed(conn, run_id)
+    """Orchestrate one run across all configured models.
+
+    Caller responsibility (see `evaluation.py`):
+      * create `RUNS_ROOT/{run_id}/{db,analysis,logs}/`
+      * open one sqlite connection per model under db/
+      * run `db.init_schema(conn, SAMPLING_N)`
+      * run `loader.sync_questions(...)` + `loader.sync_prompt_templates(...)` per DB
+      * run `db.register_run_meta(...)` per DB
+
+    This function then:
+      * loads per-model resume sets
+      * plans the task list + cutoff rows (one list per model)
+      * spawns one `AsyncWriter` per model
+      * drives the ReAct loop across `LLM_MAX_CONCURRENCY` workers
+      * finishes each model's `run_meta` row on clean exit (or leaves it open
+        if aborted by AUTH)
+    """
+    sampling_n = settings.SAMPLING_N
+    models = list(conns.keys())
+
+    # Per-model resume set
+    completed: dict[str, set[tuple[str, int]]] = {
+        m: dbmod.load_completed_samples(conns[m], sampling_n) for m in models
+    }
     todo, cutoff_rows, stats = build_task_plan(
         questions=questions,
         settings=settings,
@@ -259,16 +279,22 @@ async def run(
         stats.planned,
     )
 
-    writer = AsyncWriter(conn, batch=settings.DB_COMMIT_BATCH)
-    await writer.start()
+    writers: dict[str, AsyncWriter] = {
+        m: AsyncWriter(conns[m], sampling_n=sampling_n, batch=settings.DB_COMMIT_BATCH)
+        for m in models
+    }
+    for w in writers.values():
+        await w.start()
 
     llm_sem = asyncio.Semaphore(settings.LLM_MAX_CONCURRENCY)
     search_sem = asyncio.Semaphore(settings.SEARCH_MAX_CONCURRENCY)
 
-    # Enqueue cutoff rows first — they are effectively instant and they inflate
-    # the denominator of [done/total] progress log in a predictable way.
-    for row in cutoff_rows:
-        await writer.enqueue_result(row)
+    # Cutoff rows are enqueued first. They flow through each model's writer and
+    # inflate the [done/total] denominator in a predictable way.
+    for model, rows in cutoff_rows.items():
+        w = writers[model]
+        for row in rows:
+            await w.enqueue_result(row)
 
     done_counter = stats.completed_preexisting + stats.skipped_cutoff
     aborted = False
@@ -286,7 +312,7 @@ async def run(
             )
         except AuthError:
             raise
-        await writer.enqueue_result(row)
+        await writers[task.model].enqueue_result(row)
         done_counter += 1
         kind = row.get("error")
         if kind:
@@ -295,6 +321,7 @@ async def run(
             run_id=run_id,
             done=done_counter,
             total=stats.total,
+            sampling_n=sampling_n,
             task=task,
             row=row,
         )
@@ -313,10 +340,13 @@ async def run(
                     t.cancel()
                 break
     finally:
-        await writer.drain()
-        await writer.close()
+        for w in writers.values():
+            await w.drain()
+        for w in writers.values():
+            await w.close()
         if not aborted:
-            dbmod.finish_run(conn, run_id)
+            for m, conn in conns.items():
+                dbmod.finish_run_meta(conn, run_id)
 
     stats.done = done_counter
     return stats
