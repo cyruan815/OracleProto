@@ -37,7 +37,7 @@ pytest tests/ -q
 ```
 
 The CI baseline is `test_prompts / test_parser / test_training_cutoff /
-test_llm_no_browsing` — those four must stay green.
+test_llm_no_browsing / test_analysis` — those five must stay green.
 
 ### 4. Run an evaluation
 
@@ -51,27 +51,79 @@ python evaluation.py
 
 # Filter combinations (AND across flags, OR within each flag)
 python evaluation.py --question-type multiple_choice --choice-type multi
+
+# Skip the post-run analysis pass (raw DBs still land in db/)
+python evaluation.py --skip-analysis
 ```
 
-The evaluation process writes every completed sample to `results.db`; rerunning
-with the same `RUN_ID` resumes from the last successful row. Progress logs go to
-stderr and `logs/{run_id}.log`.
+Each invocation of `evaluation.py` creates a fresh folder under `RUNS_ROOT`
+(default `./runs`), named after the `run_id`. Resuming with the same `run_id`
+continues into that same folder.
 
-## Smoke test baseline
+## Output layout
 
-First real-API smoke on 2026-04-24 against `qwen3.6-plus-2026-04-02` (via
-dashscope OpenAI-compatible endpoint) + Tavily search, `SAMPLING_N=1`,
-`REACT_MAX_STEPS=10`, `REACT_MAX_SEARCH_CALLS=8`.
+```
+runs/
+  {run_id}/
+    manifest.json           # run-level metadata: run_id, sampling_n, models,
+                            #   filters, source/metadata/templates hashes,
+                            #   started_at / finished_at
+    db/
+      {model_slug}.db       # one SQLite per model (see schema below)
+    analysis/               # generated after the run finishes
+      per_model_summary.csv
+      per_model_summary.md
+      per_model_by_question_type.csv
+      per_model_by_choice_type.csv
+      error_breakdown.csv
+      overall.json
+    logs/
+      {run_id}.log
+```
 
-| run_id | filter | cutoff | eligible | pass@1 | wall | avg latency | avg steps | avg tool calls | tokens (p/c/r) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `20260424-104322-35e4` | `--question-type binary_named` | 2026-04-02 | 1 | 1/1 (100%) | 68s | 67.5s | 2.0 | 3.0 | 5.5k / 3.4k / 2.9k |
-| `20260424-104547-252c` | `--question-type yes_no` | 2026-04-11 | 3 | 2/3 (66.7%) | 6m33s | 333.4s | 5.7 | 5.7 | 161k / 52.5k / 50.8k |
+Model slug safety: `/` → `__`, any character outside `[A-Za-z0-9._-]` → `_`.
+So `openai/gpt-4o-mini` becomes `openai__gpt-4o-mini.db`.
 
-Notes:
-- `skipped_training_cutoff` rows: 10 + 90; all cutoff rows persist without
-  calling the LLM, as expected.
-- `runs.finished_at` populated; `pass@1` computed as `correct / eligible`.
-- `messages_trace` is valid JSON (6 / 12–13 turns per sample); every
-  `search_calls` entry carries `end_date` injected from `q.end_time`.
-- 0 row-level errors across 4 live samples.
+### DB schema (per-model, self-contained)
+
+Each model DB holds:
+
+* `questions` / `prompt_templates` — copies of the source data (so every DB is
+  independently replayable).
+* `run_meta` — single row: `run_id, model, sampling_n, config/filters
+  snapshot, source/metadata/templates hashes, training_cutoff, started_at,
+  finished_at`.
+* **`run_results` wide table** — one row per question:
+  - `question_id` (PK), `user_prompt` (rendered once per question)
+  - for each `i` in `0..SAMPLING_N-1`, a `s{i}_*` group of 14 columns:
+    `final_answer_letters / final_answer_raw / correct / parse_ok /
+    tool_calls_count / react_steps / prompt_tokens / completion_tokens /
+    reasoning_tokens / latency_ms / messages_trace / search_calls / error /
+    created_at`.
+
+**The DB stores raw observations only.** No aggregates are pre-computed —
+all metrics (pass@1, pass_any@N, majority vote, etc.) come from the
+`analysis/` pass, which runs automatically at the end of `evaluation.py` and
+can also be invoked standalone:
+
+```bash
+python -m forecast_eval.analysis runs/{run_id}
+```
+
+## Resume semantics
+
+- `s{i}_created_at IS NOT NULL` and `s{i}_error IS NULL` → finished, not retried.
+- `s{i}_error = 'skipped_training_cutoff'` → actively filtered by
+  `MODEL_TRAINING_CUTOFFS`, not retried.
+- Any other `s{i}_error` value (`network`, `server_5xx`, `bad_request`,
+  `content_policy`, …) → next run reuses the DB and retries that
+  `(question_id, sample_idx)` cell.
+
+Set `RUN_ID=<existing-run-id>` in `.env` (or CLI env) to resume into the same
+folder; leaving it blank mints a fresh `YYYYMMDD-HHMMSS-xxxx` id.
+
+## Historical smoke baseline
+
+Prior to the per-run directory refactor, early smoke runs wrote to a single
+`results.db`. That baseline has been archived and the raw DB removed; the
+first real-API runs against the new layout will become the new reference.
