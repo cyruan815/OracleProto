@@ -13,7 +13,7 @@ from .config import Settings
 from .db import utcnow_iso
 from .llm import ChatResponse, chat as llm_chat
 from .parser import is_correct, parse_answer, parse_gt
-from .prompts import render_user_prompt
+from .prompts import REFLECTION_PROTOCOL, _build_nudge_message, render_user_prompt
 from .search import SearchResult, tavily_search
 from .tools import (
     WEB_SEARCH_SCHEMA,
@@ -84,7 +84,11 @@ async def run_react(
     for wrapping it and recording retry-exhausted / content-policy errors.
     """
     end_date = _compute_end_date(q.end_time, settings.TAVILY_END_DATE_OFFSET_DAYS)
-    user_prompt = render_user_prompt(q, templates)
+    user_prompt = render_user_prompt(
+        q,
+        templates,
+        reflection_protocol=REFLECTION_PROTOCOL if settings.REACT_REFLECTION_PROTOCOL else None,
+    )
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_prompt}]
 
     search_calls: list[dict[str, Any]] = []
@@ -92,10 +96,16 @@ async def run_react(
     t0 = time.monotonic()
     final_raw = ""
     steps_executed = 0
+    nudges_used = 0
     # ENABLE_WEB_SEARCH=false → LLM 看不到任何 tool schema, 循环会在首轮直接返回
-    # content 并 break, Tavily 完全不会被调用.
+    # content 并 break, Tavily 完全不会被调用. 此时也禁用 nudge — 没有搜索可以再做.
     tool_schemas: list[dict[str, Any]] = (
         [WEB_SEARCH_SCHEMA] if settings.ENABLE_WEB_SEARCH else []
+    )
+    nudge_enabled = (
+        settings.ENABLE_WEB_SEARCH
+        and settings.REACT_MIN_SEARCH_CALLS > 0
+        and settings.REACT_MAX_NUDGES > 0
     )
 
     for step in range(settings.REACT_MAX_STEPS):
@@ -112,6 +122,25 @@ async def run_react(
 
         tool_calls = assistant_msg.get("tool_calls") or []
         if not tool_calls:
+            # LLM 想给最终答案. 软性最低搜索次数兜底: 不够就 nudge 一次让它继续检索.
+            # 不抢占 REACT_MAX_STEPS 硬天花板, 受 REACT_MAX_NUDGES 上限保护防死循环.
+            if (
+                nudge_enabled
+                and len(search_calls) < settings.REACT_MIN_SEARCH_CALLS
+                and nudges_used < settings.REACT_MAX_NUDGES
+                and step < settings.REACT_MAX_STEPS - 1  # 留至少 1 步给后续答复
+            ):
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": _build_nudge_message(
+                            searches_done=len(search_calls),
+                            min_required=settings.REACT_MIN_SEARCH_CALLS,
+                        ),
+                    }
+                )
+                nudges_used += 1
+                continue
             final_raw = assistant_msg.get("content") or ""
             break
 
