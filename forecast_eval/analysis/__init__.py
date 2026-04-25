@@ -18,7 +18,10 @@ single-file `analysis.py` into a package with focused modules:
 * `flatten.py`     — `_flatten_db` pivot + `SampleRow` (incl. v4 `probabilities`).
 * `accuracy.py`    — pass@1 / pass_any@N / majority_vote / breakdowns.
 * `proper_score.py` — Phase 1 BS / NLL / MBS / BI / ABI (added in task 14).
-* `writers.py`     — CSV / Markdown / JSON serialisation.
+* `aggregation.py` — Phase 2 K-trial aggregators + LOO shrinkage (task 19).
+* `calibration.py` — Phase 2 Platt / temperature / ECE / Murphy + LOO (task 20).
+* `inference.py`   — Phase 2 paired bootstrap + Holm + difficulty tertile + posterior (task 21).
+* `writers.py`     — CSV / Markdown / JSON serialisation (incl. Phase 2 outputs).
 
 The public surface area is intentionally tiny: external callers should only
 import `run_analysis` from this module.
@@ -37,23 +40,193 @@ from .accuracy import (
     _finish_reason_breakdown,
     _slice_by,
 )
+from .aggregation import ShrinkageResult, loo_shrinkage
+from .calibration import ModelCalibrationReport, calibrate_run
 from .flatten import (
     CUTOFF,
     SampleRow,
     _ANALYSIS_FIELDS,
     _answer_gt_for,
     _flatten_db,
+    gt_vector,
 )
-from .probabilistic import build_probabilistic_report
+from .inference import (
+    DifficultyTertile,
+    PairedBootstrapResult,
+    difficulty_tertile,
+    paired_bootstrap_by_difficulty,
+    pairwise_paired_bootstrap,
+)
+from .probabilistic import (
+    _QuestionProbabilityRow,
+    _aggregate_for_subset,
+    build_probabilistic_report,
+)
+from .proper_score import (
+    ModelProbabilisticAggregate,
+    brier_score_lab,
+)
 from .writers import (
     _SUMMARY_FIELDS,
+    _write_brier_decomposition_csv,
+    _write_calibration_params_json,
     _write_error_breakdown_csv,
     _write_finish_reason_breakdown_csv,
     _write_overall_json,
+    _write_paired_delta_bi_by_difficulty_csv,
+    _write_paired_delta_bi_csv,
+    _write_pairwise_significance_csv,
+    _write_per_model_by_difficulty_csv,
+    _write_per_model_summary_calibrated_csv,
     _write_per_model_summary_csv,
     _write_per_model_summary_md,
+    _write_posterior_pairwise_csv,
+    _write_reliability_data_json,
+    _write_shrinkage_alpha_curve_csv,
     _write_slice_csv,
 )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2 helpers (live here so __init__.py owns orchestration)
+# --------------------------------------------------------------------------- #
+
+
+def _shrinkage_per_model_per_ctype(
+    samples_by_model: dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+) -> dict[str, ShrinkageResult]:
+    """Run `loo_shrinkage` per (model, choice_type).
+
+    The shrinkage formula differs for single (softmax) vs multi (sigmoid),
+    so we split each model's questions by choice_type and run shrinkage
+    independently. Returns `{f"{model}__{ctype}": result}` so the writer
+    can emit one row per (model, ctype) without nested keys.
+    """
+    out: dict[str, ShrinkageResult] = {}
+    for model, samples in samples_by_model.items():
+        # Group by question, keep all eligible probabilities.
+        per_q: dict[str, list[SampleRow]] = {}
+        for s in samples:
+            if not s.is_eligible or s.probabilities is None:
+                continue
+            if s.question_id not in gt_map:
+                continue
+            per_q.setdefault(s.question_id, []).append(s)
+
+        # Bucket by choice_type (canonical: take first sample's ctype).
+        by_ctype: dict[str, list[tuple[list[list[float]], list[int]]]] = {}
+        for qid, ss in per_q.items():
+            gt = gt_map.get(qid)
+            if gt is None or not ss[0].options:
+                continue
+            k = len(ss[0].options)
+            obs = gt_vector(gt, k)
+            preds = [s.probabilities for s in ss if s.probabilities is not None]
+            if not preds:
+                continue
+            ctype = ss[0].choice_type
+            by_ctype.setdefault(ctype, []).append((preds, obs))
+
+        for ctype, items in by_ctype.items():
+            preds_list = [it[0] for it in items]
+            obs_list = [it[1] for it in items]
+            try:
+                res = loo_shrinkage(preds_list, obs_list, ctype)
+            except ValueError:
+                continue
+            out[f"{model}__{ctype}"] = res
+    return out
+
+
+def _bs_by_model_qid_from_rows(
+    rows_by_model: dict[str, list[_QuestionProbabilityRow]],
+) -> dict[str, dict[str, float]]:
+    """Per-(model, question) label-wise BS — input for paired bootstrap and posterior."""
+    out: dict[str, dict[str, float]] = {}
+    for model, rows in rows_by_model.items():
+        per_q: dict[str, float] = {}
+        for r in rows:
+            per_q[r.question_id] = brier_score_lab(r.probs, r.obs)
+        out[model] = per_q
+    return out
+
+
+def _gamma_uniform_per_qid(
+    rows_by_model: dict[str, list[_QuestionProbabilityRow]],
+) -> dict[str, float]:
+    """Union of uniform $\\gamma$ per question across models.
+
+    Uniform $\\gamma$ depends only on the observation vector — same across
+    models on the same question. We take any model's value as authoritative.
+    """
+    from .proper_score import uniform_gamma_for
+
+    out: dict[str, float] = {}
+    for rows in rows_by_model.values():
+        for r in rows:
+            if r.question_id not in out:
+                out[r.question_id] = uniform_gamma_for(r.obs)
+    return out
+
+
+def _per_model_per_tier_aggregates(
+    rows_by_model: dict[str, list[_QuestionProbabilityRow]],
+    tertile: DifficultyTertile,
+    crowd_gammas_by_model: dict[str, dict[str, float | None]],
+    uniform_gammas: dict[str, float],
+) -> dict[str, dict[str, ModelProbabilisticAggregate]]:
+    """Slice each model's rows by difficulty tier and re-aggregate proper scores."""
+    out: dict[str, dict[str, ModelProbabilisticAggregate]] = {}
+    for model, rows in rows_by_model.items():
+        per_tier_rows: dict[str, list[_QuestionProbabilityRow]] = {
+            "low": [], "mid": [], "high": [],
+        }
+        for r in rows:
+            tier = tertile.by_question.get(r.question_id)
+            if tier is None:
+                continue
+            per_tier_rows[tier].append(r)
+        out[model] = {
+            tier: _aggregate_for_subset(
+                tier_rows,
+                crowd_gammas=crowd_gammas_by_model.get(model),
+                uniform_gammas=uniform_gammas,
+            )
+            for tier, tier_rows in per_tier_rows.items()
+        }
+    return out
+
+
+def _paired_bootstrap_pairs_by_difficulty(
+    bs_by_model_qid: dict[str, dict[str, float]],
+    tertile: DifficultyTertile,
+) -> dict[tuple[str, str], dict[str, PairedBootstrapResult]]:
+    """For every ordered pair of models, run `paired_bootstrap_by_difficulty`."""
+    out: dict[tuple[str, str], dict[str, PairedBootstrapResult]] = {}
+    models = sorted(bs_by_model_qid.keys())
+    for i, ma in enumerate(models):
+        for mb in models[i + 1:]:
+            common = sorted(
+                set(bs_by_model_qid[ma]) & set(bs_by_model_qid[mb])
+            )
+            bs_a = {q: bs_by_model_qid[ma][q] for q in common}
+            bs_b = {q: bs_by_model_qid[mb][q] for q in common}
+            tertile_subset = DifficultyTertile(
+                by_question={q: t for q, t in tertile.by_question.items() if q in common},
+                threshold_low=tertile.threshold_low,
+                threshold_high=tertile.threshold_high,
+                n_low=sum(1 for q in common if tertile.by_question.get(q) == "low"),
+                n_mid=sum(1 for q in common if tertile.by_question.get(q) == "mid"),
+                n_high=sum(1 for q in common if tertile.by_question.get(q) == "high"),
+            )
+            out[(ma, mb)] = paired_bootstrap_by_difficulty(bs_a, bs_b, tertile_subset)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Top-level entry point
+# --------------------------------------------------------------------------- #
 
 
 def run_analysis(run_dir: Path) -> list[Path]:
@@ -125,14 +298,12 @@ def run_analysis(run_dir: Path) -> list[Path]:
     prob_report = build_probabilistic_report(samples_by_model, gt_map_global)
 
     written: list[Path] = []
+    # `per_model_summary.md` is written AFTER calibration so the markdown can
+    # surface uncal/cal columns + the `cal*` overfit warning (spec 20.8). The
+    # CSV is independent and can ship immediately.
     if summary_payload:
         written.append(_write_per_model_summary_csv(
             analysis_dir / "per_model_summary.csv",
-            summary_payload,
-            prob=prob_report.per_model,
-        ))
-        written.append(_write_per_model_summary_md(
-            analysis_dir / "per_model_summary.md",
             summary_payload,
             prob=prob_report.per_model,
         ))
@@ -171,6 +342,102 @@ def run_analysis(run_dir: Path) -> list[Path]:
         probabilistic_by_ctype=prob_report.per_model_by_ctype,
         analysis_schema=analysis_schema,
     ))
+
+    # ------------------------------------------------------------------ #
+    # Phase 2 deliverables — only attempted when at least one model
+    # produced probability vectors. Empty-input branches keep the analysis
+    # idempotent on v3 fixtures with no boxed answers.
+    # ------------------------------------------------------------------ #
+    rows_by_model = prob_report.rows_by_model
+    has_any_rows = any(rows for rows in rows_by_model.values())
+    cal_reports: dict[str, ModelCalibrationReport] = {}
+    if has_any_rows:
+        # Aggregation: per-(model, choice_type) shrinkage curves.
+        shrinkage_per_key = _shrinkage_per_model_per_ctype(
+            samples_by_model, gt_map_global
+        )
+        if shrinkage_per_key:
+            written.append(_write_shrinkage_alpha_curve_csv(
+                analysis_dir / "shrinkage_alpha_curve.csv",
+                shrinkage_per_key,
+            ))
+
+        # Calibration: per-(model, cell) Platt / Temperature with LOO.
+        from .probabilistic import _build_crowd_gammas_per_model
+
+        crowd_gammas_by_model = _build_crowd_gammas_per_model(rows_by_model)
+        uniform_gammas_global = _gamma_uniform_per_qid(rows_by_model)
+        cal_reports = calibrate_run(
+            rows_by_model,
+            crowd_gammas_by_model=crowd_gammas_by_model,
+            uniform_gammas=uniform_gammas_global,
+        )
+        if cal_reports:
+            written.append(_write_calibration_params_json(
+                analysis_dir / "calibration_params.json", cal_reports,
+            ))
+            written.append(_write_per_model_summary_calibrated_csv(
+                analysis_dir / "per_model_summary_calibrated.csv", cal_reports,
+            ))
+            written.append(_write_reliability_data_json(
+                analysis_dir / "reliability_data.json",
+                cal_reports, calibrated=False,
+            ))
+            written.append(_write_reliability_data_json(
+                analysis_dir / "reliability_data_calibrated.json",
+                cal_reports, calibrated=True,
+            ))
+            written.append(_write_brier_decomposition_csv(
+                analysis_dir / "brier_decomposition.csv", cal_reports,
+            ))
+
+        # Inference: pairwise paired bootstrap + Holm + posterior.
+        bs_by_model_qid = _bs_by_model_qid_from_rows(rows_by_model)
+        if len(bs_by_model_qid) >= 2:
+            pairs = pairwise_paired_bootstrap(bs_by_model_qid)
+            if pairs:
+                written.append(_write_paired_delta_bi_csv(
+                    analysis_dir / "paired_delta_bi.csv", pairs,
+                ))
+                written.append(_write_pairwise_significance_csv(
+                    analysis_dir / "pairwise_significance.csv", pairs,
+                ))
+                written.append(_write_posterior_pairwise_csv(
+                    analysis_dir / "posterior_pairwise.csv", pairs,
+                ))
+
+        # Difficulty stratification: per-tier aggregates + paired bootstrap.
+        if uniform_gammas_global:
+            tertile = difficulty_tertile(uniform_gammas_global)
+            per_model_per_tier = _per_model_per_tier_aggregates(
+                rows_by_model, tertile, crowd_gammas_by_model, uniform_gammas_global,
+            )
+            if per_model_per_tier:
+                written.append(_write_per_model_by_difficulty_csv(
+                    analysis_dir / "per_model_by_difficulty.csv",
+                    per_model_per_tier,
+                ))
+            if len(bs_by_model_qid) >= 2:
+                by_pair_per_tier = _paired_bootstrap_pairs_by_difficulty(
+                    bs_by_model_qid, tertile,
+                )
+                if by_pair_per_tier:
+                    written.append(_write_paired_delta_bi_by_difficulty_csv(
+                        analysis_dir / "paired_delta_bi_by_difficulty.csv",
+                        by_pair_per_tier,
+                    ))
+
+    # `per_model_summary.md` is written last so it can include calibration
+    # columns and the `cal*` warning marker when Phase 2 outputs are
+    # available. When `cal_reports` is empty, the writer falls back to v3 +
+    # Phase 1 columns automatically.
+    if summary_payload:
+        written.append(_write_per_model_summary_md(
+            analysis_dir / "per_model_summary.md",
+            summary_payload,
+            prob=prob_report.per_model,
+            cal=cal_reports if cal_reports else None,
+        ))
     return written
 
 

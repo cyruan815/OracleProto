@@ -15,6 +15,15 @@ from pathlib import Path
 from typing import Any
 
 from .accuracy import Aggregate
+from .aggregation import ShrinkageResult
+from .calibration import (
+    CalibrationBin,
+    ModelCalibrationReport,
+    MurphyDecomposition,
+    PlattParams,
+    TemperatureParams,
+)
+from .inference import ModelPairResult, PairedBootstrapResult
 from .proper_score import ModelProbabilisticAggregate
 
 
@@ -182,7 +191,14 @@ def _write_per_model_summary_md(
     path: Path,
     per_model: dict[str, tuple[int, Aggregate]],
     prob: dict[str, ModelProbabilisticAggregate] | None = None,
+    cal: dict[str, ModelCalibrationReport] | None = None,
 ) -> Path:
+    """Markdown table covering accuracy, probabilistic, and (Phase 2) calibration.
+
+    `cal` overlays uncal/cal BI / NLL / ECE columns and the `cal*` warning
+    marker per spec 20.8. When `cal` is None (no Phase 2 outputs available),
+    the table degrades gracefully to v3+Phase-1 columns.
+    """
     lines = ["# Per-model summary", ""]
     header = [
         "model", "N",
@@ -190,9 +206,13 @@ def _write_per_model_summary_md(
         "pass@1", "pass_any@N", "≥majority", "≥all",
         "majority_acc", "parse_fail", "error_rate",
         "BI", "NLL", "MBS", "ABI_crowd", "ABI_unif", "fallback%",
+    ]
+    if cal is not None:
+        header.extend(["BI_cal", "NLL_cal", "ECE_uncal", "ECE_cal"])
+    header.extend([
         "avg_tool", "avg_steps", "avg_nudges", "avg_latency_ms",
         "avg_p/c/r_tokens",
-    ]
+    ])
     lines.append("| " + " | ".join(header) + " |")
     lines.append("| " + " | ".join(["---"] * len(header)) + " |")
     for model, (sampling_n, agg) in per_model.items():
@@ -206,9 +226,15 @@ def _write_per_model_summary_md(
             if prob_dict.get("fallback_share") is not None
             else "—"
         )
+        # Spec 20.8 哨兵: append `cal*` to the model cell when cal BI exceeds
+        # uncal BI by 5 — that's the threshold for "calibration probably
+        # overfit" per the design.
+        model_cell = model
+        if cal is not None and model in cal and cal[model].overfit_warning:
+            model_cell = f"{model} cal*"
         tok_cell = f"{_fmt(row_dict['avg_prompt_tokens'])} / {_fmt(row_dict['avg_completion_tokens'])} / {_fmt(row_dict['avg_reasoning_tokens'])}"
         cells = [
-            model,
+            model_cell,
             str(sampling_n),
             _fmt(row_dict["eligible_questions"]),
             _fmt(row_dict["eligible_samples"]),
@@ -226,12 +252,25 @@ def _write_per_model_summary_md(
             _fmt(prob_dict["abi_crowd"]),
             _fmt(prob_dict["abi_uniform"]),
             fallback_pct,
+        ]
+        if cal is not None:
+            rep = cal.get(model)
+            if rep is None:
+                cells.extend(["—", "—", "—", "—"])
+            else:
+                cells.extend([
+                    _fmt(_round(rep.cal_aggregate.bi)),
+                    _fmt(_round(rep.cal_aggregate.nll)),
+                    _fmt(_round(rep.ece_uncal)),
+                    _fmt(_round(rep.ece_cal)),
+                ])
+        cells.extend([
             _fmt(row_dict["avg_tool_calls"]),
             _fmt(row_dict["avg_react_steps"]),
             _fmt(row_dict["avg_nudges_used"]),
             _fmt(row_dict["avg_latency_ms"]),
             tok_cell,
-        ]
+        ])
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -294,8 +333,361 @@ def _write_overall_json(
     return path
 
 
+def _write_shrinkage_alpha_curve_csv(
+    path: Path,
+    per_model: dict[str, ShrinkageResult],
+) -> Path:
+    """Phase 2 task 19.5: per-model α grid scan with mean BS and BI."""
+    header = ["model", "alpha", "mean_bs", "bi", "n_questions", "choice_type"]
+    rows: list[list[Any]] = []
+    for model, res in per_model.items():
+        for alpha, mean_bs, bi in res.curve:
+            rows.append(
+                [model, round(alpha, 4), round(mean_bs, 6),
+                 round(bi, 4), res.n_questions, res.choice_type]
+            )
+    return _write_csv(path, header, rows)
+
+
+def _serialize_cell_params(params: Any) -> dict[str, Any]:
+    """JSON-serializable form for a Platt or Temperature param bundle."""
+    if isinstance(params, PlattParams):
+        return {"method": "platt", "a": params.a, "b": params.b}
+    if isinstance(params, TemperatureParams):
+        return {"method": "temperature", "T": params.T}
+    return {}
+
+
+def _write_calibration_params_json(
+    path: Path,
+    reports: dict[str, ModelCalibrationReport],
+) -> Path:
+    """Phase 2 task 20.7: per-model per-cell calibration parameters (all-data fit).
+
+    Layout matches design.md:
+      `{model: {cell_name: {method, a/b/T, n_questions}}}`.
+    """
+    payload: dict[str, Any] = {}
+    for model, rep in reports.items():
+        cells_payload: dict[str, Any] = {}
+        for name, cell in rep.cells.items():
+            entry = _serialize_cell_params(cell.params)
+            entry["n_questions"] = cell.n_questions
+            entry["question_type"] = cell.cell.question_type
+            entry["choice_type"] = cell.cell.choice_type
+            cells_payload[name] = entry
+        payload[model] = cells_payload
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return path
+
+
+_CALIBRATED_SUMMARY_FIELDS: tuple[str, ...] = (
+    "model",
+    "n_questions",
+    "fallback_share",
+    "bi_uncal",
+    "bi_cal",
+    "nll_uncal",
+    "nll_cal",
+    "ece_uncal",
+    "ece_cal",
+    "abi_crowd_uncal",
+    "abi_crowd_cal",
+    "abi_uniform_uncal",
+    "abi_uniform_cal",
+    "overfit_warning",
+)
+
+
+def _write_per_model_summary_calibrated_csv(
+    path: Path,
+    reports: dict[str, ModelCalibrationReport],
+) -> Path:
+    """Phase 2 task 20.7: post-calibration headline metrics + uncal sanity."""
+    header = list(_CALIBRATED_SUMMARY_FIELDS)
+    rows: list[list[Any]] = []
+    for model, rep in reports.items():
+        rows.append([
+            model,
+            rep.uncal_aggregate.n_questions,
+            _round(rep.uncal_aggregate.fallback_share),
+            _round(rep.uncal_aggregate.bi),
+            _round(rep.cal_aggregate.bi),
+            _round(rep.uncal_aggregate.nll),
+            _round(rep.cal_aggregate.nll),
+            _round(rep.ece_uncal),
+            _round(rep.ece_cal),
+            _round(rep.uncal_aggregate.abi_crowd),
+            _round(rep.cal_aggregate.abi_crowd),
+            _round(rep.uncal_aggregate.abi_uniform),
+            _round(rep.cal_aggregate.abi_uniform),
+            int(rep.overfit_warning),
+        ])
+    return _write_csv(path, header, rows)
+
+
+def _flat_pairs_for_reliability(
+    rep: ModelCalibrationReport, *, calibrated: bool
+) -> tuple[list[float], list[int]]:
+    """Same flatten convention as `calibration._flat_pairs_for_ece`.
+
+    For single-choice: top-1 confidence vs top-1 hit. For multi: per-(q, l)
+    pairs. Imported into writers.py rather than `from calibration import`
+    private helper so a future refactor of the helper doesn't break the
+    JSON layout consumed by `scripts/plot_analysis.py`.
+    """
+    probs: list[float] = []
+    obs: list[int] = []
+    for cr in rep.calibrated_rows:
+        r = cr.row
+        p_vec = cr.cal_probs if calibrated else r.probs
+        if r.choice_type == "single":
+            best_i = 0
+            best_p = p_vec[0]
+            for i, p in enumerate(p_vec):
+                if p > best_p:
+                    best_p = p
+                    best_i = i
+            probs.append(best_p)
+            obs.append(int(r.obs[best_i]))
+        else:
+            for p, o in zip(p_vec, r.obs):
+                probs.append(p)
+                obs.append(int(o))
+    return probs, obs
+
+
+def _bins_for_model_qtype(
+    rep: ModelCalibrationReport, qtype: str, *, calibrated: bool, n_bins: int = 15
+) -> list[CalibrationBin]:
+    """Reliability bins restricted to a single question_type."""
+    from .calibration import reliability_bins
+
+    probs: list[float] = []
+    obs: list[int] = []
+    for cr in rep.calibrated_rows:
+        r = cr.row
+        if r.question_type != qtype:
+            continue
+        p_vec = cr.cal_probs if calibrated else r.probs
+        if r.choice_type == "single":
+            best_i = 0
+            best_p = p_vec[0]
+            for i, p in enumerate(p_vec):
+                if p > best_p:
+                    best_p = p
+                    best_i = i
+            probs.append(best_p)
+            obs.append(int(r.obs[best_i]))
+        else:
+            for p, o in zip(p_vec, r.obs):
+                probs.append(p)
+                obs.append(int(o))
+    return reliability_bins(probs, obs, n_bins)
+
+
+def _write_reliability_data_json(
+    path: Path,
+    reports: dict[str, ModelCalibrationReport],
+    *,
+    calibrated: bool,
+    n_bins: int = 15,
+) -> Path:
+    """Phase 2 task 20.7: per-(model, qtype) bins for reliability diagrams.
+
+    Layout: `{model: {qtype: [{n, mean_p, mean_o, bin_lo, bin_hi}, ...]}}`.
+    Empty bins are skipped (consistent with `reliability_bins`).
+    """
+    payload: dict[str, Any] = {}
+    for model, rep in reports.items():
+        per_qtype: dict[str, list[dict[str, Any]]] = {}
+        qtypes = sorted({cr.row.question_type for cr in rep.calibrated_rows})
+        for qt in qtypes:
+            bins = _bins_for_model_qtype(rep, qt, calibrated=calibrated, n_bins=n_bins)
+            per_qtype[qt] = [
+                {
+                    "bin_lo": round(b.bin_lo, 4),
+                    "bin_hi": round(b.bin_hi, 4),
+                    "n": b.n,
+                    "mean_p": round(b.mean_p, 6),
+                    "mean_o": round(b.mean_o, 6),
+                }
+                for b in bins
+            ]
+        payload[model] = per_qtype
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_brier_decomposition_csv(
+    path: Path,
+    reports: dict[str, ModelCalibrationReport],
+) -> Path:
+    """Phase 2 task 20.7: Murphy three-decomposition, uncal + cal."""
+    header = [
+        "model", "kind",
+        "rel", "res", "unc", "total",
+    ]
+    rows: list[list[Any]] = []
+    for model, rep in reports.items():
+        for kind, decomp in (
+            ("uncalibrated", rep.murphy_uncal),
+            ("calibrated", rep.murphy_cal),
+        ):
+            if decomp is None:
+                continue
+            rows.append([
+                model, kind,
+                round(decomp.rel, 6),
+                round(decomp.res, 6),
+                round(decomp.unc, 6),
+                round(decomp.total, 6),
+            ])
+    return _write_csv(path, header, rows)
+
+
+def _bs_to_bi(mean_bs: float) -> float:
+    """$100 \\cdot (1 - \\sqrt{\\overline{BS}})$ — the same convention `proper_score.brier_index` uses."""
+    import math
+
+    if mean_bs < 0:
+        return 100.0 * (1.0 + math.sqrt(-mean_bs))
+    return 100.0 * (1.0 - math.sqrt(mean_bs))
+
+
+def _write_paired_delta_bi_csv(
+    path: Path,
+    pairs: list[ModelPairResult],
+) -> Path:
+    """Phase 2 task 21.6: pairwise mean ΔBS converted to ΔBI for readability."""
+    header = [
+        "model_a", "model_b", "n_questions",
+        "delta_bs", "ci_low_bs", "ci_high_bs",
+        "delta_bi_approx",
+        "p_raw", "p_holm", "posterior_a_better",
+    ]
+    rows: list[list[Any]] = []
+    for p in pairs:
+        # ΔBI = BI_b - BI_a (positive means b is worse — i.e. a is better).
+        # Approximated by linearising around the per-pair mean BS; not the
+        # same as recomputing BI from each side but adequate as a column
+        # alongside the BS-domain CIs.
+        delta_bi_approx = -p.delta_bs_mean * 100.0
+        rows.append([
+            p.model_a, p.model_b, p.n_questions,
+            round(p.delta_bs_mean, 6),
+            round(p.ci_low, 6),
+            round(p.ci_high, 6),
+            round(delta_bi_approx, 4),
+            round(p.p_raw, 6),
+            round(p.p_holm, 6) if p.p_holm is not None else None,
+            round(p.posterior_a_better, 6),
+        ])
+    return _write_csv(path, header, rows)
+
+
+def _write_pairwise_significance_csv(
+    path: Path,
+    pairs: list[ModelPairResult],
+    *,
+    alpha: float = 0.05,
+) -> Path:
+    """Phase 2 task 21.6: significance flags at α=0.05 using Holm-adjusted p-values."""
+    header = [
+        "model_a", "model_b", "delta_bs", "p_raw", "p_holm",
+        "is_significant_raw", "is_significant_holm",
+    ]
+    rows: list[list[Any]] = []
+    for p in pairs:
+        raw_sig = int(p.p_raw < alpha)
+        holm_sig = int(p.p_holm is not None and p.p_holm < alpha)
+        rows.append([
+            p.model_a, p.model_b,
+            round(p.delta_bs_mean, 6),
+            round(p.p_raw, 6),
+            round(p.p_holm, 6) if p.p_holm is not None else None,
+            raw_sig, holm_sig,
+        ])
+    return _write_csv(path, header, rows)
+
+
+def _write_posterior_pairwise_csv(
+    path: Path,
+    pairs: list[ModelPairResult],
+) -> Path:
+    """Phase 2 task 21.6: $\\Pr(\\mathrm{BI}_A > \\mathrm{BI}_B)$ from paired bootstrap."""
+    header = ["model_a", "model_b", "n_questions", "prob_a_better"]
+    rows: list[list[Any]] = []
+    for p in pairs:
+        rows.append([
+            p.model_a, p.model_b, p.n_questions,
+            round(p.posterior_a_better, 6),
+        ])
+    return _write_csv(path, header, rows)
+
+
+def _write_per_model_by_difficulty_csv(
+    path: Path,
+    per_model_per_tier: dict[str, dict[str, ModelProbabilisticAggregate]],
+) -> Path:
+    """Phase 2 task 21.6: per-(model, tier) probabilistic aggregates."""
+    header = [
+        "model", "difficulty_tertile", "n_questions",
+        "bi", "nll", "abi_crowd", "abi_uniform", "fallback_share",
+    ]
+    rows: list[list[Any]] = []
+    tier_order = {"low": 0, "mid": 1, "high": 2}
+    for model in sorted(per_model_per_tier.keys()):
+        tiers = per_model_per_tier[model]
+        for tier in sorted(tiers.keys(), key=lambda t: tier_order.get(t, 99)):
+            agg = tiers[tier]
+            rows.append([
+                model, tier, agg.n_questions,
+                _round(agg.bi),
+                _round(agg.nll),
+                _round(agg.abi_crowd),
+                _round(agg.abi_uniform),
+                _round(agg.fallback_share),
+            ])
+    return _write_csv(path, header, rows)
+
+
+def _write_paired_delta_bi_by_difficulty_csv(
+    path: Path,
+    by_pair_per_tier: dict[tuple[str, str], dict[str, PairedBootstrapResult]],
+) -> Path:
+    """Phase 2 task 21.6: pairwise ΔBS within each difficulty tertile."""
+    header = [
+        "model_a", "model_b", "difficulty_tertile", "n_questions",
+        "delta_bs", "ci_low_bs", "ci_high_bs",
+        "delta_bi_approx", "p_two_sided",
+    ]
+    rows: list[list[Any]] = []
+    tier_order = {"low": 0, "mid": 1, "high": 2}
+    for (ma, mb) in sorted(by_pair_per_tier.keys()):
+        tiers = by_pair_per_tier[(ma, mb)]
+        for tier in sorted(tiers.keys(), key=lambda t: tier_order.get(t, 99)):
+            res = tiers[tier]
+            rows.append([
+                ma, mb, tier, res.n_questions,
+                round(res.delta_mean, 6),
+                round(res.ci_low, 6),
+                round(res.ci_high, 6),
+                round(-res.delta_mean * 100.0, 4),
+                round(res.p_two_sided, 6),
+            ])
+    return _write_csv(path, header, rows)
+
+
 __all__ = [
     "_SUMMARY_FIELDS",
+    "_CALIBRATED_SUMMARY_FIELDS",
     "_write_csv",
     "_write_per_model_summary_csv",
     "_write_slice_csv",
@@ -303,5 +695,15 @@ __all__ = [
     "_write_finish_reason_breakdown_csv",
     "_write_per_model_summary_md",
     "_write_overall_json",
+    "_write_shrinkage_alpha_curve_csv",
+    "_write_calibration_params_json",
+    "_write_per_model_summary_calibrated_csv",
+    "_write_reliability_data_json",
+    "_write_brier_decomposition_csv",
+    "_write_paired_delta_bi_csv",
+    "_write_pairwise_significance_csv",
+    "_write_posterior_pairwise_csv",
+    "_write_per_model_by_difficulty_csv",
+    "_write_paired_delta_bi_by_difficulty_csv",
     "_fmt",
 ]
