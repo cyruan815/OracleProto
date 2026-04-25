@@ -426,6 +426,8 @@ CREATE TABLE run_meta (
     source_db_hash        TEXT NOT NULL,
     metadata_hash         TEXT NOT NULL,
     prompt_templates_hash TEXT NOT NULL,
+    reflection_protocol_text TEXT,         -- prompts.REFLECTION_PROTOCOL 全文; REACT_REFLECTION_PROTOCOL=false 时为 NULL
+    reflection_protocol_hash TEXT,         -- sha256(reflection_protocol_text)[:16]; 同上, 关时 NULL
     training_cutoff       TEXT,            -- 该模型的 cutoff (YYYY-MM-DD), 未声明时为 NULL
     started_at            TEXT NOT NULL,
     finished_at           TEXT
@@ -451,6 +453,13 @@ CREATE TABLE run_results (
     s0_search_calls         TEXT,
     s0_error                TEXT,
     s0_created_at           TEXT,
+    -- v3 新增观测列 (schema_version=3): 单步指标 + 终态信封
+    s0_finish_reason        TEXT,
+    s0_nudges_used          INTEGER,
+    s0_step_metrics         TEXT,          -- JSON 数组, 每元素一个 step 快照, 见 §5.2
+    s0_response_id          TEXT,          -- ChatCompletion.id (最后一轮)
+    s0_system_fingerprint   TEXT,          -- ChatCompletion.system_fingerprint (最后一轮)
+    s0_service_tier         TEXT,          -- ChatCompletion.service_tier (最后一轮)
 
     -- ...相同的 s1_* / s2_* 字段组...
 
@@ -458,6 +467,11 @@ CREATE TABLE run_results (
 );
 CREATE INDEX idx_run_results_question ON run_results(question_id);
 ```
+
+> **schema_version 3 升级说明**：v2 → v3 由 `forecast_eval.db._migrate_v2_to_v3` 通过
+> `ALTER TABLE … ADD COLUMN` 完成（`run_results` 加 6 × N 个 `s{i}_*` 列、`run_meta`
+> 加 2 列、并 INSERT `(3, utcnow_iso())` 进 `schema_version`）。SQLite 的 ADD COLUMN
+> 仅写表元数据，O(1) 完成；老行的新列默认 NULL。续跑路径上首次打开旧 DB 自动迁移。
 
 连接初始化 PRAGMA（所有 sqlite3 连接都执行一遍）：
 ```sql
@@ -480,6 +494,22 @@ PRAGMA busy_timeout = 5000;      -- 多 reader 场景下避免 SQLITE_BUSY
 | `s{i}_search_calls`           | 每次 `web_search` 调用的元数据 list（query / end_date / n_results / published_dates）                   |
 | `s{i}_error`                  | retry 用尽后的错误分类码；正常完成（含 refusal / parse fail）为 NULL                                    |
 | `s{i}_created_at`             | 写入时刻的 UTC ISO-8601；作为"该 sample 槽是否被填过"的唯一信号                                         |
+| `s{i}_finish_reason`          | 最后一轮 `ChatCompletion.choices[0].finish_reason`（`stop` / `tool_calls` / `length` / `content_filter` …）；error 行（never reached LLM）写 NULL |
+| `s{i}_nudges_used`            | 该样本中"strict floor 未达标 → reminder 注入"的次数计数；上限受 `REACT_MAX_NUDGES` 限制；error 行写 0    |
+| `s{i}_step_metrics`           | 每个 ReAct 轮的 JSON 数组；元素键 `step / prompt / completion / reasoning / latency_ms / finish_reason / n_tool_calls`，`latency_ms` 为该轮 `llm.chat` 的 `time.monotonic()` 墙时（仅 LLM 调用，不含 search） |
+| `s{i}_response_id`            | 最后一轮 `ChatCompletion.id`（provider 唯一 ID，便于追溯 / 申诉）                                        |
+| `s{i}_system_fingerprint`     | 最后一轮 `ChatCompletion.system_fingerprint`（provider 提供时；用于检测 provider 端模型路由变更）        |
+| `s{i}_service_tier`           | 最后一轮 `ChatCompletion.service_tier`（OpenAI 等返回的实际 tier，例：`default` / `scale` / `flex`）     |
+
+> 5 个新增字段（`finish_reason` / `response_id` / `system_fingerprint` / `service_tier`
+> / `step_metrics`）只反映**最后一次** `llm.chat` 的封装；中间步骤的 finish_reason
+> 进 `step_metrics`，envelope（response_id 等）按 OpenAI ChatCompletion 顶层语义、
+> 每轮独立，目前不全部入库以控制宽表列爆炸。
+>
+> `run_meta.reflection_protocol_text` / `reflection_protocol_hash` 与
+> `prompt_templates_hash` **独立分离**：前者只刻 `prompts.REFLECTION_PROTOCOL`
+> 的内容指纹（开/关 + 文本变更皆敏感），便于跨 run 区分"反思协议是否启用 / 是否
+> 改版"，而不会污染主模板的内容指纹。
 
 ### 5.3 断点续跑
 
@@ -975,6 +1005,8 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
 | **avg latency_ms / avg tokens** | 同名字段平均                                                                      | 反映成本                |
 | **error rate by kind**          | 按 `error` 分类统计占比（不含 `skipped_training_cutoff`）                         | 反映稳定性              |
 | **training_cutoff_skip rate**   | `count(error='skipped_training_cutoff') / count(*)` per model                     | 该模型被剔除多少题      |
+| **avg_nudges_used**             | `mean(nudges_used)` over eligible samples（v3 起）                                 | 反映"strict floor 触发率"——值越大说明模型越频繁触发 reminder；为 0 时说明几乎都自发搜索 |
+| **finish_reason_breakdown**     | per-model 的 `Counter[finish_reason]`，over eligible samples（v3 起）             | NULL 计入 `<missing>` 桶；用来甄别 `length`（输出截断）/ `content_filter`（被拒）等异常占比 |
 
 > 指标命名变更：原文档里的 `pass@3 = sum(correct)≥3` 与业界通用的 `pass@k` 语义不一致（后者是 "any correct in k"），容易误读。现在明确用 `pass_any@N`（= any）与 `at_least_k_correct@N`（= 阈值）两个独立命名。
 

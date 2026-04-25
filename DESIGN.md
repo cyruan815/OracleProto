@@ -254,14 +254,52 @@ ReAct 循环中，几种工具相关错误都不会中断整个 sample：
 
 ### 5.1 为什么是宽表
 
-每道题一行，每个 sample 一组 `s{i}_*` 列（14 个字段）。
+每道题一行，每个 sample 一组 `s{i}_*` 列（v3 起 20 个字段：原 14 个 + 新增 6 个观测列）。
 对比"长表 + (question_id, sample_idx) 复合主键"，宽表的优势：
 
 * **resume 查询天然简单**：`SELECT question_id WHERE s{i}_created_at IS NOT NULL` 直接扫一列，不需要 group by。
 * **单行原子读**：分析脚本读一行，所有 sample 全在；不需要 join 或聚合。
 * **schema 决定 N**：建表时就把 `SAMPLING_N` 钉死，后续无论何时打开 DB，结构都和当时一致。
 
-代价：`SAMPLING_N` 必须在 run 开始前确定，不能中途扩；schema 也需要"动态生成 14 × N 列"。这个代价在**评测场景下是可接受的**——`SAMPLING_N` 本来就属于 run 配置的一部分，不应该在 run 过程中变。
+代价：`SAMPLING_N` 必须在 run 开始前确定，不能中途扩；schema 也需要"动态生成 20 × N 列"。这个代价在**评测场景下是可接受的**——`SAMPLING_N` 本来就属于 run 配置的一部分，不应该在 run 过程中变。
+
+#### 为什么 `step_metrics` 用 JSON 列而不是单独长表
+
+ReAct 每轮的单步指标天然是 1-to-N（一个 sample → 多个 step），看起来很想拆出
+`run_step_metrics(question_id, sample_idx, step, prompt, completion, ...)` 这种长表。
+项目最终把它压成 `s{i}_step_metrics TEXT`（JSON 数组）有三条理由：
+
+* **没有跨 step 的查询需求**：分析层永远是"按 sample 取整段轨迹然后处理"，从来不
+  做 `SELECT * FROM steps WHERE finish_reason='length'` 这种行级聚合——所有过滤都
+  落在 sample 粒度。把这种数据正规化进表，相当于为不存在的查询付索引/JOIN 成本。
+* **保持单 writer per model 的简单性**：v3 把数据从 14 列扩到 20 列只是
+  `ALTER TABLE ADD COLUMN`，零复杂度；如果改成长表，就要新增第二张表 + 第二条
+  外键 + 第二条 INSERT 路径，writer 边界一下子从"一行 upsert"变成"多行事务"，
+  和 §5.2 的"用编排消除竞争"原则冲突。
+* **JSON 体量可控**：每 sample 的 step 数受 `REACT_MAX_STEPS`（默认 6）限制，单条
+  JSON 通常 < 1 KB；v3 schema 在 SAMPLING_N=3 / 题量 ~100 下，DB 增量在 KB 级，
+  WAL 完全吃得下。
+
+代价：长表能做的"按 step 聚合"在这里只能在 Python 里 reload + parse。考虑到分析
+脚本本来就是一次性脚本（`python -m forecast_eval.analysis`），这个代价可接受。
+
+#### 为什么 `reflection_protocol_hash` 与 `prompt_templates_hash` 独立
+
+直觉上，反思协议是 prompt 的一部分，似乎应该并入 `prompt_templates_hash`。但项目
+故意把它单独拎出来，理由是**它们的变更节奏与解释维度不同**：
+
+* `prompt_templates_hash` 反映的是"题目内容是怎么渲染给模型的"——题干、选项、
+  指令、问题类型说明等的**模板**。模板一旦改动，所有题面都变了，这是一个粗粒度
+  的 run 区分键。
+* `reflection_protocol_hash` 反映的是"模型在 ReAct 主循环里被注入了哪段元认知
+  指令"，本质上是**搜索行为先验的开关**。它的变体只有三个轴：开/关、文本是否被
+  改、版本号。把它合进主模板 hash 会让"我只是关掉了反思"这种小变更看起来等价于
+  "我重写了所有题模板"——丢失了对照实验的解释力。
+
+把两个 hash 分离的好处：跨 run 跑 A/B 比较时，可以选择"只允许
+`reflection_protocol_hash` 不同，其他全等"——这正是消融实验的常见诉求。同样地，
+`reflection_protocol_text`（全文）也并存于 `run_meta`，便于在不依赖 prompts.py
+源代码的情况下做事后比对（例如发布报告时对方拿到的是脱敏 DB 而不是 git repo）。
 
 ### 5.2 单 writer per model + WAL
 
