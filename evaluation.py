@@ -38,7 +38,7 @@ from forecast_eval import loader, runner
 from forecast_eval.config import Settings
 from forecast_eval.errors import AuthError
 from forecast_eval.llm import AuthError as LLMAuthError
-from forecast_eval.prompts import REFLECTION_PROTOCOL
+from forecast_eval.prompts import BELIEF_PROTOCOL, REFLECTION_PROTOCOL
 from forecast_eval.types import QFilter
 
 
@@ -54,6 +54,22 @@ def _compute_reflection_protocol(settings: Settings) -> tuple[str | None, str | 
     if not settings.REACT_REFLECTION_PROTOCOL:
         return None, None
     text = REFLECTION_PROTOCOL
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return text, digest
+
+
+def _compute_belief_protocol(settings: Settings) -> tuple[str | None, str | None]:
+    """Return `(text, hash16)` when belief protocol is enabled, else (None, None).
+
+    Mirrors `_compute_reflection_protocol`: the belief protocol fingerprint is
+    independent of `prompt_templates_hash` AND of `reflection_protocol_hash`,
+    so two runs that differ only in `Settings.BELIEF_PROTOCOL` keep the same
+    template hash but diverge here. Recorded both in `run_meta.belief_protocol_*`
+    columns and at the manifest top level for grep-without-DB convenience.
+    """
+    if not settings.BELIEF_PROTOCOL:
+        return None, None
+    text = BELIEF_PROTOCOL
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     return text, digest
 
@@ -116,14 +132,18 @@ def _write_manifest(
     metadata_hash: str,
     prompt_templates_hash: str,
     reflection_protocol_hash: str | None,
+    belief_protocol_hash: str | None,
     started_at: str,
 ) -> None:
-    # `reflection_protocol_hash` lives at the top level so users can grep
-    # manifest.json without opening any DB. The full text stays inside
-    # `run_meta.reflection_protocol_text` (per-model DB).
+    # `reflection_protocol_hash` and `belief_protocol_hash` live at the top
+    # level so users can grep manifest.json without opening any DB. The full
+    # texts stay inside `run_meta.{reflection,belief}_protocol_text`.
+    # `analysis_schema` lets the analysis layer dispatch on which v4 metric
+    # families to compute (probabilistic family vs accuracy-only fallback).
     payload: dict[str, Any] = {
         "run_id": run_id,
         "schema_version": dbmod.SCHEMA_VERSION,
+        "analysis_schema": "v4",
         "sampling_n": settings.SAMPLING_N,
         "models": list(settings.MODELS),
         "model_files": model_files,
@@ -141,6 +161,7 @@ def _write_manifest(
             "prompt_templates": prompt_templates_hash,
         },
         "reflection_protocol_hash": reflection_protocol_hash,
+        "belief_protocol_hash": belief_protocol_hash,
         "started_at": started_at,
         "finished_at": None,
     }
@@ -179,6 +200,8 @@ def _init_model_db(
     prompt_templates_hash: str,
     reflection_protocol_text: str | None,
     reflection_protocol_hash: str | None,
+    belief_protocol_text: str | None,
+    belief_protocol_hash: str | None,
 ) -> tuple[sqlite3.Connection, dict[str, str], list]:
     conn = dbmod.connect(db_path)
     dbmod.init_schema(conn, settings.SAMPLING_N)
@@ -198,6 +221,8 @@ def _init_model_db(
         training_cutoff=cutoff.isoformat() if cutoff else None,
         reflection_protocol_text=reflection_protocol_text,
         reflection_protocol_hash=reflection_protocol_hash,
+        belief_protocol_text=belief_protocol_text,
+        belief_protocol_hash=belief_protocol_hash,
     )
     return conn, templates, questions
 
@@ -238,6 +263,7 @@ async def _run_async(
     metadata_hash = dbmod.compute_metadata_hash(raw_features)
     templates_hash = dbmod.compute_prompt_templates_hash(templates_preview)
     reflection_text, reflection_hash = _compute_reflection_protocol(settings)
+    belief_text, belief_hash = _compute_belief_protocol(settings)
 
     filters_snapshot: dict[str, Any] = {
         **filters.snapshot(),
@@ -271,6 +297,8 @@ async def _run_async(
                 prompt_templates_hash=templates_hash,
                 reflection_protocol_text=reflection_text,
                 reflection_protocol_hash=reflection_hash,
+                belief_protocol_text=belief_text,
+                belief_protocol_hash=belief_hash,
             )
             conns[model] = conn
             templates_by_model[model] = templates
@@ -289,6 +317,7 @@ async def _run_async(
             metadata_hash=metadata_hash,
             prompt_templates_hash=templates_hash,
             reflection_protocol_hash=reflection_hash,
+            belief_protocol_hash=belief_hash,
             started_at=started_at,
         )
 
