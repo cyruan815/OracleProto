@@ -115,8 +115,17 @@ class Settings(BaseSettings):
     SEARCH_BACKOFF_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [2, 5, 15])
 
     # ReAct
-    REACT_MAX_STEPS: int = 10
+    REACT_MAX_STEPS: int = 12
     REACT_MAX_SEARCH_CALLS: int = 8
+    # 反思协议总开关: 启用后 user prompt 末尾追加多步推理脚手架, 显著提升搜索 + 反思深度.
+    # 不会写入 prompt_templates (因此 prompt_templates_hash 保持不变), 但会作为 user message
+    # 实际文本落入每个 sample 的 user_prompt 字段, 同时通过 config_snapshot 记入 run_meta.
+    REACT_REFLECTION_PROTOCOL: bool = True
+    # 软性最低搜索次数: LLM 试图给最终答案但累计 web_search < min 时, 注入一条 user nudge
+    # 让它继续检索. 0 = 关闭 (默认; 主要靠反思协议自然驱动). >0 = 开启兜底 floor.
+    REACT_MIN_SEARCH_CALLS: int = 0
+    # nudge 最多注入几次, 防止 LLM 与系统互相 nudge 死循环. REACT_MAX_STEPS 仍是硬天花板.
+    REACT_MAX_NUDGES: int = 2
 
     # Sampling / Run
     SAMPLING_N: int = 5
@@ -255,6 +264,15 @@ class Settings(BaseSettings):
             raise ValueError("concurrency settings must be >= 1")
         if self.REACT_MAX_STEPS < 1 or self.REACT_MAX_SEARCH_CALLS < 0:
             raise ValueError("REACT_MAX_STEPS must be >= 1 and REACT_MAX_SEARCH_CALLS >= 0")
+        if self.REACT_MIN_SEARCH_CALLS < 0:
+            raise ValueError("REACT_MIN_SEARCH_CALLS must be >= 0 (0 = disabled)")
+        if self.REACT_MIN_SEARCH_CALLS > self.REACT_MAX_SEARCH_CALLS:
+            raise ValueError(
+                "REACT_MIN_SEARCH_CALLS must not exceed REACT_MAX_SEARCH_CALLS "
+                f"(min={self.REACT_MIN_SEARCH_CALLS}, max={self.REACT_MAX_SEARCH_CALLS})"
+            )
+        if self.REACT_MAX_NUDGES < 0:
+            raise ValueError("REACT_MAX_NUDGES must be >= 0")
         if self.TAVILY_RAW_CONTENT_MAX_CHARS < 0:
             raise ValueError("TAVILY_RAW_CONTENT_MAX_CHARS must be >= 0 (0 = no truncation)")
         return self
