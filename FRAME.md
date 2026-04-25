@@ -636,8 +636,17 @@ SEARCH_RETRY_MAX=3
 SEARCH_BACKOFF_S=2,5,15
 
 # -------- ReAct Loop --------
-REACT_MAX_STEPS=10
+REACT_MAX_STEPS=12
 REACT_MAX_SEARCH_CALLS=8
+# 反思协议: 启用后在 user message 末尾附加多步推理脚手架, 显著抬升工具调用次数
+# 与思考深度. 不写入 dataset_metadata (prompt_templates_hash 保持不变), 协议
+# 文本通过 user_prompt 字段每条 sample 落库, 配置开关由 config_snapshot 记录.
+REACT_REFLECTION_PROTOCOL=true
+# 软性最低搜索次数 (默认 0=关). >0 时, LLM 试图给最终答案但搜索数 < 该值会被
+# 注入一条 user nudge 让其继续检索. 受 REACT_MAX_SEARCH_CALLS 上限约束.
+REACT_MIN_SEARCH_CALLS=0
+# 单 sample nudge 注入次数上限 (默认 2), 防止 LLM 与系统反复 nudge 死循环.
+REACT_MAX_NUDGES=2
 
 # -------- Sampling --------
 # 每道题每个模型采样几次 (pass@1 avg / pass_any@N / majority vote 都基于这 N 次)
@@ -677,6 +686,8 @@ LOG_DIR=./logs
 - **`RUN_ID` 自动生成格式**：`YYYYMMDD-HHMMSS-xxxx`，例如 `20260424-120344-a7k3`，`ls` 天然按时间排序；同时作为 `RUNS_ROOT/{run_id}/` 目录名。
 - **`RUNS_ROOT`**：评测产物根目录（默认 `./runs`），每个 run 占一个子目录。
 - **`WRITE_MESSAGES_TRACE`**：`true` 存完整 messages JSON（方便 debug 但 db 变大）；`false` 只存关键字段。
+- **`REACT_REFLECTION_PROTOCOL`**：`true`（默认）在每条 sample 的 user message 末尾追加多步推理脚手架（拆题 / ≥3 检索角度 / 每次搜索后反思 / 交叉验证 / 反方向自检 / 置信度声明）。协议文本不进 `dataset_metadata`，因此 `prompt_templates_hash` 不受影响，但渲染后的完整 user message 会写入每条 sample 的 `user_prompt` 字段，开关同时由 `run_meta.config_snapshot` 记录，可事后比对开/关协议下的行为差异。
+- **`REACT_MIN_SEARCH_CALLS` / `REACT_MAX_NUDGES`**：可选兜底机制。当 LLM 在 `web_search` 调用次数还不足 `REACT_MIN_SEARCH_CALLS` 时就试图给最终答案，系统会向消息序列注入一条 user nudge 提醒它再换角度检索；同一个 sample 最多 nudge `REACT_MAX_NUDGES` 次，整体仍受 `REACT_MAX_STEPS` / `REACT_MAX_SEARCH_CALLS` 硬上限约束。`REACT_MIN_SEARCH_CALLS=0`（默认）等价于关闭兜底，仅靠反思协议驱动；`ENABLE_WEB_SEARCH=false` 时 nudge 自动失效（无搜索可做）。Settings 校验会拒绝 `min > max`。
 - **脱敏**：`run_meta.config_snapshot` 写入前 `config.py` 必须对 `LLM_API_KEY` / `TAVILY_API_KEY` 等敏感字段执行 redaction（只保留前 4 位 + 长度 + `sha256[:12]`），敏感明文一律不落库。
 
 ---
@@ -829,8 +840,13 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
                 + timedelta(days=cfg.TAVILY_END_DATE_OFFSET_DAYS)).isoformat()
 
     # ② 拼接 user message: agent_role + event + outcomes_block + output_format + guidance
-    #    全部从 prompt_templates 读, 与源数据保持解耦
-    user_prompt = prompts.render_user_prompt(q, cfg.PROMPT_TEMPLATES)
+    #    全部从 prompt_templates 读, 与源数据保持解耦; 反思协议作为 addendum 在
+    #    REACT_REFLECTION_PROTOCOL=true 时附加, 仍是单条 user message.
+    user_prompt = prompts.render_user_prompt(
+        q,
+        cfg.PROMPT_TEMPLATES,
+        reflection_protocol=prompts.REFLECTION_PROTOCOL if cfg.REACT_REFLECTION_PROTOCOL else None,
+    )
 
     # ③ 整体作为单条 user message (最忠实模板; 不再拆 system/user)
     messages = [{"role": "user", "content": user_prompt}]
@@ -838,6 +854,7 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
     final_raw = ""
     t0 = time.monotonic()
     tokens = {"prompt": 0, "completion": 0, "reasoning": 0}
+    nudges_used = 0
     step = 0
 
     for step in range(cfg.REACT_MAX_STEPS):
@@ -854,8 +871,29 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
         messages.append(msg.model_dump(exclude_unset=True))
         _accumulate_tokens(tokens, resp.usage)
 
-        # 没 tool_call = LLM 给最终答案
+        # 没 tool_call = LLM 想给最终答案. 软性最低搜索次数兜底:
+        # 不够就 nudge 一次让它继续检索 (受 REACT_MAX_NUDGES 与 REACT_MAX_STEPS 共同保护).
         if not msg.tool_calls:
+            nudge_enabled = (
+                cfg.ENABLE_WEB_SEARCH
+                and cfg.REACT_MIN_SEARCH_CALLS > 0
+                and cfg.REACT_MAX_NUDGES > 0
+            )
+            if (
+                nudge_enabled
+                and len(search_calls) < cfg.REACT_MIN_SEARCH_CALLS
+                and nudges_used < cfg.REACT_MAX_NUDGES
+                and step < cfg.REACT_MAX_STEPS - 1
+            ):
+                messages.append({
+                    "role": "user",
+                    "content": prompts._build_nudge_message(
+                        searches_done=len(search_calls),
+                        min_required=cfg.REACT_MIN_SEARCH_CALLS,
+                    ),
+                })
+                nudges_used += 1
+                continue
             final_raw = msg.content or ""
             break
 
