@@ -8,7 +8,7 @@
 
 > 重要限制：工具级时间截断只约束**工具搜索**这一条信息通路；模型参数记忆、provider 内置 browsing、搜索结果 snippet/缓存等泄漏源不可能被 Tool 层阻断。完整威胁模型与缓解手段见 §3.8。
 
-- 评测 322 道题（`yes_no` 93 + `binary_named` 11 + `multiple_choice` 218），其中 285 道单选 + 37 道多选
+- 评测 319 道题（`yes_no` 93 + `binary_named` 11 + `multiple_choice` 215），其中 285 道单选 + 34 道多选
 - 通过 OpenRouter 的 OpenAI-compatible API 同时评测多个模型
 - LLM 以 ReAct + Tool Use 模式与 `web_search` 工具交互
 - 评测结果写入独立的 `results.db`，后续分析独立进行
@@ -24,7 +24,7 @@
 > 参数可配置；自带数据集时只要保持 7 列 schema 与 `dataset_metadata` 结构一致即可。
 > `SOURCE_TABLE` 仅接受 SQLite 合法标识符 `[A-Za-z_][A-Za-z0-9_]*`，启动时校验。
 
-主表 `forecast_eval_set_example`，**322 行 × 7 列**：
+主表 `forecast_eval_set_example`，**319 行 × 7 列**：
 
 | 字段            | 类型    | 说明                                                                                                                          |
 | --------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -47,8 +47,8 @@
 | --------------------------- | -----: | ----: | ---: |
 | `yes_no`                    |     93 |     0 |   93 |
 | `binary_named`              |     11 |     0 |   11 |
-| `multiple_choice`           |    181 |    37 |  218 |
-| **合计**                    |  **285** | **37** | **322** |
+| `multiple_choice`           |    181 |    34 |  215 |
+| **合计**                    |  **285** | **34** | **319** |
 
 时间范围：`2026-01-15` ~ `2026-04-14`。
 `multiple_choice` 选项数量范围：3 ~ 35（>26 时字母进入 ASCII 续接，详见 §3.7）。
@@ -957,7 +957,7 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
 ### 12.1 命令
 
 ```bash
-# 跑全部 322 道题
+# 跑全部 319 道题
 python evaluation.py
 
 # 按 question_type 过滤 (可重复)
@@ -966,7 +966,7 @@ python evaluation.py --question-type yes_no --question-type binary_named
 # 按 choice_type 过滤 (可重复)
 python evaluation.py --choice-type single
 
-# 组合过滤 (AND): 仅跑 multiple_choice 中的多选题 (37 道)
+# 组合过滤 (AND): 仅跑 multiple_choice 中的多选题 (34 道)
 python evaluation.py --question-type multiple_choice --choice-type multi
 
 # 不在 run 结束时生成 analysis/ (原始 DB 仍会落在 db/)
@@ -1123,7 +1123,7 @@ python evaluation.py --question-type yes_no
 
 ## 17. 测试计划（`tests/`）
 
-评测单次成本较高（322 题 × 模型数 × N samples），测试先站稳能省下大量 API 费用。所有测试 **不联网**、**不烧 API**：Tavily / OpenRouter 均以 fixture 或 mock 替身存在。
+评测单次成本较高（319 题 × 模型数 × N samples），测试先站稳能省下大量 API 费用。所有测试 **不联网**、**不烧 API**：Tavily / OpenRouter 均以 fixture 或 mock 替身存在。
 
 | 测试文件                    | 覆盖对象              | 关键用例                                                                                                                                                                                                                |
 | --------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
