@@ -49,6 +49,9 @@ def _make_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("DB_COMMIT_BATCH", "2")
     monkeypatch.setenv("WRITE_MESSAGES_TRACE", "true")
     monkeypatch.setenv("TAVILY_END_DATE_OFFSET_DAYS", "-1")
+    # Pin Tavily raw_content off so the smoke test stays focused on plumbing
+    # rather than tracking the default in .env.example
+    monkeypatch.setenv("TAVILY_INCLUDE_RAW_CONTENT", "false")
     return Settings(_env_file=None)
 
 

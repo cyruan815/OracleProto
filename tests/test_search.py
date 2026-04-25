@@ -7,7 +7,14 @@ import httpx
 import pytest
 import respx
 
-from forecast_eval.search import SearchResult, TAVILY_ENDPOINT, tavily_search
+from forecast_eval.search import (
+    SearchResult,
+    SearchResultItem,
+    TAVILY_ENDPOINT,
+    _build_request_payload,
+    _truncate_raw_content,
+    tavily_search,
+)
 from forecast_eval.tools import (
     WEB_SEARCH_SCHEMA,
     extract_query,
@@ -21,7 +28,10 @@ from forecast_eval.tools import (
 class _StubSettings:
     TAVILY_API_KEY: str = "tvly-TEST"
     TAVILY_MAX_RESULTS: int = 5
-    TAVILY_INCLUDE_RAW_CONTENT: bool = False
+    TAVILY_SEARCH_DEPTH: str = "basic"
+    TAVILY_INCLUDE_RAW_CONTENT: str = "false"
+    TAVILY_RAW_CONTENT_MAX_CHARS: int = 8000
+    TAVILY_INCLUDE_ANSWER: str = "false"
     SEARCH_RETRY_MAX: int = 3
     SEARCH_BACKOFF_S: list[int] = None  # type: ignore[assignment]
     LLM_TIMEOUT_S: int = 30
@@ -30,6 +40,8 @@ class _StubSettings:
         if self.SEARCH_BACKOFF_S is None:
             self.SEARCH_BACKOFF_S = [0, 0, 0]  # tests run fast, no real backoff
 
+
+# ==================== tools schema/argument ====================
 
 def test_web_search_schema_whitelist() -> None:
     props = WEB_SEARCH_SCHEMA["function"]["parameters"]["properties"]
@@ -83,6 +95,68 @@ def test_tool_error_and_result_messages() -> None:
     assert parsed == {"answer": "yes", "results": []}
 
 
+# ==================== _build_request_payload (enum mapping) ====================
+
+def test_payload_default_uses_bool_false_and_omits_answer() -> None:
+    settings = _StubSettings()
+    p = _build_request_payload(query="q", end_date="2026-01-17", settings=settings)
+    assert p["search_depth"] == "basic"
+    # "false" 字符串需映射到 JSON bool false (Tavily 协议: bool | "markdown" | "text")
+    assert p["include_raw_content"] is False
+    # include_answer 默认关闭时整字段不应进入 payload (Tavily 默认即 false)
+    assert "include_answer" not in p
+
+
+def test_payload_include_raw_content_markdown() -> None:
+    settings = _StubSettings(TAVILY_INCLUDE_RAW_CONTENT="markdown")
+    p = _build_request_payload(query="q", end_date="2026-01-17", settings=settings)
+    assert p["include_raw_content"] == "markdown"
+
+
+def test_payload_include_raw_content_text() -> None:
+    settings = _StubSettings(TAVILY_INCLUDE_RAW_CONTENT="text")
+    p = _build_request_payload(query="q", end_date="2026-01-17", settings=settings)
+    assert p["include_raw_content"] == "text"
+
+
+def test_payload_search_depth_advanced() -> None:
+    settings = _StubSettings(TAVILY_SEARCH_DEPTH="advanced")
+    p = _build_request_payload(query="q", end_date="2026-01-17", settings=settings)
+    assert p["search_depth"] == "advanced"
+
+
+@pytest.mark.parametrize("answer_mode", ["basic", "advanced"])
+def test_payload_emits_include_answer_when_enabled(answer_mode: str) -> None:
+    settings = _StubSettings(TAVILY_INCLUDE_ANSWER=answer_mode)
+    p = _build_request_payload(query="q", end_date="2026-01-17", settings=settings)
+    assert p["include_answer"] == answer_mode
+
+
+# ==================== _truncate_raw_content ====================
+
+def test_truncate_raw_content_under_limit_returns_intact() -> None:
+    assert _truncate_raw_content("hello", 10) == "hello"
+    assert _truncate_raw_content("hello", 5) == "hello"  # 等长不截断
+
+
+def test_truncate_raw_content_over_limit_appends_marker() -> None:
+    out = _truncate_raw_content("a" * 100, 10)
+    assert out is not None
+    assert out.startswith("a" * 10)
+    assert "truncated to 10 chars" in out
+
+
+def test_truncate_raw_content_zero_means_no_truncation() -> None:
+    long = "a" * 50000
+    assert _truncate_raw_content(long, 0) == long
+
+
+def test_truncate_raw_content_none_passthrough() -> None:
+    assert _truncate_raw_content(None, 1000) is None
+
+
+# ==================== tavily_search end-to-end ====================
+
 @respx.mock
 async def test_tavily_search_success_injects_end_date() -> None:
     route = respx.post(TAVILY_ENDPOINT).mock(
@@ -96,6 +170,8 @@ async def test_tavily_search_success_injects_end_date() -> None:
                         "url": "https://example.com/a",
                         "content": "Short summary",
                         "published_date": "2026-01-16",
+                        "score": 0.71,
+                        "raw_content": "## Heading\nfull markdown body...",
                     },
                     {
                         "title": "Follow-up",
@@ -107,7 +183,7 @@ async def test_tavily_search_success_injects_end_date() -> None:
         )
     )
 
-    settings = _StubSettings()
+    settings = _StubSettings(TAVILY_INCLUDE_RAW_CONTENT="markdown")
     result = await tavily_search("who won yesterday?", "2026-01-17", settings)
 
     assert route.called
@@ -115,17 +191,59 @@ async def test_tavily_search_success_injects_end_date() -> None:
     assert body["query"] == "who won yesterday?"
     assert body["end_date"] == "2026-01-17"
     assert body["max_results"] == 5
-    assert body["include_raw_content"] is False
+    assert body["search_depth"] == "basic"
+    assert body["include_raw_content"] == "markdown"
+    assert "include_answer" not in body  # default false → 不发送
 
     assert result.ok
     assert result.answer == "Team A won."
     assert len(result.results) == 2
     assert result.results[0].published_date == "2026-01-16"
+    assert result.results[0].score == 0.71
+    assert result.results[0].raw_content == "## Heading\nfull markdown body..."
     assert result.results[1].published_date is None
+    assert result.results[1].score is None
+    assert result.results[1].raw_content is None
 
     payload = result.to_llm_payload()
-    assert "raw_content" not in json.dumps(payload)
     assert payload["answer"] == "Team A won."
+    items = payload["results"]
+    assert items[0]["score"] == 0.71
+    assert items[0]["raw_content"].startswith("## Heading")
+    # 第二条没 score / raw_content / published_date, 不应作为 null 字段进入 payload
+    assert "score" not in items[1]
+    assert "raw_content" not in items[1]
+    assert "published_date" not in items[1]
+
+
+@respx.mock
+async def test_tavily_search_truncates_long_raw_content() -> None:
+    huge = "x" * 50000
+    respx.post(TAVILY_ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "answer": None,
+                "results": [
+                    {
+                        "title": "t",
+                        "url": "https://example.com/a",
+                        "content": "c",
+                        "raw_content": huge,
+                    }
+                ],
+            },
+        )
+    )
+    settings = _StubSettings(
+        TAVILY_INCLUDE_RAW_CONTENT="markdown",
+        TAVILY_RAW_CONTENT_MAX_CHARS=8000,
+    )
+    result = await tavily_search("q", "2026-01-17", settings)
+    rc = result.results[0].raw_content
+    assert rc is not None
+    assert rc.startswith("x" * 8000)
+    assert "truncated to 8000 chars" in rc
 
 
 @respx.mock
@@ -172,20 +290,43 @@ async def test_tavily_search_network_error_retries() -> None:
     assert result.ok
 
 
-def test_search_result_payload_drops_raw_content() -> None:
-    from forecast_eval.search import SearchResultItem
+# ==================== to_llm_payload conditional emission ====================
 
+def test_payload_emits_score_and_raw_content_when_present() -> None:
+    r = SearchResult(
+        query="q",
+        end_date="2026-01-17",
+        answer="cached",
+        results=[
+            SearchResultItem(
+                title="t",
+                url="u",
+                content="c",
+                published_date="2026-01-16",
+                score=0.6,
+                raw_content="page body",
+            )
+        ],
+    )
+    p = r.to_llm_payload()
+    assert p["answer"] == "cached"
+    item = p["results"][0]
+    assert item["score"] == 0.6
+    assert item["raw_content"] == "page body"
+    assert item["published_date"] == "2026-01-16"
+
+
+def test_payload_omits_optional_fields_when_none() -> None:
     r = SearchResult(
         query="q",
         end_date="2026-01-17",
         answer=None,
-        results=[
-            SearchResultItem(
-                title="t", url="u", content="short", published_date=None
-            )
-        ],
+        results=[SearchResultItem(title="t", url="u", content="c")],
     )
-    # raw_content should never be in the LLM-bound payload even if the dataclass
-    # later grows such a field; test on the current output shape.
     p = r.to_llm_payload()
-    assert "raw_content" not in json.dumps(p)
+    # answer=None → 整个 answer 字段不应出现
+    assert "answer" not in p
+    item = p["results"][0]
+    assert "score" not in item
+    assert "raw_content" not in item
+    assert "published_date" not in item
