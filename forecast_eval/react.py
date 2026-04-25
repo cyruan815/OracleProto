@@ -39,7 +39,9 @@ def _belief_to_step_dict(step: int, b: Belief | None) -> dict[str, Any] | None:
     parse failure. The `delta_reason` slot summarises *why this step changed*
     by taking the first key_evidence bullet (or the first open_questions
     bullet as a fallback) — this is what the v4 behavior analysis layer will
-    consume to plot belief evolution.
+    consume to plot belief evolution. `counterevidence` is the raw list (may
+    be empty) so Phase-3 `counterevidence_engagement` can do letter-matching
+    against the final choice without re-parsing the boxed answer.
     """
     if b is None:
         return None
@@ -54,6 +56,7 @@ def _belief_to_step_dict(step: int, b: Belief | None) -> dict[str, Any] | None:
         "p": b.probabilities,
         "confidence": b.confidence,
         "delta_reason": delta_reason,
+        "counterevidence": list(b.counterevidence),
     }
 
 
