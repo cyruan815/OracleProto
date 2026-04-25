@@ -2,7 +2,7 @@
 
 ## 1. 项目目标
 
-基于 `forecast_eval_set.db` 数据集，评测 LLM 在**预测类单选/多选题**上的能力。
+基于 `forecast_eval_set_example.db` 数据集，评测 LLM 在**预测类单选/多选题**上的能力。
 
 核心特色：通过自研 `web_search` Tool 限制 LLM 的信息获取边界——**只允许 LLM 搜索到每道题 `end_time`（事件解决日期）之前的信息**，以此模拟"在题目时间点预测未来"的真实场景，避免信息泄露。
 
@@ -17,9 +17,14 @@
 
 ## 2. 数据源
 
-### 2.1 原数据库 `forecast_eval_set.db`（只读）
+### 2.1 原数据库 `forecast_eval_set_example.db`（只读）
 
-主表 `forecast_eval_set`，**322 行 × 7 列**：
+> 注：仓库自带的示例数据集文件名是 `forecast_eval_set_example.db`，主表名是
+> `forecast_eval_set_example`。两者均通过 `.env` 的 `SOURCE_DB` / `SOURCE_TABLE`
+> 参数可配置；自带数据集时只要保持 7 列 schema 与 `dataset_metadata` 结构一致即可。
+> `SOURCE_TABLE` 仅接受 SQLite 合法标识符 `[A-Za-z_][A-Za-z0-9_]*`，启动时校验。
+
+主表 `forecast_eval_set_example`，**322 行 × 7 列**：
 
 | 字段            | 类型    | 说明                                                                                                                          |
 | --------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -31,7 +36,8 @@
 | `answer`        | TEXT    | 字母编码：单选 `'A'`；多选 `'A, B'`（逗号 + 空格分隔）。字母 ↔ 选项索引规则见 §3.7                                            |
 | `end_time`      | TEXT    | 事件解决日期（Asia/Shanghai），`YYYY-MM-DD` 格式                                                                              |
 
-索引：`idx_forecast_eval_set_choice_type` / `idx_forecast_eval_set_question_type` / `idx_forecast_eval_set_end_time`。
+索引（示例数据集自带；自带数据集请按 `idx_<table>_<column>` 命名以保持一致）：
+`idx_forecast_eval_set_example_choice_type` / `idx_forecast_eval_set_example_question_type` / `idx_forecast_eval_set_example_end_time`。
 
 辅表 `dataset_metadata`（一行），含 `features_json`，记录所有 prompt 模板、列说明、转换日志。
 
@@ -133,7 +139,7 @@ question.end_time = 2026-01-18
 
 ### 3.3 原数据只读，每次 run 独立成目录、每个模型独立成 DB
 
-`forecast_eval_set.db` 不动。每次 `python evaluation.py` 启动都会在 `RUNS_ROOT`
+`forecast_eval_set_example.db` 不动。每次 `python evaluation.py` 启动都会在 `RUNS_ROOT`
 (默认 `./runs`) 下创建一个独立的 `{run_id}/` 子目录，内部结构：
 
 ```
@@ -177,8 +183,8 @@ IMPORTANT: Your final answer MUST end with this exact format:
 | slot              | 渲染逻辑                                                                                                       |
 | ----------------- | -------------------------------------------------------------------------------------------------------------- |
 | `agent_role`      | 常量 `"You are an agent that can predict future events."`，原样填入                                            |
-| `event`           | `forecast_eval_set.event` 原文                                                                                 |
-| `end_time`        | `forecast_eval_set.end_time` 原文（`YYYY-MM-DD`）                                                              |
+| `event`           | `<SOURCE_TABLE>.event` 原文                                                                                    |
+| `end_time`        | `<SOURCE_TABLE>.end_time` 原文（`YYYY-MM-DD`）                                                                 |
 | `outcomes_block`  | `yes_no` / `binary_named` → **空字符串**（选项已隐含在 `output_format` 中）<br>`multiple_choice` → `"\n" + "A. <options[0]>\nB. <options[1]>\n..."`，字母按 §3.7 索引→字母规则生成 |
 | `output_format`   | 三选一（按 `question_type`）：`yes_no_output_format` / `binary_named_output_format` / `multiple_choice_output_format`。**`binary_named` 模板含 `<options[0]>` / `<options[1]>` 占位符，拼接时必须替换为实际两个实体名** |
 | `guidance`        | 常量 `"Do not use any other format. Do not refuse to make a prediction. ..."`，原样填入                       |
@@ -288,7 +294,7 @@ labels  = [opts[ord(L) - ord('A')] for L in letters]
                                       ▼
                           ┌──────────────────────────────────┐
                           │  2. Sync Source                  │
-                          │  forecast_eval_set.db            │
+                          │  forecast_eval_set_example.db            │
                           │    → results.db.questions        │
                           │    → results.db.prompt_templates │
                           │  (按 filters 过滤)               │
@@ -525,7 +531,7 @@ Forecast/
 ├── README.md
 ├── FRAME.md                       # 本文档
 ├── evaluation.py                  # 主入口: parse CLI flags -> runner.run -> analysis.run_analysis
-├── forecast_eval_set.db           # 原数据, 只读, **纳入 Git 管理** (确保 source_db_hash 可复现)
+├── forecast_eval_set_example.db           # 原数据, 只读, **纳入 Git 管理** (确保 source_db_hash 可复现)
 ├── runs/                          # 所有评测输出根目录 (gitignored)
 │   └── {run_id}/
 │       ├── manifest.json          # run 级元信息 + model_files 映射
@@ -542,7 +548,7 @@ Forecast/
 │   ├── __init__.py
 │   ├── config.py                 # pydantic-settings; RUNS_ROOT + MODEL_TRAINING_CUTOFFS 解析
 │   ├── db.py                     # per-model 宽表 schema + AsyncWriter + hash / 脱敏
-│   ├── loader.py                 # 从 forecast_eval_set.db 同步 questions + prompt_templates 到每个 DB
+│   ├── loader.py                 # 从 forecast_eval_set_example.db 同步 questions + prompt_templates 到每个 DB
 │   ├── prompts.py                # 按 question_type 渲染 user message
 │   ├── llm.py                    # OpenAI-compatible client + retry 分层 (明确禁用 provider-native browsing)
 │   ├── search.py                 # Tavily + end_date 注入 + retry
@@ -643,7 +649,9 @@ RUN_ID=
 RESUME=true
 
 # -------- Database --------
-SOURCE_DB=./forecast_eval_set.db
+SOURCE_DB=./forecast_eval_set_example.db
+# 题库表名 (SOURCE_DB 内). 自带数据集请改成你自己的表名; 仅限 [A-Za-z_][A-Za-z0-9_]*.
+SOURCE_TABLE=forecast_eval_set_example
 # 每次评测会在 RUNS_ROOT 下创建独立 {run_id}/ 目录 (db/, analysis/, logs/)
 RUNS_ROOT=./runs
 DB_COMMIT_BATCH=10
@@ -678,7 +686,7 @@ LOG_DIR=./logs
 | 模块         | 职责                                                                                                            | 关键接口                                                                                                       |
 | ------------ | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `config.py`  | `pydantic-settings` 从 `.env` 读取，校验类型，逗号分隔列表解析                                                  | `Settings` 类（单例）                                                                                          |
-| `loader.py`  | 从 `forecast_eval_set.db` 同步两张表到 `results.db`：① `forecast_eval_set` → `questions`（按 filters 过滤）；② `dataset_metadata.features_json.prompt_reconstruction` → `prompt_templates`（key/value 平铺） | `sync_questions(filters: QFilter) -> list[Question]`, `sync_prompt_templates() -> dict[str,str]`               |
+| `loader.py`  | 从 `SOURCE_DB`（默认 `forecast_eval_set_example.db`）同步两张表到 `results.db`：① `<SOURCE_TABLE>`（默认 `forecast_eval_set_example`）→ `questions`（按 filters 过滤）；② `dataset_metadata.features_json.prompt_reconstruction` → `prompt_templates`（key/value 平铺） | `sync_questions(source_db, conn, filters, table=...) -> list[Question]`, `sync_prompt_templates(source_db, conn) -> dict[str,str]` |
 | `prompts.py` | 按 `question_type` 渲染 user message：① 生成 `outcomes_block`（multiple_choice 用 §3.7 字母规则枚举选项）；② 选三套 `output_format` 之一，binary_named 时把 `<options[i]>` 占位符替换为实际实体名；③ 用 `prompt_template` 拼装最终文本 | `render_user_prompt(q: Question, templates: dict[str,str]) -> str`                                             |
 | `tools.py`   | 定义 `web_search` OpenAI-schema；**LLM 可见部分不含日期**                                                       | `WEB_SEARCH_SCHEMA`, `execute_tool_call(tc, q, cfg)`                                                           |
 | `search.py`  | 封装 Tavily `/search`，注入 `end_date = q.end_time + OFFSET`；按 `TAVILY_INCLUDE_RAW_CONTENT` 决定页面正文形态 + 按 `TAVILY_RAW_CONTENT_MAX_CHARS` 截断；retry | `tavily_search(query, end_date, settings) -> SearchResult`                                                     |
@@ -1069,7 +1077,7 @@ python evaluation.py --question-type yes_no
 ## 15. 最终 Premise 汇总（供最后 review）
 
 1. **源数据 7 字段**：`id / choice_type / question_type / event / options / answer / end_time`，统一字母编码答案
-2. **源数据库 `forecast_eval_set.db` 纳入 Git 管理**（只读，随仓库分发，保证 `source_db_hash` 可复现）
+2. **源数据库 `forecast_eval_set_example.db` 纳入 Git 管理**（只读示例数据集，随仓库分发，保证 `source_db_hash` 可复现；`SOURCE_DB` / `SOURCE_TABLE` 可指向自带数据集）
 3. **LLM 看不到 `end_date`**，注入在 Tool 实现层
 4. **Tavily `end_date = end_time + TAVILY_END_DATE_OFFSET_DAYS`**，项目统一以 `-1` 为默认严格基准（所有报表默认在 `-1` 下比较）
 5. **泄漏边界与威胁模型**（§3.8）：Tool 只能约束工具搜索；强制禁用 provider-native browsing / `:online`；参数记忆通过 §3.9 的训练截止过滤部分缓解
