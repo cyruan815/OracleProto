@@ -611,7 +611,15 @@ LLM_BACKOFF_SERVER_5XX_S=5,15,30,60,120
 # -------- Tavily Search --------
 TAVILY_API_KEY=tvly-REPLACE_ME
 TAVILY_MAX_RESULTS=5
-TAVILY_INCLUDE_RAW_CONTENT=false
+# search_depth: basic (1 credit/call, 默认) | advanced (2 credits/call)
+TAVILY_SEARCH_DEPTH=basic
+# include_raw_content: false | markdown | text (旧值 true 兼容映射到 markdown)
+# 体积大, 务必配合 TAVILY_RAW_CONTENT_MAX_CHARS 截断
+TAVILY_INCLUDE_RAW_CONTENT=markdown
+# 单结果 raw_content 截断长度. 0 = 不截断 (谨慎: 单结果可达 40k+ chars)
+TAVILY_RAW_CONTENT_MAX_CHARS=8000
+# include_answer: false | basic | advanced. 默认 false 避免 Tavily 内部 LLM 速答污染评测纯度
+TAVILY_INCLUDE_ANSWER=false
 # end_date = question.end_time + offset. 项目默认 -1 (前一天, 避免事件当天信息泄露).
 # 数值越小越保守: -2/-3 更严格; 0 = 当天可见 (仅调试用, 不要在正式评测中使用)
 TAVILY_END_DATE_OFFSET_DAYS=-1
@@ -653,6 +661,10 @@ LOG_DIR=./logs
 - **`MODEL_TRAINING_CUTOFFS`**：`model=YYYY-MM-DD` 列表，逗号分隔。`config.py` 解析为 `dict[str, date]`。未声明的模型不过滤。过滤在 runner 任务生成阶段做，跳过的样本写一行 `error="skipped_training_cutoff"` 到 `run_results`。
 - **`LLM_MAX_CONCURRENCY` vs `SEARCH_MAX_CONCURRENCY`**：分开控制，因为 Tavily 的 rate limit 通常比 LLM 紧。
 - **`LLM_BACKOFF_*` 三条退避序列**：对应不同错误类型（见 §9），序列长度决定最大重试次数。
+- **`TAVILY_SEARCH_DEPTH`**：`basic`（默认，1 credit）/ `advanced`（2 credits，召回更高）。一次预测平均 3-5 次搜索，`basic` 控制成本。
+- **`TAVILY_INCLUDE_RAW_CONTENT`**：`false` / `markdown`（默认）/ `text`。控制 LLM 看到的页面正文形态。体积大时务必同时设 `TAVILY_RAW_CONTENT_MAX_CHARS`。旧版 `bool` 值仍兼容（`true → markdown`）。
+- **`TAVILY_RAW_CONTENT_MAX_CHARS`**：单 result `raw_content` 截断阈值（chars），默认 `8000` ≈ 2k tokens。`0` = 不截断（谨慎：5 条结果总量可超 200k chars，极易塞爆 LLM context）。
+- **`TAVILY_INCLUDE_ANSWER`**：`false`（默认）/ `basic` / `advanced`。默认关闭以避免引入 "第二个 LLM 判断" 污染评测纯度（启用后强弱模型间的差异会被压缩）。
 - **`TAVILY_END_DATE_OFFSET_DAYS`**：项目默认 `-1`（前一天，推荐的严格默认值）。数值越小越保守；`0` 仅调试用。所有报表默认在 `-1` 下比较。
 - **`RUN_ID` 自动生成格式**：`YYYYMMDD-HHMMSS-xxxx`，例如 `20260424-120344-a7k3`，`ls` 天然按时间排序；同时作为 `RUNS_ROOT/{run_id}/` 目录名。
 - **`RUNS_ROOT`**：评测产物根目录（默认 `./runs`），每个 run 占一个子目录。
@@ -669,7 +681,7 @@ LOG_DIR=./logs
 | `loader.py`  | 从 `forecast_eval_set.db` 同步两张表到 `results.db`：① `forecast_eval_set` → `questions`（按 filters 过滤）；② `dataset_metadata.features_json.prompt_reconstruction` → `prompt_templates`（key/value 平铺） | `sync_questions(filters: QFilter) -> list[Question]`, `sync_prompt_templates() -> dict[str,str]`               |
 | `prompts.py` | 按 `question_type` 渲染 user message：① 生成 `outcomes_block`（multiple_choice 用 §3.7 字母规则枚举选项）；② 选三套 `output_format` 之一，binary_named 时把 `<options[i]>` 占位符替换为实际实体名；③ 用 `prompt_template` 拼装最终文本 | `render_user_prompt(q: Question, templates: dict[str,str]) -> str`                                             |
 | `tools.py`   | 定义 `web_search` OpenAI-schema；**LLM 可见部分不含日期**                                                       | `WEB_SEARCH_SCHEMA`, `execute_tool_call(tc, q, cfg)`                                                           |
-| `search.py`  | 封装 Tavily `/search`，注入 `end_date = q.end_time + OFFSET`，retry                                             | `search(query, end_date) -> SearchResult`                                                                      |
+| `search.py`  | 封装 Tavily `/search`，注入 `end_date = q.end_time + OFFSET`；按 `TAVILY_INCLUDE_RAW_CONTENT` 决定页面正文形态 + 按 `TAVILY_RAW_CONTENT_MAX_CHARS` 截断；retry | `tavily_search(query, end_date, settings) -> SearchResult`                                                     |
 | `llm.py`     | OpenAI-compatible client (OpenRouter)，按错误类型分层 retry；**强制不启用 provider-native browsing**（不传 `plugins`、不加 `:online` 后缀、不发 provider 私有 web tool 字段） | `chat(model, messages, tools, ...) -> ChatResponse`                                                            |
 | `react.py`   | 一次 ReAct 推理 = 一个 sample，循环到无 tool_call 或超限                                                        | `run_react(q, model, sample_idx, cfg) -> SampleResult`                                                         |
 | `parser.py`  | 按 `question_type` 解析 `\boxed{...}` → 字母 `frozenset[str]`（yes_no: Yes/No→A/B；binary_named: label→letter；mc: split letters）；与 `q.answer` 解析出的字母集合做严格 frozenset 相等判对 | `parse_answer(text: str, q: Question) -> frozenset[str] \| None`, `parse_gt(answer: str) -> frozenset[str]`, `is_correct(pred, gt) -> bool` |
@@ -1109,7 +1121,7 @@ python evaluation.py --question-type yes_no
 | --------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `test_prompts.py`           | `prompts.py`          | ① `yes_no` / `binary_named` / `multiple_choice`（≤26 选项）三种模板渲染 snapshot；② `binary_named` 占位符替换正确；③ `multiple_choice` >26 选项（用数据库里真实的 4 道题做 fixture）outcomes_block 标签准确                  |
 | `test_parser.py`            | `parser.py`           | ① 三种题型的 `\boxed{}` 正解路径；② 多 `\boxed{}` 取最后一个；③ 大小写、空格、逗号/空格分隔混排；④ 非法字母越界；⑤ >26 选项 label↔letter round-trip；⑥ `parse_gt` 对 `"A, B"` 解析；⑦ 软性拒绝 → None 不报错               |
-| `test_search.py`            | `search.py` + `tools.py` | ① `web_search` schema LLM 可见字段 **不含** `end_date`；② `tavily_search` 注入的 `end_date = q.end_time + OFFSET`；③ Tavily 报错走 `SEARCH_BACKOFF_S` 重试；④ 重试用完后返回错误 payload 而不抛                             |
+| `test_search.py`            | `search.py` + `tools.py` | ① `web_search` schema LLM 可见字段 **不含** `end_date`；② `tavily_search` 注入的 `end_date = q.end_time + OFFSET`；③ Tavily 报错走 `SEARCH_BACKOFF_S` 重试；④ 重试用完后返回错误 payload 而不抛；⑤ `_build_request_payload` 把 `TAVILY_INCLUDE_RAW_CONTENT={false,markdown,text}` / `TAVILY_SEARCH_DEPTH` / `TAVILY_INCLUDE_ANSWER` 三档枚举映射到 Tavily 协议形式；⑥ 超长 `raw_content` 在 `_truncate_raw_content` 处截断到 `TAVILY_RAW_CONTENT_MAX_CHARS` 并追加省略标记；⑦ `to_llm_payload` 缺失字段（`score` / `raw_content` / `published_date` / `answer`）不输出 `null` 占位 |
 | `test_db.py`                | `db.py`               | ① per-model schema 按 `sampling_n` 动态建 `s{i}_*` 列 + PRAGMA；② schema `N` mismatch 时 fail-fast；③ `model_slug_safe` 规则；④ hash 计算稳定；⑤ `config_snapshot` 脱敏；⑥ UPSERT 按 `(qid, sample_idx)` 覆盖；⑦ `AsyncWriter` 分桶批量提交 |
 | `test_runner_resume.py`     | `runner.py`           | ① `load_completed_samples` 排除 retryable error；② `build_task_plan` 按 per-model completed 去重；③ 未在 `completed` 中声明的模型默认空集（全部入队）                                                                    |
 | `test_training_cutoff.py`   | §3.9 过滤逻辑         | ① `q.end_time <= cutoff` 全部 N samples 都写 skipped_training_cutoff；② 未声明 cutoff 的模型不过滤；③ resume 优先于 cutoff；④ 写入后 `load_completed_samples` 命中                                                       |
