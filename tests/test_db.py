@@ -20,7 +20,7 @@ def _make_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
         "openai/gpt-5=2024-10-01,anthropic/claude-sonnet-4.5=2025-03-01",
     )
     monkeypatch.setenv("RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("SOURCE_DB", str(tmp_path / "forecast_eval_set.db"))
+    monkeypatch.setenv("SOURCE_DB", str(tmp_path / "forecast_eval_set_example.db"))
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     return Settings(_env_file=None)
 

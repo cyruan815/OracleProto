@@ -23,7 +23,7 @@ from forecast_eval.config import Settings
 from forecast_eval.types import QFilter
 
 
-SOURCE_DB = Path(__file__).resolve().parents[1] / "forecast_eval_set.db"
+SOURCE_DB = Path(__file__).resolve().parents[1] / "forecast_eval_set_example.db"
 OPENROUTER_URL = re.compile(r"https://openrouter\.ai/api/v1/chat/completions")
 TAVILY_URL = re.compile(r"https://api\.tavily\.com/search")
 
@@ -141,7 +141,7 @@ async def test_smoke_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     src.row_factory = sqlite3.Row
     rows = src.execute(
         "SELECT id, choice_type, question_type, event, options, answer, end_time "
-        "FROM forecast_eval_set WHERE question_type='yes_no' ORDER BY end_time LIMIT 3"
+        "FROM forecast_eval_set_example WHERE question_type='yes_no' ORDER BY end_time LIMIT 3"
     ).fetchall()
     src.close()
     ids = tuple(r["id"] for r in rows)
@@ -159,7 +159,7 @@ async def test_smoke_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     placeholders = ",".join("?" * len(ids))
     questions_rows = src.execute(
         f"SELECT id, choice_type, question_type, event, options, answer, end_time "
-        f"FROM forecast_eval_set WHERE id IN ({placeholders}) ORDER BY end_time",
+        f"FROM forecast_eval_set_example WHERE id IN ({placeholders}) ORDER BY end_time",
         ids,
     ).fetchall()
     src.close()

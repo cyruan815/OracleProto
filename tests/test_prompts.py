@@ -14,7 +14,7 @@ from forecast_eval.prompts import (
 from forecast_eval.types import Question
 
 
-SOURCE_DB = Path(__file__).resolve().parents[1] / "forecast_eval_set.db"
+SOURCE_DB = Path(__file__).resolve().parents[1] / "forecast_eval_set_example.db"
 
 
 @pytest.fixture(scope="module")
@@ -96,7 +96,7 @@ def test_multiple_choice_over_26_protects_labels(templates: dict[str, str]) -> N
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT id, choice_type, question_type, event, options, answer, end_time "
-        "FROM forecast_eval_set WHERE json_array_length(options) > 26 ORDER BY json_array_length(options) DESC LIMIT 1"
+        "FROM forecast_eval_set_example WHERE json_array_length(options) > 26 ORDER BY json_array_length(options) DESC LIMIT 1"
     ).fetchone()
     conn.close()
     assert row is not None

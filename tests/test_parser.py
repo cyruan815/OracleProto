@@ -10,7 +10,7 @@ from forecast_eval.parser import is_correct, parse_answer, parse_gt
 from forecast_eval.types import Question
 
 
-SOURCE_DB = Path(__file__).resolve().parents[1] / "forecast_eval_set.db"
+SOURCE_DB = Path(__file__).resolve().parents[1] / "forecast_eval_set_example.db"
 
 
 def _q(qt: str, options: list[str], answer: str = "A") -> Question:
@@ -91,7 +91,7 @@ def test_over_26_option_roundtrip() -> None:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT id, choice_type, question_type, event, options, answer, end_time "
-        "FROM forecast_eval_set WHERE json_array_length(options) > 26"
+        "FROM forecast_eval_set_example WHERE json_array_length(options) > 26"
     ).fetchall()
     conn.close()
     assert rows, "expected at least one >26 option question fixture"
