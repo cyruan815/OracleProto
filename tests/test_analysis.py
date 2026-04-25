@@ -461,3 +461,167 @@ def test_overall_json_carries_analysis_schema(tmp_path: Path) -> None:
     analysis.run_analysis(run_dir)
     overall = json.loads((run_dir / "analysis" / "overall.json").read_text())
     assert overall.get("analysis_schema") == "v4"
+
+
+# ---------- Phase 2 integration tests --------------------------------------
+
+
+def test_phase2_deliverables_present(tmp_path: Path) -> None:
+    """Phase 2 task 22 / 24.1: every spec'd output file lands under analysis/.
+
+    The fixture goes through the §2.4 fallback path (belief_final IS NULL),
+    which is enough to exercise every Phase 2 writer: shrinkage scans the
+    fallback probability vectors, calibration fits on them, paired bootstrap
+    contrasts m/a vs m/b, and the difficulty tertile slices the union set.
+    """
+    run_dir = _build_fixture_run(tmp_path)
+    written = {p.name for p in analysis.run_analysis(run_dir)}
+    expected = {
+        "shrinkage_alpha_curve.csv",
+        "calibration_params.json",
+        "per_model_summary_calibrated.csv",
+        "reliability_data.json",
+        "reliability_data_calibrated.json",
+        "brier_decomposition.csv",
+        "paired_delta_bi.csv",
+        "pairwise_significance.csv",
+        "posterior_pairwise.csv",
+        "per_model_by_difficulty.csv",
+        "paired_delta_bi_by_difficulty.csv",
+    }
+    missing = expected - written
+    assert not missing, f"Phase 2 outputs missing: {sorted(missing)}"
+
+
+def test_shrinkage_alpha_curve_csv_format(tmp_path: Path) -> None:
+    """`shrinkage_alpha_curve.csv` MUST have one row per (model, ctype, alpha) on
+    the default 11-point grid."""
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    path = run_dir / "analysis" / "shrinkage_alpha_curve.csv"
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames == [
+            "model", "alpha", "mean_bs", "bi", "n_questions", "choice_type"
+        ]
+        rows = list(reader)
+    # At least 11 alphas × ≥1 (model, ctype) cell.
+    assert len(rows) >= 11
+    # Every alpha appears 0..1 in 0.1 steps.
+    seen_alphas = sorted({float(r["alpha"]) for r in rows})
+    assert seen_alphas[0] == pytest.approx(0.0)
+    assert seen_alphas[-1] == pytest.approx(1.0)
+
+
+def test_calibration_params_json_layout(tmp_path: Path) -> None:
+    """`calibration_params.json`: per-model per-cell with method + numeric params."""
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    payload = json.loads((run_dir / "analysis" / "calibration_params.json").read_text())
+    # m/a and m/b both fitted.
+    assert set(payload) == {"m/a", "m/b"}
+    for model_cells in payload.values():
+        for cell_name, cell in model_cells.items():
+            assert "method" in cell
+            assert cell["method"] in ("platt", "temperature")
+            if cell["method"] == "platt":
+                assert "a" in cell and "b" in cell
+            else:
+                assert "T" in cell
+            assert "n_questions" in cell
+            assert "question_type" in cell
+            assert "choice_type" in cell
+
+
+def test_per_model_summary_calibrated_csv_columns(tmp_path: Path) -> None:
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    path = run_dir / "analysis" / "per_model_summary_calibrated.csv"
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        cols = reader.fieldnames or []
+    for required in (
+        "model", "n_questions", "fallback_share",
+        "bi_uncal", "bi_cal", "nll_uncal", "nll_cal",
+        "ece_uncal", "ece_cal",
+        "abi_crowd_uncal", "abi_crowd_cal",
+        "abi_uniform_uncal", "abi_uniform_cal",
+        "overfit_warning",
+    ):
+        assert required in cols, f"missing column {required}"
+
+
+def test_paired_delta_bi_includes_holm(tmp_path: Path) -> None:
+    """Paired bootstrap CSV has Holm-adjusted p-value column populated."""
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    path = run_dir / "analysis" / "paired_delta_bi.csv"
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        cols = reader.fieldnames or []
+        rows = list(reader)
+    for required in (
+        "model_a", "model_b", "n_questions",
+        "delta_bs", "ci_low_bs", "ci_high_bs",
+        "delta_bi_approx", "p_raw", "p_holm", "posterior_a_better",
+    ):
+        assert required in cols
+    # 2 models → 1 pair.
+    assert len(rows) == 1
+    assert rows[0]["model_a"] == "m/a" and rows[0]["model_b"] == "m/b"
+    assert rows[0]["p_holm"] != ""
+
+
+def test_per_model_by_difficulty_three_tiers(tmp_path: Path) -> None:
+    """`per_model_by_difficulty.csv`: 3 tiers per model, populated rows only."""
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    path = run_dir / "analysis" / "per_model_by_difficulty.csv"
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    tiers_seen = {r["difficulty_tertile"] for r in rows}
+    assert tiers_seen.issubset({"low", "mid", "high"})
+    # Every non-empty tier should report n_questions ≥ 0.
+    for r in rows:
+        assert int(r["n_questions"]) >= 0
+
+
+def test_brier_decomposition_csv_has_uncal_and_cal(tmp_path: Path) -> None:
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    path = run_dir / "analysis" / "brier_decomposition.csv"
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        cols = reader.fieldnames or []
+    for required in ("model", "kind", "rel", "res", "unc", "total"):
+        assert required in cols
+    kinds = {r["kind"] for r in rows}
+    assert kinds.issubset({"uncalibrated", "calibrated"})
+
+
+def test_reliability_data_json_layout(tmp_path: Path) -> None:
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    uncal = json.loads((run_dir / "analysis" / "reliability_data.json").read_text())
+    cal = json.loads((run_dir / "analysis" / "reliability_data_calibrated.json").read_text())
+    # Same model set in both.
+    assert set(uncal) == set(cal)
+    for model in uncal:
+        for qtype, bins in uncal[model].items():
+            assert isinstance(bins, list)
+            for b in bins:
+                assert {"bin_lo", "bin_hi", "n", "mean_p", "mean_o"}.issubset(b)
+
+
+def test_posterior_pairwise_csv_probabilities_in_unit_interval(tmp_path: Path) -> None:
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    path = run_dir / "analysis" / "posterior_pairwise.csv"
+    with path.open(encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert rows
+    for r in rows:
+        p = float(r["prob_a_better"])
+        assert 0.0 <= p <= 1.0
