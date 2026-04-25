@@ -89,8 +89,8 @@ results.db-*
 *.db-shm
 *.log
 *.sqlite3
-# Note: forecast_eval_set.db is intentionally NOT ignored — it is the source
-# dataset and must be tracked in git so source_db_hash stays reproducible.
+# Note: forecast_eval_set_example.db is intentionally NOT ignored — it is the
+# source dataset shipped with the repo so source_db_hash stays reproducible.
 
 # Local Documentation
 openspec/

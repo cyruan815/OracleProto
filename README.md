@@ -1,13 +1,33 @@
 # Forecast Evaluation
 
 LLM forecast evaluation harness against 322 time-bounded prediction questions
-from `forecast_eval_set.db`. The core guarantee: the LLM's only information
-channel is a `web_search` tool whose `end_date` is injected by the tool layer
-from each question's `end_time`, so the model cannot see information published
-after the event resolution date.
+from `forecast_eval_set_example.db` (the bundled example dataset). The core
+guarantee: the LLM's only information channel is a `web_search` tool whose
+`end_date` is injected by the tool layer from each question's `end_time`, so
+the model cannot see information published after the event resolution date.
 
 See `FRAME.md` for the full technical framework and
 `openspec/changes/bootstrap-forecast-eval/` for the spec-driven change record.
+
+## Bring your own dataset
+
+The shipped example dataset is `forecast_eval_set_example.db` and the question
+table inside it is also called `forecast_eval_set_example`. Both names are
+configurable — point at any other SQLite file / table that follows the same
+7-column schema (`id / choice_type / question_type / event / options / answer
+/ end_time`, see `FRAME.md` §2.1) plus a `dataset_metadata` row carrying the
+prompt templates:
+
+```bash
+SOURCE_DB=./my_questions.db
+SOURCE_TABLE=my_questions
+```
+
+`SOURCE_TABLE` only accepts a bare SQLite identifier
+(`[A-Za-z_][A-Za-z0-9_]*`) and is validated at startup, so a typo there fails
+fast instead of leaking into the SQL layer. The defaults
+`./forecast_eval_set_example.db` + `forecast_eval_set_example` are used in
+every example below; substitute your own as needed.
 
 ## Quickstart
 
