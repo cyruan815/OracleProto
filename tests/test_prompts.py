@@ -7,6 +7,8 @@ import pytest
 
 from forecast_eval import loader
 from forecast_eval.prompts import (
+    REFLECTION_PROTOCOL,
+    _build_nudge_message,
     index_to_letter,
     letter_to_index,
     render_user_prompt,
@@ -148,3 +150,59 @@ def test_unknown_question_type_raises(templates: dict[str, str]) -> None:
     )
     with pytest.raises(ValueError):
         render_user_prompt(q, templates)
+
+
+def _yes_no_question() -> Question:
+    return Question(
+        id="q_yn_protocol",
+        choice_type="single",
+        question_type="yes_no",
+        event="will the protocol fire?",
+        options=json.dumps(["Yes", "No"]),
+        answer="A",
+        end_time="2026-03-01",
+    )
+
+
+def test_reflection_protocol_appended_when_provided(templates: dict[str, str]) -> None:
+    q = _yes_no_question()
+    plain = render_user_prompt(q, templates)
+    with_protocol = render_user_prompt(q, templates, reflection_protocol=REFLECTION_PROTOCOL)
+
+    # 协议必须以原 prompt 为前缀, 即只在末尾追加, 不修改原模板任何字符.
+    assert with_protocol.startswith(plain)
+    assert with_protocol != plain
+    # 关键反思要素必须出现在协议里.
+    for marker in (
+        "Forecasting Protocol",
+        "Decompose",
+        "distinct angles",
+        "Cross-validate",
+        "OPPOSITE",
+        "Calibrate",
+    ):
+        assert marker in with_protocol
+
+
+def test_reflection_protocol_default_is_off(templates: dict[str, str]) -> None:
+    """Calling render_user_prompt without the kw must keep historical behaviour."""
+    q = _yes_no_question()
+    rendered = render_user_prompt(q, templates)
+    assert "Forecasting Protocol" not in rendered
+
+
+def test_reflection_protocol_none_equivalent_to_off(templates: dict[str, str]) -> None:
+    q = _yes_no_question()
+    assert render_user_prompt(q, templates) == render_user_prompt(
+        q, templates, reflection_protocol=None
+    )
+
+
+def test_nudge_message_mentions_counts_and_new_angle() -> None:
+    msg = _build_nudge_message(searches_done=1, min_required=3)
+    # 必须客观陈述事实, 不泄露 end_date 等内部信息, 同时要求 LLM 换角度而非重复.
+    assert "1" in msg
+    assert "3" in msg
+    assert "NEW angle" in msg or "new angle" in msg.lower()
+    assert "end_date" not in msg
+    assert "training cutoff" not in msg.lower()
