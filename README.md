@@ -1,6 +1,6 @@
 # Forecast Evaluation
 
-LLM forecast evaluation harness against 322 time-bounded prediction questions
+LLM forecast evaluation harness against 319 time-bounded prediction questions
 from `forecast_eval_set_example.db` (the bundled example dataset). The core
 guarantee: the LLM's only information channel is a `web_search` tool whose
 `end_date` is injected by the tool layer from each question's `end_time`, so
