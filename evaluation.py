@@ -47,7 +47,7 @@ CHOICE_TYPE_CHOICES = ("single", "multi")
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="evaluation",
-        description="Run LLM forecast evaluation against forecast_eval_set.db.",
+        description="Run LLM forecast evaluation against forecast_eval_set_example.db.",
     )
     parser.add_argument(
         "--question-type",
@@ -158,7 +158,7 @@ def _init_model_db(
     conn = dbmod.connect(db_path)
     dbmod.init_schema(conn, settings.SAMPLING_N)
     templates = loader.sync_prompt_templates(source_path, conn)
-    questions = loader.sync_questions(source_path, conn, filters)
+    questions = loader.sync_questions(source_path, conn, filters, table=settings.SOURCE_TABLE)
     cutoff = settings.MODEL_TRAINING_CUTOFFS.get(model)
     dbmod.register_run_meta(
         conn,
@@ -199,7 +199,7 @@ async def _run_async(
     scratch = dbmod.connect(":memory:")
     dbmod.init_schema(scratch, settings.SAMPLING_N)
     templates_preview = loader.sync_prompt_templates(source_path, scratch)
-    questions_preview = loader.sync_questions(source_path, scratch, filters)
+    questions_preview = loader.sync_questions(source_path, scratch, filters, table=settings.SOURCE_TABLE)
     scratch.close()
 
     if not questions_preview:
