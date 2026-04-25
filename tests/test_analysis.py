@@ -45,6 +45,8 @@ def _sample(
     prompt_tokens: int = 100,
     completion_tokens: int = 40,
     reasoning_tokens: int = 0,
+    finish_reason: str | None = "stop",
+    nudges_used: int = 0,
 ) -> dict:
     return {
         "question_id": question_id,
@@ -64,6 +66,18 @@ def _sample(
         "search_calls": None,
         "error": error,
         "created_at": dbmod.utcnow_iso(),
+        # v3 observability columns. Defaults mirror a successful sample;
+        # cutoff/error fixtures override `finish_reason=None`.
+        "finish_reason": finish_reason,
+        "nudges_used": nudges_used,
+        "step_metrics": json.dumps([
+            {"step": 0, "prompt": prompt_tokens, "completion": completion_tokens,
+             "reasoning": reasoning_tokens, "latency_ms": latency,
+             "finish_reason": finish_reason, "n_tool_calls": tool_calls},
+        ]),
+        "response_id": "resp_test",
+        "system_fingerprint": "fp_test",
+        "service_tier": "default",
     }
 
 
@@ -96,15 +110,22 @@ def _build_fixture_run(tmp_path: Path) -> Path:
 
     conn_a = _make_conn(db_dir / "m__a.db", "m/a")
     # m/a: q1 → 2/3 correct, q2 → 0/3 correct, q3 → cutoff all 3
+    # nudges_used is bumped on a single sample so avg_nudges_used > 0; this
+    # keeps the assertion a non-trivial number rather than 0.
+    q1_nudges = {0: 0, 1: 2, 2: 0}
     for i, correct in enumerate([1, 1, 0]):
         dbmod.upsert_sample_sync(conn_a, 3, _sample(
             question_id="q1", sample_idx=i, correct=correct, parse_ok=1, error=None,
             letters=["A"] if correct else ["B"],
+            nudges_used=q1_nudges[i],
         ))
+    # One q2 sample finishes with `length` so the breakdown CSV has > 1 row.
+    q2_finish = {0: "length", 1: "stop", 2: "stop"}
     for i in range(3):
         dbmod.upsert_sample_sync(conn_a, 3, _sample(
             question_id="q2", sample_idx=i, correct=0, parse_ok=1, error=None,
             letters=["A"],  # wrong: GT is B
+            finish_reason=q2_finish[i],
         ))
     for i in range(3):
         dbmod.upsert_sample_sync(conn_a, 3, _sample(
@@ -112,6 +133,7 @@ def _build_fixture_run(tmp_path: Path) -> Path:
             error="skipped_training_cutoff", letters=None,
             tool_calls=0, react_steps=0, latency=0,
             prompt_tokens=0, completion_tokens=0, reasoning_tokens=0,
+            finish_reason=None,  # cutoff path never invoked the LLM.
         ))
     dbmod.finish_run_meta(conn_a, "run1")
     conn_a.close()
@@ -127,11 +149,14 @@ def _build_fixture_run(tmp_path: Path) -> Path:
     dbmod.upsert_sample_sync(conn_b, 3, _sample(
         question_id="q1", sample_idx=2, correct=None, parse_ok=0, error=None, letters=None,
     ))
-    # q2: all network errors
+    # q2: all network errors. `_error_row` in production never reaches the
+    # LLM, so finish_reason is None — mirror that here so the breakdown CSV
+    # surfaces a `<missing>` bucket.
     for i in range(3):
         dbmod.upsert_sample_sync(conn_b, 3, _sample(
             question_id="q2", sample_idx=i, correct=None, parse_ok=0, error="network",
             letters=None,
+            finish_reason=None,
         ))
     # q3: all wrong (answer {A, C}, model outputs {A})
     for i in range(3):
@@ -256,3 +281,54 @@ def test_overall_json_matches_csv(tmp_path: Path) -> None:
     assert overall["per_model"]["m/a"]["pass_at_1_avg"] == pytest.approx(2 / 6, rel=1e-3)
     assert set(overall["per_model_by_question_type"]["m/a"]) == {"yes_no", "binary_named", "multiple_choice"}
     assert set(overall["per_model_by_choice_type"]["m/a"]) == {"single", "multi"}
+
+
+def test_avg_nudges_used_in_summary(tmp_path: Path) -> None:
+    """Per-model summary must surface avg_nudges_used over eligible samples.
+
+    m/a: nudges across 6 eligible samples = [0,2,0,0,0,0] → 2/6
+    m/b: every eligible sample uses nudges_used=0 → 0.0
+    """
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+
+    rows_by_model: dict[str, dict[str, str]] = {}
+    with (run_dir / "analysis" / "per_model_summary.csv").open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        assert "avg_nudges_used" in reader.fieldnames  # type: ignore[operator]
+        for row in reader:
+            rows_by_model[row["model"]] = row
+
+    assert float(rows_by_model["m/a"]["avg_nudges_used"]) == pytest.approx(2 / 6, abs=1e-2)
+    assert float(rows_by_model["m/b"]["avg_nudges_used"]) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_finish_reason_breakdown_csv(tmp_path: Path) -> None:
+    """`finish_reason_breakdown.csv` should be emitted with one row per
+    (model, reason) over eligible samples (cutoff excluded). Shares must sum
+    to 1.0 within each model.
+
+    Expected eligible counts (cutoff drops m/a q3):
+      m/a 6 eligible  → stop=5, length=1
+      m/b 9 eligible  → stop=6 (q1 s0 + q3×3 + q1 s1/s2 parse-fails), <missing>=3 (q2 errors)
+    """
+    run_dir = _build_fixture_run(tmp_path)
+    written = analysis.run_analysis(run_dir)
+
+    breakdown_path = run_dir / "analysis" / "finish_reason_breakdown.csv"
+    assert breakdown_path in written
+    assert breakdown_path.exists()
+
+    counts: dict[str, dict[str, int]] = {}
+    shares: dict[str, dict[str, float]] = {}
+    with breakdown_path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames == ["model", "finish_reason", "count", "share_of_eligible"]
+        for row in reader:
+            counts.setdefault(row["model"], {})[row["finish_reason"]] = int(row["count"])
+            shares.setdefault(row["model"], {})[row["finish_reason"]] = float(row["share_of_eligible"])
+
+    assert counts["m/a"] == {"stop": 5, "length": 1}
+    assert counts["m/b"] == {"stop": 6, "<missing>": 3}
+    assert sum(shares["m/a"].values()) == pytest.approx(1.0, abs=1e-3)
+    assert sum(shares["m/b"].values()) == pytest.approx(1.0, abs=1e-3)

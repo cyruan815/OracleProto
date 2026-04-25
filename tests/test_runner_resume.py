@@ -58,6 +58,15 @@ def _sample_payload(sample_idx: int, error: str | None) -> dict:
         "search_calls": None,
         "error": error,
         "created_at": dbmod.utcnow_iso(),
+        # v3 observability columns. error rows mirror runner._error_row:
+        # finish_reason / response_id / system_fingerprint / service_tier
+        # are None because the LLM never returned a usable envelope.
+        "finish_reason": None if error else "stop",
+        "nudges_used": 0,
+        "step_metrics": None if error else json.dumps([]),
+        "response_id": None,
+        "system_fingerprint": None,
+        "service_tier": None,
     }
 
 

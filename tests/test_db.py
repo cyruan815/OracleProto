@@ -53,6 +53,15 @@ def _sample_payload(
         "search_calls": json.dumps([]),
         "error": error,
         "created_at": dbmod.utcnow_iso(),
+        # v3 observability columns — required because `_insert_rows_sync` reads
+        # via `row[name]` (KeyError on missing). All defaults match what a
+        # successful sample would record.
+        "finish_reason": "stop",
+        "nudges_used": 0,
+        "step_metrics": json.dumps([{"step": 0, "prompt": 100, "completion": 50}]),
+        "response_id": "resp_test",
+        "system_fingerprint": "fp_test",
+        "service_tier": "default",
     }
 
 
@@ -304,6 +313,174 @@ def test_finish_run_meta_updates_timestamp(tmp_path: Path) -> None:
     dbmod.finish_run_meta(conn, "20260424-120000-abcd")
     row = conn.execute("SELECT finished_at FROM run_meta WHERE run_id=?", ("20260424-120000-abcd",)).fetchone()
     assert row["finished_at"] is not None
+
+
+# ---- v2 fixture for the v2→v3 migration test --------------------------------
+
+# Mirrors the historical v2 column suite. Kept inline (not pulled from db.py)
+# so this fixture stays frozen even if `PER_SAMPLE_COLUMNS` evolves further —
+# the test must always replay the *exact* shape we shipped under v2.
+_V2_PER_SAMPLE_COLUMNS = (
+    ("final_answer_letters", "TEXT"),
+    ("final_answer_raw", "TEXT"),
+    ("correct", "INTEGER"),
+    ("parse_ok", "INTEGER"),
+    ("tool_calls_count", "INTEGER"),
+    ("react_steps", "INTEGER"),
+    ("prompt_tokens", "INTEGER"),
+    ("completion_tokens", "INTEGER"),
+    ("reasoning_tokens", "INTEGER"),
+    ("latency_ms", "INTEGER"),
+    ("messages_trace", "TEXT"),
+    ("search_calls", "TEXT"),
+    ("error", "TEXT"),
+    ("created_at", "TEXT"),
+)
+
+
+def _build_v2_db(db_path: Path, sampling_n: int) -> sqlite3.Connection:
+    """Construct a v2-schema DB by hand: `run_meta` lacks the two reflection
+    columns, `run_results` lacks the six v3 observability columns. Used by the
+    v2→v3 migration test."""
+    conn = dbmod.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+        CREATE TABLE questions (
+            id TEXT PRIMARY KEY,
+            choice_type TEXT NOT NULL CHECK (choice_type IN ('single','multi')),
+            question_type TEXT NOT NULL CHECK (question_type IN ('yes_no','binary_named','multiple_choice')),
+            event TEXT NOT NULL,
+            options TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            imported_at TEXT NOT NULL
+        );
+        CREATE TABLE prompt_templates (key TEXT PRIMARY KEY, value TEXT NOT NULL, imported_at TEXT NOT NULL);
+        CREATE TABLE run_meta (
+            run_id TEXT PRIMARY KEY,
+            model TEXT NOT NULL,
+            sampling_n INTEGER NOT NULL,
+            config_snapshot TEXT NOT NULL,
+            filters_snapshot TEXT NOT NULL,
+            source_db_hash TEXT NOT NULL,
+            metadata_hash TEXT NOT NULL,
+            prompt_templates_hash TEXT NOT NULL,
+            training_cutoff TEXT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT
+        );
+        """
+    )
+    cols = ["question_id TEXT PRIMARY KEY", "user_prompt TEXT"]
+    for i in range(sampling_n):
+        for name, sql_type in _V2_PER_SAMPLE_COLUMNS:
+            cols.append(f"s{i}_{name} {sql_type}")
+    cols.append("FOREIGN KEY (question_id) REFERENCES questions(id)")
+    conn.execute(f"CREATE TABLE run_results ({', '.join(cols)})")
+    conn.execute(
+        "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+        (2, dbmod.utcnow_iso()),
+    )
+    return conn
+
+
+def test_init_schema_migrates_v2_to_v3(tmp_path: Path) -> None:
+    """An existing v2 DB should be ALTERed in place to v3 on re-open, without
+    losing any v2 data and without re-creating the schema."""
+    db_path = tmp_path / "v2.db"
+    conn = _build_v2_db(db_path, sampling_n=2)
+    _seed_question(conn, "q42")
+    # Hand-write a v2-shaped row (using AsyncWriter would fail because the
+    # v3 columns don't exist yet — this simulates legacy on-disk data).
+    legacy_created_at = dbmod.utcnow_iso()
+    conn.execute(
+        "INSERT INTO run_results (question_id, user_prompt, s0_correct, s0_created_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("q42", "PROMPT", 1, legacy_created_at),
+    )
+
+    dbmod.init_schema(conn, sampling_n=2)
+
+    versions = {
+        int(r["version"])
+        for r in conn.execute("SELECT version FROM schema_version").fetchall()
+    }
+    assert versions == {2, 3}, "migration must keep the v2 row and stamp v3"
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()}
+    for i in range(2):
+        for name in (
+            "finish_reason",
+            "nudges_used",
+            "step_metrics",
+            "response_id",
+            "system_fingerprint",
+            "service_tier",
+        ):
+            assert f"s{i}_{name}" in cols, f"missing s{i}_{name} after migration"
+
+    meta_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_meta)").fetchall()}
+    assert "reflection_protocol_text" in meta_cols
+    assert "reflection_protocol_hash" in meta_cols
+
+    # Pre-existing v2 data survives; new columns default to NULL.
+    row = conn.execute("SELECT * FROM run_results WHERE question_id='q42'").fetchone()
+    assert row["s0_correct"] == 1
+    assert row["s0_created_at"] == legacy_created_at
+    assert row["s0_finish_reason"] is None
+    assert row["s0_nudges_used"] is None
+
+    # Idempotency: a second init_schema must not stamp v3 again.
+    dbmod.init_schema(conn, sampling_n=2)
+    versions_after = {
+        int(r["version"])
+        for r in conn.execute("SELECT version FROM schema_version").fetchall()
+    }
+    assert versions_after == {2, 3}
+
+
+def test_register_run_meta_writes_reflection_fields(tmp_path: Path) -> None:
+    """Both nullable paths: explicit reflection values land in run_meta, and
+    omitting the kwargs writes NULLs."""
+    conn = dbmod.connect(tmp_path / "r.db")
+    dbmod.init_schema(conn, sampling_n=1)
+
+    dbmod.register_run_meta(
+        conn,
+        run_id="run-with-reflection",
+        model="m1",
+        sampling_n=1,
+        filters_snapshot={},
+        config_snapshot={},
+        source_db_hash="a" * 64,
+        metadata_hash="b" * 64,
+        prompt_templates_hash="c" * 64,
+        reflection_protocol_text="reflect like this please",
+        reflection_protocol_hash="deadbeefcafef00d",
+    )
+    dbmod.register_run_meta(
+        conn,
+        run_id="run-without-reflection",
+        model="m1",
+        sampling_n=1,
+        filters_snapshot={},
+        config_snapshot={},
+        source_db_hash="a" * 64,
+        metadata_hash="b" * 64,
+        prompt_templates_hash="c" * 64,
+    )
+
+    rows = {
+        r["run_id"]: r
+        for r in conn.execute(
+            "SELECT run_id, reflection_protocol_text, reflection_protocol_hash FROM run_meta"
+        ).fetchall()
+    }
+    assert rows["run-with-reflection"]["reflection_protocol_text"] == "reflect like this please"
+    assert rows["run-with-reflection"]["reflection_protocol_hash"] == "deadbeefcafef00d"
+    assert rows["run-without-reflection"]["reflection_protocol_text"] is None
+    assert rows["run-without-reflection"]["reflection_protocol_hash"] is None
 
 
 def test_register_run_meta_preserves_started_at_on_resume(tmp_path: Path) -> None:
