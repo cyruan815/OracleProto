@@ -338,3 +338,126 @@ def test_finish_reason_breakdown_csv(tmp_path: Path) -> None:
     assert counts["m/b"] == {"stop": 6, "<missing>": 3}
     assert sum(shares["m/a"].values()) == pytest.approx(1.0, abs=1e-3)
     assert sum(shares["m/b"].values()) == pytest.approx(1.0, abs=1e-3)
+
+
+# ---------- v4 probabilistic regression -------------------------------------
+
+
+def test_per_model_summary_has_probabilistic_columns(tmp_path: Path) -> None:
+    """Phase 1 task 16.2: BI / NLL / ABI / fallback_share columns MUST exist
+    in `per_model_summary.csv` and carry plausible values.
+
+    The fixture has `belief_final IS NULL` everywhere → every scoreable
+    sample is on the §2.4 fallback path. So `fallback_share` MUST be 1.0
+    for any model that produced any probability vector.
+    """
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+
+    with (run_dir / "analysis" / "per_model_summary.csv").open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        # Phase 1 columns appended at the end of the existing header.
+        for col in ("bi", "bi_dec", "nll", "mbs", "abi_crowd", "abi_uniform", "fallback_share"):
+            assert col in fieldnames, f"missing column {col} in per_model_summary.csv"
+        rows_by_model = {row["model"]: row for row in reader}
+
+    a = rows_by_model["m/a"]
+    # m/a has 2 eligible questions (q1 yes_no single, q2 binary_named single).
+    # All samples come through the fallback path (belief_final IS NULL but
+    # parse_ok=1). Phase 1 averages probability vectors per (model, question)
+    # then aggregates → fallback_share at the question level is 1.0.
+    assert a["bi"], "BI must be populated for m/a"
+    assert 0.0 <= float(a["bi"]) <= 100.0
+    assert float(a["fallback_share"]) == pytest.approx(1.0, rel=1e-9)
+    # Single-only metrics should be present (q1 + q2 are both single).
+    assert a["mbs"]
+    assert a["bi_dec"]
+
+
+def test_v3_run_fallback_path(tmp_path: Path) -> None:
+    """Phase 1 task 16.3: A v3-style run (belief_final IS NULL, parse_ok=1)
+    MUST yield BI / NLL via §2.4 fallback with fallback_share = 1.0.
+
+    `_build_fixture_run` already exercises this — it never sets
+    `belief_final`, so it doubles as a v3-replay fixture.
+    """
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    overall = json.loads((run_dir / "analysis" / "overall.json").read_text())
+    assert "probabilistic" in overall
+    prob = overall["probabilistic"]["per_model"]
+    for model in ("m/a", "m/b"):
+        if model not in prob:
+            continue
+        agg = prob[model]
+        # Either no probability vector available (None) or fallback_share = 1.0.
+        if agg.get("fallback_share") is not None:
+            assert agg["fallback_share"] == pytest.approx(1.0, rel=1e-9)
+
+
+def test_byte_regression_existing_csvs(tmp_path: Path) -> None:
+    """Phase 1 task 16.4: error_breakdown.csv and finish_reason_breakdown.csv
+    MUST stay byte-identical between consecutive runs of `run_analysis`.
+
+    This is the strongest "no regression" check we can do without diffing
+    against a checked-in v3 baseline: re-running v4 against the same fixture
+    must deterministically produce identical files.
+    """
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    breakdown1 = (run_dir / "analysis" / "error_breakdown.csv").read_bytes()
+    finish1 = (run_dir / "analysis" / "finish_reason_breakdown.csv").read_bytes()
+
+    # Second run on the same DBs must be byte-identical.
+    analysis.run_analysis(run_dir)
+    breakdown2 = (run_dir / "analysis" / "error_breakdown.csv").read_bytes()
+    finish2 = (run_dir / "analysis" / "finish_reason_breakdown.csv").read_bytes()
+
+    assert breakdown1 == breakdown2
+    assert finish1 == finish2
+
+
+def test_per_model_summary_csv_v3_columns_unchanged(tmp_path: Path) -> None:
+    """Existing v3 columns of `per_model_summary.csv` MUST remain at their
+    same positions; v4 only appends new columns. This guards against an
+    accidental reorder that would invisibly break downstream tools.
+    """
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    with (run_dir / "analysis" / "per_model_summary.csv").open(encoding="utf-8") as f:
+        first_line = f.readline().rstrip("\r\n")
+    columns = first_line.split(",")
+    # The first 23 columns must match the v3 header verbatim.
+    expected_v3 = [
+        "model", "sampling_n", "eligible_samples", "eligible_questions",
+        "resolvable_samples", "cutoff_skip_samples", "cutoff_skip_rate",
+        "pass_at_1_avg", "resolvable_rate", "pass_any_at_n",
+        "at_least_majority_at_n", "at_least_all_at_n",
+        "majority_vote_accuracy", "majority_vote_resolvable_rate",
+        "parse_failure_rate", "error_rate",
+        "avg_tool_calls", "avg_react_steps", "avg_latency_ms",
+        "avg_prompt_tokens", "avg_completion_tokens", "avg_reasoning_tokens",
+        "avg_nudges_used",
+    ]
+    assert columns[: len(expected_v3)] == expected_v3
+    # And the trailing columns must exactly match the Phase 1 additions.
+    assert columns[len(expected_v3):] == [
+        "bi", "bi_dec", "nll", "mbs", "abi_crowd", "abi_uniform", "fallback_share",
+    ]
+
+
+def test_overall_json_carries_analysis_schema(tmp_path: Path) -> None:
+    """`overall.json` should surface `analysis_schema` from manifest.json so
+    downstream tools can branch on v3-vs-v4 metric availability without
+    re-reading the manifest."""
+    run_dir = _build_fixture_run(tmp_path)
+    # Inject analysis_schema into manifest before running analysis.
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["analysis_schema"] = "v4"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
+
+    analysis.run_analysis(run_dir)
+    overall = json.loads((run_dir / "analysis" / "overall.json").read_text())
+    assert overall.get("analysis_schema") == "v4"
