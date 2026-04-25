@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,9 @@ _REQUIRED_TEMPLATE_KEYS = (
 def _read_features_json(src_conn: sqlite3.Connection) -> dict[str, Any]:
     row = src_conn.execute("SELECT features_json FROM dataset_metadata").fetchone()
     if row is None:
-        raise ValueError("dataset_metadata is empty; source DB is not a valid forecast_eval_set")
+        raise ValueError(
+            "dataset_metadata is empty; source DB is not a valid forecast eval dataset"
+        )
     return json.loads(row["features_json"])
 
 
@@ -67,18 +70,32 @@ def sync_prompt_templates(
     return flat
 
 
+_SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def sync_questions(
     source_db: str | Path,
     results_conn: sqlite3.Connection,
     filters: QFilter,
+    table: str = "forecast_eval_set_example",
 ) -> list[Question]:
-    """Copy the filtered `forecast_eval_set` rows into `results.db.questions`."""
+    """Copy the filtered question rows from `<source_db>.<table>` into
+    `results.db.questions`.
+
+    `table` must be a bare SQLite identifier — Settings already validates this,
+    but we re-check here so direct callers (tests, ad-hoc scripts) can't slip
+    user-controlled SQL into the FROM clause.
+    """
+    if not _SQL_IDENT_RE.match(table):
+        raise ValueError(
+            f"sync_questions: table {table!r} must match [A-Za-z_][A-Za-z0-9_]*"
+        )
     src = db_connect(source_db)
     try:
         where, params = filters.apply_sql()
         rows = src.execute(
             f"SELECT id, choice_type, question_type, event, options, answer, end_time "
-            f"FROM forecast_eval_set WHERE {where} "
+            f"FROM {table} WHERE {where} "
             f"ORDER BY end_time, id",
             params,
         ).fetchall()

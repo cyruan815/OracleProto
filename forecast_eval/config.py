@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _PLACEHOLDER_TOKENS = {"REPLACE_ME", "CHANGEME", "PUT_YOUR_KEY_HERE"}
 _RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{4}$")
+_SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _parse_csv(raw: str | list[Any] | None) -> list[str]:
@@ -123,7 +124,11 @@ class Settings(BaseSettings):
     RESUME: bool = True
 
     # Database
-    SOURCE_DB: str = "./forecast_eval_set.db"
+    SOURCE_DB: str = "./forecast_eval_set_example.db"
+    # Question table inside SOURCE_DB. The bundled example DB ships with
+    # `forecast_eval_set_example`; bring-your-own datasets can point at any other
+    # table name as long as it has the same 7-column schema (see FRAME.md §2.1).
+    SOURCE_TABLE: str = "forecast_eval_set_example"
     # Every evaluation gets its own folder at RUNS_ROOT/{run_id}/, containing one
     # SQLite file per model under db/, plus analysis/ (post-run statistics) and
     # logs/. The old single-file RESULTS_DB layout is gone — see FRAME.md §5/§6.
@@ -209,6 +214,17 @@ class Settings(BaseSettings):
         if v and not _RUN_ID_RE.match(v):
             raise ValueError(
                 f"RUN_ID {v!r} does not match YYYYMMDD-HHMMSS-xxxx (4 hex) format"
+            )
+        return v
+
+    @field_validator("SOURCE_TABLE")
+    @classmethod
+    def _validate_source_table(cls, v: str) -> str:
+        # SOURCE_TABLE is interpolated into SQL — restrict to a safe identifier
+        # so misconfiguration cannot turn into injection.
+        if not _SQL_IDENT_RE.match(v):
+            raise ValueError(
+                f"SOURCE_TABLE {v!r} must match [A-Za-z_][A-Za-z0-9_]* (SQLite identifier)"
             )
         return v
 
