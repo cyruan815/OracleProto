@@ -1042,7 +1042,7 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
 | `error_breakdown.csv`             | `model × error_kind` 计数 + 样本占比（含 `<ok>` 与 `skipped_training_cutoff`）    |
 | `overall.json`                    | 全部切片的结构化聚合，方便二次处理                                                |
 
-### 11.5 概率族指标（v4 — Phase 0 + Phase 1 已落地）
+### 11.5 概率族指标（v4 — Phase 0 + Phase 1 + Phase 2 已落地）
 
 v4 在 accuracy 之外加了一阶 proper scoring rules 与难度调整指标。Phase 0 把
 LLM 的隐式概率信号收成结构化字段（`s{i}_belief_final` / `belief_trace` /
@@ -1078,23 +1078,79 @@ $p_l = 1-\epsilon$（命中 boxed letter）/ $\epsilon/(k-|\text{boxed}|)$（其
 $\epsilon = 0.05$。该 sample 走 fallback、`belief_parse_ok=0`。完全失败
 （`parse_ok=0`）的 sample MUST NOT 进概率指标均值，避免污染。
 
-**多试聚合**（Phase 1 默认）：per (model, question) 算 K 个 sample
-probability vector 的算术平均，再算每题 BS。Phase 2 会把默认换成 logit-space
-mean 并加 LOO shrinkage。Phase 1 单试 / 多试的差别只在于数值收敛速度，
-公式语义不变。
+**多试聚合**（`forecast_eval/analysis/aggregation.py`）：
 
-**产物清单（Phase 1 已实现部分）**：
+Phase 1 的默认是 per (model, question) 取 K 个 sample probability vector 的
+算术平均；Phase 2 加入两个论文 §C.9 同款的备选聚合器和一个诊断扫描：
 
-| 文件 | 新增列 / 内容 |
+| 函数 | 公式 | 用途 |
+| --- | --- | --- |
+| `arithmetic_mean(predictions)` | $\hat{\mathbf{p}} = \tfrac{1}{K}\sum_k \mathbf{p}^{(k)}$ | Phase 1 默认 |
+| `logit_space_mean(predictions, ctype)` | single：$\mathrm{softmax}(\overline{\log p})$；multi：$\sigma(\overline{\mathrm{logit}\,p})$ | 论文默认；K 一致时与算术平均同 |
+| `loo_shrinkage(...)` | 在 $\alpha \in \{0, 0.1, \dots, 1.0\}$ 网格上算 $\mathrm{softmax}(\alpha\overline{\log p})$ 的 BS，返回 $\alpha^*$ + 全曲线 | 诊断 dataset 是否需要朝 prior 收缩 |
+| `majority_vote_accuracy_v4(...)` | logit-space mean 后 argmax；K 浮点 logit 几乎不可能 tie | 把 v3 majority\_vote 的 ~10% tie-unresolved 一次性回收 |
+
+`majority_vote_accuracy_v4` 是 v3 letter-set vote 的升级版；当前 wired 为 unit-
+testable function，未替换 v3 的 `majority_vote_accuracy` 列以避免破坏 byte
+regression。`loo_shrinkage` 的 $\alpha$ 网格 BI 落到 `analysis/shrinkage_alpha_curve.csv`。
+
+**分层校准**（`forecast_eval/analysis/calibration.py`）：
+
+per-(question_type, choice_type) cell 校准 + LOO 防过拟，方法按 cell 分配：
+
+| Cell | 方法 | 公式 |
+| --- | --- | --- |
+| `*/single` 且 $k=2$ | Platt | $\hat{p}_l = \sigma(a \cdot \mathrm{logit}\,p_l + b)$，single 后 simplex 归一 |
+| `multiple_choice/single` 且 $k\ge 3$ | Temperature scaling | $\hat{p}_l = \mathrm{softmax}(\log p / T)$ |
+| `*/multi` | Platt label-wise | 每个 $(q, l)$ 当独立 Bernoulli，无 simplex 约束 |
+
+Platt 用 IRLS / Newton 法（带步长裁剪防 sigmoid 饱和发散），$L_2$ 正则默认
+$\lambda = 1$；temperature 用黄金分割搜索（`math.erf` / `math.exp` 纯
+stdlib，无 scipy 依赖），$T \in [0.05, 20]$。LOO：每题 $q$ 的校准参数从
+$\mathcal{Q}_t \setminus \{q\}$ 学；naive O($N^2$) 实现，319 题 < 1s。
+
+ECE 用 $M=15$ 等距分箱，single 用 top-1 confidence + top-1 hit、multi 用
+per-(q, l) 展开。Murphy 三分解 $\overline{\mathrm{BS}} = \mathrm{BS}_{\text{rel}} -
+\mathrm{BS}_{\text{res}} + \mathrm{BS}_{\text{unc}}$ 在同一分箱集合上算。
+"过拟哨兵"：`cal BI - uncal BI > 5` 时 `per_model_summary.md` 把模型名标
+`cal*`，提示 reviewer 校准可能在 LOO 训练-评估上过拟。
+
+**统计推断**（`forecast_eval/analysis/inference.py`）：
+
+| 函数 | 算法 | 输出 |
+| --- | --- | --- |
+| `paired_bootstrap(bs_a, bs_b)` | $B=5000$ 配对重抽（同索引同时索引 A 和 B） | `delta_mean / ci_low / ci_high / p_two_sided` |
+| `holm_bonferroni(p_values)` | $(n - i) \cdot p_{(i)}$ 后累积 max | adjusted p-values，原顺序返回 |
+| `difficulty_tertile(gammas)` | per-question $\gamma_q$ 排序后切 tertile | `low / mid / high` 分桶 |
+| `paired_bootstrap_by_difficulty(...)` | 每 tier 独立 paired bootstrap | `{tier: PairedBootstrapResult}` |
+| `posterior_a_better_than_b(bs_a, bs_b)` | 在 paired bootstrap 上 Monte-Carlo $\Pr(\overline{BS}_A < \overline{BS}_B)$ | $\Pr(\mathrm{BI}_A > \mathrm{BI}_B) \in [0, 1]$ |
+| `posterior_normal_fit(...)` | normal 闭式 $\Phi(-\bar\Delta / SE)$ | 同上的 sanity-check 通道 |
+
+paired bootstrap 是同索引版本——同一次 bootstrap 抽到的 question id 同时索引
+A 和 B 的 BS 数组——这控制 question-level 方差（论文 §G.2 量化为总方差的
+62%）。多对比较通过 Holm-Bonferroni 控制 FWER。
+
+**Phase 2 产物清单**：
+
+| 文件 | 内容 |
 | --- | --- |
-| `per_model_summary.csv` / `.md` | 末尾追加 `bi / bi_dec / nll / mbs / abi_crowd / abi_uniform / fallback_share` |
-| `per_model_by_question_type.csv` | 同上 |
-| `per_model_by_choice_type.csv` | 同上 |
-| `overall.json` | 新增 `probabilistic` 子对象（per_model + 两个 slice），透传 manifest 的 `analysis_schema` |
-| `error_breakdown.csv` / `finish_reason_breakdown.csv` | **不变**（Phase 1 byte-regression 测试覆盖） |
+| `per_model_summary.md` | 加 `BI_cal / NLL_cal / ECE_uncal / ECE_cal` 列 + `cal*` 哨兵 |
+| `per_model_summary_calibrated.csv` | 校准后 BI / NLL / ECE / ABI + uncal 对照 + `overfit_warning` |
+| `calibration_params.json` | per-model per-cell `{method, a/b/T, n_questions}` |
+| `reliability_data.json` / `reliability_data_calibrated.json` | per-(model, qtype) bins for reliability diagrams |
+| `brier_decomposition.csv` | per-model Murphy 三分解（uncal + cal） |
+| `shrinkage_alpha_curve.csv` | per-(model, ctype) $\alpha$ 网格 mean BS / BI |
+| `paired_delta_bi.csv` | 模型对决 ΔBS + 95% CI + Holm-adjusted p-value + posterior |
+| `pairwise_significance.csv` | $\alpha = 0.05$ 显著性标记（raw + Holm） |
+| `posterior_pairwise.csv` | $\Pr(\mathrm{BI}_A > \mathrm{BI}_B)$ |
+| `per_model_by_difficulty.csv` | 按 difficulty tertile 分层的 BI / NLL / ABI |
+| `paired_delta_bi_by_difficulty.csv` | 每个 tier 独立 paired bootstrap |
 
-Phase 2-3 计划交付物（calibration / aggregation / inference / behavior）见
-`ANALYSIS_DESIGN_v4.md` §4-§8 与 `openspec/changes/probabilistic-analysis-v4/`。
+`error_breakdown.csv` / `finish_reason_breakdown.csv` 的 byte-regression
+保护从 Phase 1 延续——Phase 2 不改这两个文件。Phase 3 计划交付物（行为分析
++ 反思协议 A/B + 可视化）见 `ANALYSIS_DESIGN_v4.md` §6-§8 与
+`openspec/changes/probabilistic-analysis-v4/` 任务 25-32。
+
 `Settings.BELIEF_PROTOCOL=false` 时旧 accuracy 列输出零变化、新概率列照样
 通过 fallback 计算（虽然校准信号被削弱）—— 向后完全兼容。
 

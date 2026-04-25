@@ -323,6 +323,30 @@ belief 协议的解析路径（`parser.parse_belief`）也与 `parse_answer` 完
 belief 解析失败 MUST NOT 影响 `parse_ok` / `correct` / `final_answer_letters`，
 让 v3 那条已经验证过的 boxed 路径保持稳定，v4 只是**叠加**而非替换。
 
+#### Phase 2 calibration 用 LOO 而非 holdout（v4）
+
+`forecast_eval/analysis/calibration.py` 的 Platt scaling 与 temperature
+scaling 都强制用 leave-one-out（每题 $q$ 的校准参数从 $\mathcal{Q}_t \setminus
+\{q\}$ 学）。理由：
+
+* **N 偏小**：本数据集 319 题、按 cell 分层后每个 cell 50-150 题量级。在
+  这个量级上 holdout 划分会让校准参数高方差——同一 dataset 不同 split 出来
+  的 (a, b) 差异能到 ±0.3，足以让 ECE 比较失去意义。LOO 把每题都用上、
+  又没让该题污染自己的校准参数——这是论文 §C.11 的核心防过拟手段，本项目
+  照搬。
+* **算力够便宜**：Platt 用 IRLS 单次 ~10 次 Newton 迭代、每次 O(N) 算
+  Hessian。LOO 是 N 次 refit，naive 实现总开销 O(N²) ≈ 100k 浮点操作，
+  319 题 < 1s。Temperature 用黄金分割搜索 30 次评估、每次 O(N)，同样
+  sub-second。
+* **过拟哨兵已就位**：LOO 仍可能在小 cell 上过拟（特别是 multi 类的边角
+  cell）。`ModelCalibrationReport.overfit_warning` 在 `cal BI - uncal BI > 5`
+  时返回 True，`per_model_summary.md` 把模型名标 `cal*`——reviewer 一眼
+  就能看出这一行的校准结果不可信。
+
+`scipy` 没有引入：IRLS 与黄金分割搜索都在 ~30 行纯 Python 写完，无依赖
+膨胀。如果未来 Phase 2.x 加 Dirichlet calibration 等需要更复杂数值方法的
+变种，再视情况按 design.md Open Q1 引入 scipy。
+
 ### 5.2 单 writer per model + WAL
 
 并发写入 SQLite 是经典坑。项目的策略：

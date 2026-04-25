@@ -97,15 +97,33 @@ runs/
                                     #   (bi / bi_dec / nll / mbs /
                                     #    abi_crowd / abi_uniform /
                                     #    fallback_share)
-      per_model_summary.md          # markdown table, same schema
+      per_model_summary.md          # markdown table; Phase 2 adds
+                                    #   BI_cal / NLL_cal / ECE_uncal /
+                                    #   ECE_cal columns + `cal*` overfit
+                                    #   marker when LOO calibration looks
+                                    #   over-confident
+      per_model_summary_calibrated.csv  # Phase 2: BI/NLL/ECE/ABI uncal+cal
       per_model_by_question_type.csv
       per_model_by_choice_type.csv
+      per_model_by_difficulty.csv   # Phase 2: γ-tertile slice (low/mid/high)
       error_breakdown.csv           # byte-regression-tested vs v3
       finish_reason_breakdown.csv   # byte-regression-tested vs v3
       overall.json                  # full structured aggregate, with
                                     #   `probabilistic` sub-object and
                                     #   `analysis_schema` mirrored from
                                     #   manifest
+      # ---- Phase 2 calibration ----
+      calibration_params.json       # per-(model, cell) Platt / temperature
+      reliability_data.json
+      reliability_data_calibrated.json
+      brier_decomposition.csv       # Murphy rel/res/unc, uncal + cal
+      # ---- Phase 2 aggregation ----
+      shrinkage_alpha_curve.csv     # per-(model, ctype) LOO α scan
+      # ---- Phase 2 inference ----
+      paired_delta_bi.csv           # pairwise ΔBS + Holm-adj p + posterior
+      pairwise_significance.csv     # α=0.05 flag (raw + Holm)
+      posterior_pairwise.csv        # P(BI_A > BI_B)
+      paired_delta_bi_by_difficulty.csv  # paired bootstrap per tertile
     logs/
       {run_id}.log
 ```
