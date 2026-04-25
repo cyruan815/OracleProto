@@ -96,6 +96,7 @@ results.db-*
 # Local custom dataset: built via scripts on top of forecast_eval_set_example.db,
 # may contain experimental subsets — kept out of git.
 forecast_eval_set.db
+forecast_eval_set_smoke.db
 # Note: forecast_eval_set_example.db is intentionally NOT ignored — it is the
 # source dataset shipped with the repo so source_db_hash stays reproducible.
 
