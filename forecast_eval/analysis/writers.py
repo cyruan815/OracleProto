@@ -16,6 +16,13 @@ from typing import Any
 
 from .accuracy import Aggregate
 from .aggregation import ShrinkageResult
+from .behavior import (
+    BeliefEvolutionRow,
+    ConfidenceCalibrationRow,
+    NumericConfidenceCalibrationRow,
+    PDPRow,
+    ReflectionABRow,
+)
 from .calibration import (
     CalibrationBin,
     ModelCalibrationReport,
@@ -192,12 +199,15 @@ def _write_per_model_summary_md(
     per_model: dict[str, tuple[int, Aggregate]],
     prob: dict[str, ModelProbabilisticAggregate] | None = None,
     cal: dict[str, ModelCalibrationReport] | None = None,
+    confidence_conflict_models: set[str] | None = None,
 ) -> Path:
     """Markdown table covering accuracy, probabilistic, and (Phase 2) calibration.
 
     `cal` overlays uncal/cal BI / NLL / ECE columns and the `cal*` warning
     marker per spec 20.8. When `cal` is None (no Phase 2 outputs available),
-    the table degrades gracefully to v3+Phase-1 columns.
+    the table degrades gracefully to v3+Phase-1 columns. Phase 3 spec 28.3
+    additionally appends a `conflict*` marker when the model's linguistic and
+    numeric confidence diverge on the same data slice.
     """
     lines = ["# Per-model summary", ""]
     header = [
@@ -229,9 +239,14 @@ def _write_per_model_summary_md(
         # Spec 20.8 哨兵: append `cal*` to the model cell when cal BI exceeds
         # uncal BI by 5 — that's the threshold for "calibration probably
         # overfit" per the design.
-        model_cell = model
+        # Spec 28.3 哨兵: append `conflict*` when language and numeric
+        # confidence diverge on the same model slice.
+        markers: list[str] = []
         if cal is not None and model in cal and cal[model].overfit_warning:
-            model_cell = f"{model} cal*"
+            markers.append("cal*")
+        if confidence_conflict_models and model in confidence_conflict_models:
+            markers.append("conflict*")
+        model_cell = f"{model} {' '.join(markers)}".rstrip() if markers else model
         tok_cell = f"{_fmt(row_dict['avg_prompt_tokens'])} / {_fmt(row_dict['avg_completion_tokens'])} / {_fmt(row_dict['avg_reasoning_tokens'])}"
         cells = [
             model_cell,
@@ -685,6 +700,147 @@ def _write_paired_delta_bi_by_difficulty_csv(
     return _write_csv(path, header, rows)
 
 
+# --------------------------------------------------------------------------- #
+# Phase 3 writers
+# --------------------------------------------------------------------------- #
+
+
+def _write_belief_evolution_csv(
+    path: Path,
+    rows: list[BeliefEvolutionRow],
+) -> Path:
+    """Spec 25.7: per-(model, q, k) belief evolution indicators."""
+    header = [
+        "model",
+        "question_id",
+        "question_type",
+        "choice_type",
+        "sample_idx",
+        "n_steps",
+        "trial_internal_volatility",
+        "convergence_step",
+        "evidence_efficiency",
+        "counterevidence_engaged",
+        "inter_trial_variance",
+    ]
+    out_rows: list[list[Any]] = []
+    for r in rows:
+        out_rows.append([
+            r.model,
+            r.question_id,
+            r.question_type,
+            r.choice_type,
+            r.sample_idx,
+            r.n_steps,
+            _round(r.volatility, 6),
+            r.convergence_step,
+            _round(r.evidence_efficiency, 6),
+            r.counterevidence_engaged,
+            _round(r.inter_trial_variance, 6),
+        ])
+    return _write_csv(path, header, out_rows)
+
+
+def _write_reflection_ab_csv(
+    path: Path,
+    rows: list[ReflectionABRow],
+) -> Path:
+    """Spec 26.4: paired bootstrap CI per metric per qtype."""
+    header = [
+        "model",
+        "question_type",
+        "metric",
+        "n_questions",
+        "delta_mean",
+        "ci_low",
+        "ci_high",
+        "p_value",
+    ]
+    out_rows: list[list[Any]] = []
+    for r in rows:
+        out_rows.append([
+            r.model,
+            r.question_type,
+            r.metric,
+            r.n_questions,
+            _round(r.delta_mean, 6),
+            _round(r.ci_low, 6),
+            _round(r.ci_high, 6),
+            _round(r.p_value, 6),
+        ])
+    return _write_csv(path, header, out_rows)
+
+
+def _write_tool_usage_pdp_csv(
+    path: Path,
+    rows: list[PDPRow],
+) -> Path:
+    """Spec 27.3: per-model per-feature partial dependence."""
+    header = [
+        "model",
+        "feature",
+        "feature_value",
+        "pdp_correct",
+        "pdp_nll",
+        "n_samples",
+    ]
+    out_rows: list[list[Any]] = []
+    for r in rows:
+        out_rows.append([
+            r.model,
+            r.feature,
+            _round(r.feature_value, 6),
+            _round(r.pdp_correct, 6),
+            _round(r.pdp_nll, 6),
+            r.n_samples,
+        ])
+    return _write_csv(path, header, out_rows)
+
+
+def _write_confidence_calibration_csv(
+    path: Path,
+    rows: list[ConfidenceCalibrationRow],
+) -> Path:
+    """Spec 28.2: subjective (low/medium/high) confidence vs hit rate."""
+    header = ["model", "confidence", "n_samples", "mean_max_p", "hit_rate"]
+    out_rows: list[list[Any]] = []
+    for r in rows:
+        out_rows.append([
+            r.model,
+            r.confidence,
+            r.n_samples,
+            _round(r.mean_max_p, 6),
+            _round(r.hit_rate, 6),
+        ])
+    return _write_csv(path, header, out_rows)
+
+
+def _write_numeric_confidence_calibration_csv(
+    path: Path,
+    rows: list[NumericConfidenceCalibrationRow],
+) -> Path:
+    """Spec 28.2: max_p binning vs hit rate."""
+    header = [
+        "model",
+        "bin_low",
+        "bin_high",
+        "n_samples",
+        "mean_max_p",
+        "hit_rate",
+    ]
+    out_rows: list[list[Any]] = []
+    for r in rows:
+        out_rows.append([
+            r.model,
+            _round(r.bin_low, 4),
+            _round(r.bin_high, 4),
+            r.n_samples,
+            _round(r.mean_max_p, 6),
+            _round(r.hit_rate, 6),
+        ])
+    return _write_csv(path, header, out_rows)
+
+
 __all__ = [
     "_SUMMARY_FIELDS",
     "_CALIBRATED_SUMMARY_FIELDS",
@@ -705,5 +861,10 @@ __all__ = [
     "_write_posterior_pairwise_csv",
     "_write_per_model_by_difficulty_csv",
     "_write_paired_delta_bi_by_difficulty_csv",
+    "_write_belief_evolution_csv",
+    "_write_reflection_ab_csv",
+    "_write_tool_usage_pdp_csv",
+    "_write_confidence_calibration_csv",
+    "_write_numeric_confidence_calibration_csv",
     "_fmt",
 ]

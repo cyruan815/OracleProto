@@ -41,6 +41,14 @@ from .accuracy import (
     _slice_by,
 )
 from .aggregation import ShrinkageResult, loo_shrinkage
+from .behavior import (
+    build_belief_evolution_rows,
+    confidence_calibration,
+    confidence_conflict_models,
+    numeric_confidence_calibration,
+    reflection_ab_report,
+    tool_usage_pdp,
+)
 from .calibration import ModelCalibrationReport, calibrate_run
 from .flatten import (
     CUTOFF,
@@ -68,10 +76,13 @@ from .proper_score import (
 )
 from .writers import (
     _SUMMARY_FIELDS,
+    _write_belief_evolution_csv,
     _write_brier_decomposition_csv,
     _write_calibration_params_json,
+    _write_confidence_calibration_csv,
     _write_error_breakdown_csv,
     _write_finish_reason_breakdown_csv,
+    _write_numeric_confidence_calibration_csv,
     _write_overall_json,
     _write_paired_delta_bi_by_difficulty_csv,
     _write_paired_delta_bi_csv,
@@ -81,9 +92,11 @@ from .writers import (
     _write_per_model_summary_csv,
     _write_per_model_summary_md,
     _write_posterior_pairwise_csv,
+    _write_reflection_ab_csv,
     _write_reliability_data_json,
     _write_shrinkage_alpha_curve_csv,
     _write_slice_csv,
+    _write_tool_usage_pdp_csv,
 )
 
 
@@ -427,16 +440,68 @@ def run_analysis(run_dir: Path) -> list[Path]:
                         by_pair_per_tier,
                     ))
 
+    # ------------------------------------------------------------------ #
+    # Phase 3 deliverables — behavior, reflection A/B, tool PDP, confidence.
+    # All four blocks degrade gracefully on v3 fixtures where belief_trace
+    # is uniformly NULL (empty CSVs / skipped writes).
+    # ------------------------------------------------------------------ #
+    behavior_rows = build_belief_evolution_rows(samples_by_model, gt_map_global)
+    if behavior_rows:
+        written.append(_write_belief_evolution_csv(
+            analysis_dir / "belief_evolution.csv", behavior_rows,
+        ))
+
+    pdp_rows = tool_usage_pdp(samples_by_model, gt_map_global)
+    if pdp_rows:
+        written.append(_write_tool_usage_pdp_csv(
+            analysis_dir / "tool_usage_pdp.csv", pdp_rows,
+        ))
+
+    confidence_rows = confidence_calibration(samples_by_model)
+    numeric_confidence_rows = numeric_confidence_calibration(samples_by_model)
+    # The confidence rows always have ≥1 model entry, but the values are
+    # mostly None on v3 fixtures (no parsed beliefs). Suppress writing when
+    # every numeric / hit_rate is None so the CSV doesn't add noise.
+    if any(r.n_samples > 0 for r in confidence_rows):
+        written.append(_write_confidence_calibration_csv(
+            analysis_dir / "confidence_calibration.csv", confidence_rows,
+        ))
+    if any(r.n_samples > 0 for r in numeric_confidence_rows):
+        written.append(_write_numeric_confidence_calibration_csv(
+            analysis_dir / "numeric_confidence_calibration.csv",
+            numeric_confidence_rows,
+        ))
+
+    # Reflection A/B requires sibling runs that match every fingerprint
+    # except `reflection_protocol_hash`. We look one directory up from the
+    # current run because pairs live as siblings under runs/.
+    runs_root = run_dir.parent
+    try:
+        from .behavior import find_paired_runs
+
+        pairs = find_paired_runs(runs_root)
+        if pairs:
+            ab_rows = reflection_ab_report(pairs)
+            if ab_rows:
+                written.append(_write_reflection_ab_csv(
+                    analysis_dir / "reflection_ab.csv", ab_rows,
+                ))
+    except Exception:  # pragma: no cover — reflection A/B is best-effort
+        pass
+
+    conflict_models = confidence_conflict_models(confidence_rows)
+
     # `per_model_summary.md` is written last so it can include calibration
-    # columns and the `cal*` warning marker when Phase 2 outputs are
-    # available. When `cal_reports` is empty, the writer falls back to v3 +
-    # Phase 1 columns automatically.
+    # columns + the `cal*` overfit warning AND the Phase 3 `conflict*`
+    # marker. When neither Phase 2 nor Phase 3 outputs are available, the
+    # writer falls back to v3+Phase-1 columns automatically.
     if summary_payload:
         written.append(_write_per_model_summary_md(
             analysis_dir / "per_model_summary.md",
             summary_payload,
             prob=prob_report.per_model,
             cal=cal_reports if cal_reports else None,
+            confidence_conflict_models=conflict_models or None,
         ))
     return written
 
