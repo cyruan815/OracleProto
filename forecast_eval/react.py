@@ -29,7 +29,35 @@ def _compute_end_date(end_time: str, offset_days: int) -> str:
     return (date.fromisoformat(end_time) + timedelta(days=offset_days)).isoformat()
 
 
-def _accumulate_tokens(totals: dict[str, int], resp: ChatResponse) -> None:
+def _record_step(
+    step_metrics: list[dict[str, Any]],
+    totals: dict[str, int],
+    *,
+    step: int,
+    resp: ChatResponse,
+    latency_ms: int,
+) -> None:
+    """Append a per-step observability snapshot and accumulate token totals.
+
+    `n_tool_calls` reads from the assistant message inside `resp.message` —
+    that message is the one the loop is about to append, so the count reflects
+    "tool calls emitted by THIS step" (not total). `latency_ms` is the wall
+    clock for this single `llm.chat` invocation, computed by the caller via
+    `time.monotonic()`.
+    """
+    assistant_msg = resp.message
+    n_tool_calls = len(assistant_msg.get("tool_calls") or [])
+    step_metrics.append(
+        {
+            "step": step,
+            "prompt": resp.usage.prompt_tokens,
+            "completion": resp.usage.completion_tokens,
+            "reasoning": resp.usage.reasoning_tokens,
+            "latency_ms": latency_ms,
+            "finish_reason": resp.finish_reason,
+            "n_tool_calls": n_tool_calls,
+        }
+    )
     totals["prompt"] += resp.usage.prompt_tokens
     totals["completion"] += resp.usage.completion_tokens
     totals["reasoning"] += resp.usage.reasoning_tokens
@@ -93,10 +121,12 @@ async def run_react(
 
     search_calls: list[dict[str, Any]] = []
     tokens = {"prompt": 0, "completion": 0, "reasoning": 0}
+    step_metrics: list[dict[str, Any]] = []
     t0 = time.monotonic()
     final_raw = ""
     steps_executed = 0
     nudges_used = 0
+    last_resp: ChatResponse | None = None
     # ENABLE_WEB_SEARCH=false → LLM 看不到任何 tool schema, 循环会在首轮直接返回
     # content 并 break, Tavily 完全不会被调用. 此时也禁用 nudge — 没有搜索可以再做.
     tool_schemas: list[dict[str, Any]] = (
@@ -110,13 +140,16 @@ async def run_react(
 
     for step in range(settings.REACT_MAX_STEPS):
         steps_executed = step + 1
+        t_step_start = time.monotonic()
         resp = await llm_chat(
             model=model,
             messages=messages,
             settings=settings,
             tools=tool_schemas,
         )
-        _accumulate_tokens(tokens, resp)
+        t_step_ms = int((time.monotonic() - t_step_start) * 1000)
+        _record_step(step_metrics, tokens, step=step, resp=resp, latency_ms=t_step_ms)
+        last_resp = resp
         assistant_msg = resp.message
         messages.append(assistant_msg)
 
@@ -208,4 +241,14 @@ async def run_react(
         search_calls=json.dumps(search_calls, ensure_ascii=False),
         error=None,
         created_at=utcnow_iso(),
+        # Final-state envelope fields are taken from the LAST llm.chat response
+        # so the recorded `finish_reason` reflects how the loop actually
+        # terminated (stop / length / tool_calls). They are None when the loop
+        # never ran (REACT_MAX_STEPS=0 — only reachable defensively).
+        finish_reason=last_resp.finish_reason if last_resp is not None else None,
+        nudges_used=nudges_used,
+        step_metrics=json.dumps(step_metrics, ensure_ascii=False),
+        response_id=last_resp.response_id if last_resp is not None else None,
+        system_fingerprint=last_resp.system_fingerprint if last_resp is not None else None,
+        service_tier=last_resp.service_tier if last_resp is not None else None,
     )

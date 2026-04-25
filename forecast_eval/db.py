@@ -25,12 +25,15 @@ from typing import Any, Iterable
 from .config import Settings
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 # ---------- Per-sample column definitions ----------
 
 # Each sample_idx contributes this column suite (prefixed with "s{i}_").
+# v3 (2026-04) appended 6 observability columns at the tail. Keep the order
+# stable: existing code assumes new fields land after `created_at`, and the
+# migration path adds them with `ALTER TABLE ADD COLUMN` in this same order.
 PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("final_answer_letters", "TEXT"),
     ("final_answer_raw", "TEXT"),
@@ -46,8 +49,29 @@ PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("search_calls", "TEXT"),
     ("error", "TEXT"),
     ("created_at", "TEXT"),
+    ("finish_reason", "TEXT"),
+    ("nudges_used", "INTEGER"),
+    ("step_metrics", "TEXT"),
+    ("response_id", "TEXT"),
+    ("system_fingerprint", "TEXT"),
+    ("service_tier", "TEXT"),
 )
 PER_SAMPLE_FIELD_NAMES: tuple[str, ...] = tuple(name for name, _ in PER_SAMPLE_COLUMNS)
+
+# Columns added in v3 (used by the migration path). Order matters because the
+# ALTER statements run in this sequence on each sample's column group.
+_V3_NEW_PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("finish_reason", "TEXT"),
+    ("nudges_used", "INTEGER"),
+    ("step_metrics", "TEXT"),
+    ("response_id", "TEXT"),
+    ("system_fingerprint", "TEXT"),
+    ("service_tier", "TEXT"),
+)
+_V3_NEW_RUN_META_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("reflection_protocol_text", "TEXT"),
+    ("reflection_protocol_hash", "TEXT"),
+)
 
 
 def sample_col(sample_idx: int, field: str) -> str:
@@ -82,17 +106,19 @@ CREATE TABLE IF NOT EXISTS prompt_templates (
 );
 
 CREATE TABLE IF NOT EXISTS run_meta (
-    run_id                TEXT PRIMARY KEY,
-    model                 TEXT NOT NULL,
-    sampling_n            INTEGER NOT NULL,
-    config_snapshot       TEXT NOT NULL,
-    filters_snapshot      TEXT NOT NULL,
-    source_db_hash        TEXT NOT NULL,
-    metadata_hash         TEXT NOT NULL,
-    prompt_templates_hash TEXT NOT NULL,
-    training_cutoff       TEXT,
-    started_at            TEXT NOT NULL,
-    finished_at           TEXT
+    run_id                    TEXT PRIMARY KEY,
+    model                     TEXT NOT NULL,
+    sampling_n                INTEGER NOT NULL,
+    config_snapshot           TEXT NOT NULL,
+    filters_snapshot          TEXT NOT NULL,
+    source_db_hash            TEXT NOT NULL,
+    metadata_hash             TEXT NOT NULL,
+    prompt_templates_hash     TEXT NOT NULL,
+    training_cutoff           TEXT,
+    started_at                TEXT NOT NULL,
+    finished_at               TEXT,
+    reflection_protocol_text  TEXT,
+    reflection_protocol_hash  TEXT
 );
 """
 
@@ -140,9 +166,14 @@ def init_schema(conn: sqlite3.Connection, sampling_n: int) -> None:
     """Create all tables for one model's DB with a run_results shape matching
     `sampling_n`. Idempotent as long as `sampling_n` stays the same across runs
     that reuse the same DB.
+
+    For older DBs created under v2 we run the v2→v3 ALTER migration in-place
+    before validating the column suite, so resumed runs pick up the new columns
+    without losing data.
     """
     conn.executescript(_STATIC_SCHEMA_SQL)
     conn.executescript(_run_results_ddl(sampling_n))
+    _migrate_v2_to_v3(conn, sampling_n)
     row = conn.execute(
         "SELECT version FROM schema_version WHERE version = ?",
         (SCHEMA_VERSION,),
@@ -153,6 +184,52 @@ def init_schema(conn: sqlite3.Connection, sampling_n: int) -> None:
             (SCHEMA_VERSION, utcnow_iso()),
         )
     _assert_run_results_matches(conn, sampling_n)
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection, sampling_n: int) -> None:
+    """Add the v3 columns in-place when an existing DB still reports v2.
+
+    The migration is fully idempotent: it inspects `PRAGMA table_info` before
+    each `ALTER TABLE ADD COLUMN` and skips columns that already exist (CREATE
+    TABLE IF NOT EXISTS handles brand-new DBs by leaving everything in place).
+    Only when at least one column was added do we record a `version=3` row in
+    `schema_version`, preserving the historical `version=2` row for audit.
+    """
+    versions = {
+        int(r["version"])
+        for r in conn.execute("SELECT version FROM schema_version").fetchall()
+    }
+    if SCHEMA_VERSION in versions:
+        return
+
+    existing_results = {
+        r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()
+    }
+    existing_meta = {
+        r["name"] for r in conn.execute("PRAGMA table_info(run_meta)").fetchall()
+    }
+
+    altered = False
+    for i in range(sampling_n):
+        for name, sql_type in _V3_NEW_PER_SAMPLE_COLUMNS:
+            col = sample_col(i, name)
+            if col in existing_results:
+                continue
+            conn.execute(f"ALTER TABLE run_results ADD COLUMN {col} {sql_type}")
+            altered = True
+    for name, sql_type in _V3_NEW_RUN_META_COLUMNS:
+        if name in existing_meta:
+            continue
+        conn.execute(f"ALTER TABLE run_meta ADD COLUMN {name} {sql_type}")
+        altered = True
+
+    if altered and 2 in versions:
+        # Record the upgrade only when we actually transformed a v2 DB; brand
+        # new v3 DBs go through the regular `init_schema` insert path below.
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (SCHEMA_VERSION, utcnow_iso()),
+        )
 
 
 def _assert_run_results_matches(conn: sqlite3.Connection, sampling_n: int) -> None:
@@ -278,11 +355,14 @@ def register_run_meta(
     prompt_templates_hash: str,
     training_cutoff: str | None = None,
     started_at: str | None = None,
+    reflection_protocol_text: str | None = None,
+    reflection_protocol_hash: str | None = None,
 ) -> None:
     """Insert or refresh the single `run_meta` row for this model's DB.
 
     `finished_at` and `started_at` are preserved on resume so the original
-    start timestamp survives.
+    start timestamp survives. `reflection_protocol_text` / `..._hash` are
+    independent of `prompt_templates_hash` (DESIGN.md decision 2).
     """
     conn.execute(
         """
@@ -290,17 +370,20 @@ def register_run_meta(
             run_id, model, sampling_n,
             config_snapshot, filters_snapshot,
             source_db_hash, metadata_hash, prompt_templates_hash,
-            training_cutoff, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            training_cutoff, started_at, finished_at,
+            reflection_protocol_text, reflection_protocol_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
-            model                 = excluded.model,
-            sampling_n            = excluded.sampling_n,
-            config_snapshot       = excluded.config_snapshot,
-            filters_snapshot      = excluded.filters_snapshot,
-            source_db_hash        = excluded.source_db_hash,
-            metadata_hash         = excluded.metadata_hash,
-            prompt_templates_hash = excluded.prompt_templates_hash,
-            training_cutoff       = excluded.training_cutoff
+            model                    = excluded.model,
+            sampling_n               = excluded.sampling_n,
+            config_snapshot          = excluded.config_snapshot,
+            filters_snapshot         = excluded.filters_snapshot,
+            source_db_hash           = excluded.source_db_hash,
+            metadata_hash            = excluded.metadata_hash,
+            prompt_templates_hash    = excluded.prompt_templates_hash,
+            training_cutoff          = excluded.training_cutoff,
+            reflection_protocol_text = excluded.reflection_protocol_text,
+            reflection_protocol_hash = excluded.reflection_protocol_hash
         """,
         (
             run_id,
@@ -313,6 +396,8 @@ def register_run_meta(
             prompt_templates_hash,
             training_cutoff,
             started_at or utcnow_iso(),
+            reflection_protocol_text,
+            reflection_protocol_hash,
         ),
     )
 
@@ -381,12 +466,20 @@ class AsyncWriter:
             "search_calls": str | None,
             "error": str | None,
             "created_at": str,
+            # v3 observability columns:
+            "finish_reason": str | None,
+            "nudges_used": int,
+            "step_metrics": str | None,
+            "response_id": str | None,
+            "system_fingerprint": str | None,
+            "service_tier": str | None,
         }
 
     The writer looks up `sample_idx` and UPSERTs the matching `s{i}_*` columns
     on the `question_id` row. `user_prompt` is written once (COALESCE) so the
     first sample that lands for a question persists the canonical rendered
-    prompt; later samples don't overwrite it.
+    prompt; later samples don't overwrite it. Every per-sample key listed
+    above MUST be present — a missing key raises `KeyError` at flush time.
     """
 
     FLUSH_INTERVAL_S = 1.0
@@ -494,12 +587,15 @@ class AsyncWriter:
 
     def _insert_rows_sync(self, rows: Iterable[dict[str, Any]]) -> None:
         # Group rows by sample_idx so each SQL stays stable within executemany.
+        # Per-sample keys are accessed via `row[name]` (not `.get`): missing
+        # field MUST raise KeyError so a producer that forgets to populate a
+        # new column fails loudly instead of silently writing NULL.
         buckets: dict[int, list[tuple[Any, ...]]] = {}
         for row in rows:
             sample_idx = int(row["sample_idx"])
             qid = row["question_id"]
             payload = [qid, row.get("user_prompt")]
-            payload.extend(row.get(name) for name in PER_SAMPLE_FIELD_NAMES)
+            payload.extend(row[name] for name in PER_SAMPLE_FIELD_NAMES)
             buckets.setdefault(sample_idx, []).append(tuple(payload))
 
         self._conn.execute("BEGIN")

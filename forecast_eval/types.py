@@ -56,6 +56,8 @@ class SampleResult:
     """One row about to be enqueued to `run_results`.
 
     Field names match `run_results` columns 1:1 so `to_row()` is trivial.
+    All call sites use keyword arguments, so appending new fields without
+    defaults is safe — any future positional caller will fail fast.
     """
 
     run_id: str
@@ -80,6 +82,13 @@ class SampleResult:
     search_calls: str | None
     error: str | None
     created_at: str
+
+    finish_reason: str | None
+    nudges_used: int
+    step_metrics: str | None
+    response_id: str | None
+    system_fingerprint: str | None
+    service_tier: str | None
 
     def to_row(self) -> dict[str, Any]:
         """Shape matching `forecast_eval.db.AsyncWriter.enqueue_result`.
@@ -106,6 +115,12 @@ class SampleResult:
             "search_calls": self.search_calls,
             "error": self.error,
             "created_at": self.created_at,
+            "finish_reason": self.finish_reason,
+            "nudges_used": self.nudges_used,
+            "step_metrics": self.step_metrics,
+            "response_id": self.response_id,
+            "system_fingerprint": self.system_fingerprint,
+            "service_tier": self.service_tier,
         }
 
 

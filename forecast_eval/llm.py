@@ -33,13 +33,22 @@ class ChatResponse:
 
     Callers read `.message` (the serialisable assistant message dict), `.usage`
     (tokens, with reasoning defaulting to 0 when unsupported) and
-    `.response_headers` (raw headers, needed for Retry-After parsing).
+    `.response_headers` (raw headers, needed for Retry-After parsing). The
+    five trailing fields (`finish_reason` / `response_id` / `created` /
+    `system_fingerprint` / `service_tier`) are extracted defensively from the
+    `ChatCompletion` envelope for downstream observability — they MUST NOT
+    drive retry/backoff and default to `None` when the provider omits them.
     """
 
     message: dict[str, Any]
     usage: Usage
     response_headers: httpx.Headers = field(default_factory=httpx.Headers)
     raw: Any = None
+    finish_reason: str | None = None
+    response_id: str | None = None
+    created: int | None = None
+    system_fingerprint: str | None = None
+    service_tier: str | None = None
 
 
 _client: AsyncOpenAI | None = None
@@ -193,4 +202,25 @@ async def chat(
         headers = getattr(raw, "headers", httpx.Headers())
         message = _serialise_message(parsed.choices[0].message)
         usage = _extract_usage(getattr(parsed, "usage", None))
-        return ChatResponse(message=message, usage=usage, response_headers=headers, raw=parsed)
+        # All five envelope fields below are best-effort: providers (e.g.
+        # Anthropic via OpenRouter) may omit `system_fingerprint` /
+        # `service_tier`. `finish_reason` is per-choice, the rest are top-level
+        # on the ChatCompletion. None values flow straight through to the DB.
+        first_choice = parsed.choices[0] if parsed.choices else None
+        finish_reason = getattr(first_choice, "finish_reason", None) if first_choice is not None else None
+        response_id = getattr(parsed, "id", None)
+        created_raw = getattr(parsed, "created", None)
+        created = int(created_raw) if isinstance(created_raw, (int, float)) else None
+        system_fingerprint = getattr(parsed, "system_fingerprint", None)
+        service_tier = getattr(parsed, "service_tier", None)
+        return ChatResponse(
+            message=message,
+            usage=usage,
+            response_headers=headers,
+            raw=parsed,
+            finish_reason=finish_reason,
+            response_id=response_id,
+            created=created,
+            system_fingerprint=system_fingerprint,
+            service_tier=service_tier,
+        )

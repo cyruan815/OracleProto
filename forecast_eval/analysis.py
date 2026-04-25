@@ -50,6 +50,28 @@ from . import db as dbmod
 CUTOFF = "skipped_training_cutoff"
 
 
+# Per-sample columns to read out of `run_results`. Order is the SELECT order:
+# `_flatten_db` derives both the SQL column list AND the post-select offsets
+# from this single tuple, so adding a v4 column means appending one entry
+# here — no manual index bookkeeping. `created_at` keeps doubling as the
+# "slot is populated" sentinel; finish_reason / nudges_used are v3 additions.
+_ANALYSIS_FIELDS: tuple[str, ...] = (
+    "correct",
+    "parse_ok",
+    "tool_calls_count",
+    "react_steps",
+    "prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "latency_ms",
+    "final_answer_letters",
+    "error",
+    "created_at",
+    "finish_reason",
+    "nudges_used",
+)
+
+
 @dataclass
 class SampleRow:
     """Flattened per-sample view of one cell in the wide run_results table."""
@@ -71,6 +93,8 @@ class SampleRow:
     final_answer_letters: str | None
     error: str | None
     created_at: str | None
+    finish_reason: str | None
+    nudges_used: int | None
 
     @property
     def is_cutoff(self) -> bool:
@@ -98,26 +122,22 @@ def _flatten_db(conn: sqlite3.Connection, sampling_n: int, model: str) -> list[S
     """Pivot the wide run_results table into per-sample rows joined with question metadata."""
     cols: list[str] = ["q.id", "q.question_type", "q.choice_type"]
     for i in range(sampling_n):
-        for name in (
-            "correct", "parse_ok",
-            "tool_calls_count", "react_steps",
-            "prompt_tokens", "completion_tokens", "reasoning_tokens",
-            "latency_ms",
-            "final_answer_letters", "error", "created_at",
-        ):
+        for name in _ANALYSIS_FIELDS:
             cols.append(f"r.{dbmod.sample_col(i, name)}")
     sql = (
         "SELECT " + ", ".join(cols) + " "
         "FROM questions q LEFT JOIN run_results r ON q.id = r.question_id"
     )
+    offset = 3
+    step = len(_ANALYSIS_FIELDS)
+    field_idx = {name: i for i, name in enumerate(_ANALYSIS_FIELDS)}
+    created_off = field_idx["created_at"]
     samples: list[SampleRow] = []
     for row in conn.execute(sql):
         qid, qtype, ctype = row[0], row[1], row[2]
-        offset = 3
-        step = 11
         for i in range(sampling_n):
             base = offset + step * i
-            created = row[base + 10]
+            created = row[base + created_off]
             if created is None:
                 # Sample slot is empty — no record written. Skip; we can still
                 # judge pass_any_at_n with the other samples. Counting absent
@@ -130,17 +150,19 @@ def _flatten_db(conn: sqlite3.Connection, sampling_n: int, model: str) -> list[S
                     question_type=qtype,
                     choice_type=ctype,
                     sample_idx=i,
-                    correct=row[base + 0],
-                    parse_ok=row[base + 1],
-                    tool_calls_count=row[base + 2],
-                    react_steps=row[base + 3],
-                    prompt_tokens=row[base + 4],
-                    completion_tokens=row[base + 5],
-                    reasoning_tokens=row[base + 6],
-                    latency_ms=row[base + 7],
-                    final_answer_letters=row[base + 8],
-                    error=row[base + 9],
+                    correct=row[base + field_idx["correct"]],
+                    parse_ok=row[base + field_idx["parse_ok"]],
+                    tool_calls_count=row[base + field_idx["tool_calls_count"]],
+                    react_steps=row[base + field_idx["react_steps"]],
+                    prompt_tokens=row[base + field_idx["prompt_tokens"]],
+                    completion_tokens=row[base + field_idx["completion_tokens"]],
+                    reasoning_tokens=row[base + field_idx["reasoning_tokens"]],
+                    latency_ms=row[base + field_idx["latency_ms"]],
+                    final_answer_letters=row[base + field_idx["final_answer_letters"]],
+                    error=row[base + field_idx["error"]],
                     created_at=created,
+                    finish_reason=row[base + field_idx["finish_reason"]],
+                    nudges_used=row[base + field_idx["nudges_used"]],
                 )
             )
     return samples
@@ -207,6 +229,7 @@ class Aggregate:
     avg_prompt_tokens: float | None
     avg_completion_tokens: float | None
     avg_reasoning_tokens: float | None
+    avg_nudges_used: float | None
 
     def as_ordered_dict(self) -> dict[str, Any]:
         return {
@@ -230,6 +253,7 @@ class Aggregate:
             "avg_prompt_tokens": _round(self.avg_prompt_tokens, 1),
             "avg_completion_tokens": _round(self.avg_completion_tokens, 1),
             "avg_reasoning_tokens": _round(self.avg_reasoning_tokens, 1),
+            "avg_nudges_used": _round(self.avg_nudges_used, 2),
         }
 
 
@@ -325,6 +349,9 @@ def _aggregate(
     avg_ptok = _mean(s.prompt_tokens for s in eligible_samples)
     avg_ctok = _mean(s.completion_tokens for s in eligible_samples)
     avg_rtok = _mean(s.reasoning_tokens for s in eligible_samples)
+    # Pre-v3 rows have nudges_used=NULL — _mean already filters those, so a
+    # mid-run schema upgrade silently averages over the v3 rows only.
+    avg_nudges = _mean(s.nudges_used for s in eligible_samples)
 
     return Aggregate(
         eligible_samples=len(eligible_samples),
@@ -347,6 +374,7 @@ def _aggregate(
         avg_prompt_tokens=avg_ptok,
         avg_completion_tokens=avg_ctok,
         avg_reasoning_tokens=avg_rtok,
+        avg_nudges_used=avg_nudges,
     )
 
 
@@ -370,6 +398,21 @@ def _error_breakdown(samples: list[SampleRow]) -> Counter:
             counter[s.error] += 1
         else:
             counter["<ok>"] += 1
+    return counter
+
+
+def _finish_reason_breakdown(samples: list[SampleRow]) -> Counter:
+    """Count `finish_reason` values across eligible samples (cutoff excluded).
+
+    The cutoff path never invokes the LLM, so its `finish_reason` is always
+    NULL — including those rows would just inflate the `<missing>` bucket.
+    A NULL on an eligible sample (legacy v2 row, or pre-extraction failure)
+    is rare but real, so we keep it as `<missing>` rather than silently dropping.
+    """
+    counter: Counter = Counter()
+    for s in samples:
+        if s.is_eligible:
+            counter[s.finish_reason or "<missing>"] += 1
     return counter
 
 
@@ -398,6 +441,7 @@ _SUMMARY_FIELDS = (
     "avg_prompt_tokens",
     "avg_completion_tokens",
     "avg_reasoning_tokens",
+    "avg_nudges_used",
 )
 
 
@@ -456,6 +500,23 @@ def _write_error_breakdown_csv(
     return _write_csv(path, header, rows)
 
 
+def _write_finish_reason_breakdown_csv(
+    path: Path,
+    per_model: dict[str, Counter],
+) -> Path:
+    """Write `finish_reason` distribution per model. The denominator is the
+    eligible sample count for that model (= sum of the counter values, since
+    `_finish_reason_breakdown` already filters cutoff rows out)."""
+    header = ["model", "finish_reason", "count", "share_of_eligible"]
+    rows: list[list[Any]] = []
+    for model, counter in per_model.items():
+        eligible_total = sum(counter.values())
+        for reason, count in sorted(counter.items()):
+            share = count / eligible_total if eligible_total else 0.0
+            rows.append([model, reason, count, round(share, 4)])
+    return _write_csv(path, header, rows)
+
+
 def _fmt(value: Any) -> str:
     if value is None:
         return "—"
@@ -474,7 +535,7 @@ def _write_per_model_summary_md(
         "eligible_Q", "eligible_S", "cutoff_S",
         "pass@1", "pass_any@N", "≥majority", "≥all",
         "majority_acc", "parse_fail", "error_rate",
-        "avg_tool", "avg_steps", "avg_latency_ms",
+        "avg_tool", "avg_steps", "avg_nudges", "avg_latency_ms",
         "avg_p/c/r_tokens",
     ]
     lines.append("| " + " | ".join(header) + " |")
@@ -497,6 +558,7 @@ def _write_per_model_summary_md(
             _fmt(row_dict["error_rate"]),
             _fmt(row_dict["avg_tool_calls"]),
             _fmt(row_dict["avg_react_steps"]),
+            _fmt(row_dict["avg_nudges_used"]),
             _fmt(row_dict["avg_latency_ms"]),
             tok_cell,
         ]
@@ -562,6 +624,7 @@ def run_analysis(run_dir: Path) -> list[Path]:
     per_model_agg_qtype: dict[str, dict[str, Aggregate]] = {}
     per_model_agg_ctype: dict[str, dict[str, Aggregate]] = {}
     per_model_error: dict[str, tuple[int, Counter]] = {}
+    per_model_finish_reason: dict[str, Counter] = {}
     sampling_n_by_model: dict[str, int] = {}
 
     summary_payload: dict[str, tuple[int, Aggregate]] = {}
@@ -589,6 +652,7 @@ def run_analysis(run_dir: Path) -> list[Path]:
             per_model_agg_qtype[model] = agg_qtype
             per_model_agg_ctype[model] = agg_ctype
             per_model_error[model] = (len(samples), _error_breakdown(samples))
+            per_model_finish_reason[model] = _finish_reason_breakdown(samples)
             summary_payload[model] = (sampling_n, agg)
             slice_qtype_payload[model] = (sampling_n, agg_qtype)
             slice_ctype_payload[model] = (sampling_n, agg_ctype)
@@ -618,6 +682,10 @@ def run_analysis(run_dir: Path) -> list[Path]:
     if per_model_error:
         written.append(_write_error_breakdown_csv(
             analysis_dir / "error_breakdown.csv", per_model_error,
+        ))
+    if per_model_finish_reason:
+        written.append(_write_finish_reason_breakdown_csv(
+            analysis_dir / "finish_reason_breakdown.csv", per_model_finish_reason,
         ))
     written.append(_write_overall_json(
         analysis_dir / "overall.json",

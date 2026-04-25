@@ -51,6 +51,8 @@ def generate_run_id(now: datetime | None = None) -> str:
 
 
 def _skipped_cutoff_row(q: Question, sample_idx: int) -> dict[str, Any]:
+    # `nudges_used=0` is meaningful (no LLM call happened), the other five v3
+    # fields are None — there is no envelope to take them from.
     return SampleResult(
         run_id="",
         question_id=q.id,
@@ -71,10 +73,18 @@ def _skipped_cutoff_row(q: Question, sample_idx: int) -> dict[str, Any]:
         search_calls=None,
         error="skipped_training_cutoff",
         created_at=utcnow_iso(),
+        finish_reason=None,
+        nudges_used=0,
+        step_metrics=None,
+        response_id=None,
+        system_fingerprint=None,
+        service_tier=None,
     ).to_row()
 
 
 def _error_row(q: Question, sample_idx: int, error: str) -> dict[str, Any]:
+    # Same shape as the cutoff row: nudges_used=0 because no react-loop counter
+    # ever ticked, and the four envelope strings are None.
     return SampleResult(
         run_id="",
         question_id=q.id,
@@ -95,6 +105,12 @@ def _error_row(q: Question, sample_idx: int, error: str) -> dict[str, Any]:
         search_calls=None,
         error=error,
         created_at=utcnow_iso(),
+        finish_reason=None,
+        nudges_used=0,
+        step_metrics=None,
+        response_id=None,
+        system_fingerprint=None,
+        service_tier=None,
     ).to_row()
 
 
