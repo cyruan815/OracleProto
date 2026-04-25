@@ -428,6 +428,8 @@ CREATE TABLE run_meta (
     prompt_templates_hash TEXT NOT NULL,
     reflection_protocol_text TEXT,         -- prompts.REFLECTION_PROTOCOL 全文; REACT_REFLECTION_PROTOCOL=false 时为 NULL
     reflection_protocol_hash TEXT,         -- sha256(reflection_protocol_text)[:16]; 同上, 关时 NULL
+    belief_protocol_text   TEXT,           -- v4. prompts.BELIEF_PROTOCOL 全文; BELIEF_PROTOCOL=false 时为 NULL
+    belief_protocol_hash   TEXT,           -- v4. sha256(belief_protocol_text)[:16]; 同上, 关时 NULL
     training_cutoff       TEXT,            -- 该模型的 cutoff (YYYY-MM-DD), 未声明时为 NULL
     started_at            TEXT NOT NULL,
     finished_at           TEXT
@@ -460,6 +462,10 @@ CREATE TABLE run_results (
     s0_response_id          TEXT,          -- ChatCompletion.id (最后一轮)
     s0_system_fingerprint   TEXT,          -- ChatCompletion.system_fingerprint (最后一轮)
     s0_service_tier         TEXT,          -- ChatCompletion.service_tier (最后一轮)
+    -- v4 新增观测列 (schema_version=4): belief 协议结构化输出
+    s0_belief_final         TEXT,          -- 末步 Belief.probabilities 的 JSON ({letter: float}); 解析失败为 NULL
+    s0_belief_trace         TEXT,          -- 每步 belief 摘要 JSON 数组 [{step, p, confidence, delta_reason}|null, ...]
+    s0_belief_parse_ok      INTEGER,       -- 末步 belief 是否合法解析 (0/1); 与 parse_ok 独立
 
     -- ...相同的 s1_* / s2_* 字段组...
 
@@ -472,6 +478,12 @@ CREATE INDEX idx_run_results_question ON run_results(question_id);
 > `ALTER TABLE … ADD COLUMN` 完成（`run_results` 加 6 × N 个 `s{i}_*` 列、`run_meta`
 > 加 2 列、并 INSERT `(3, utcnow_iso())` 进 `schema_version`）。SQLite 的 ADD COLUMN
 > 仅写表元数据，O(1) 完成；老行的新列默认 NULL。续跑路径上首次打开旧 DB 自动迁移。
+>
+> **schema_version 4 升级说明**：v3 → v4 由 `forecast_eval.db._migrate_v3_to_v4` 通过
+> `ALTER TABLE … ADD COLUMN` 完成（`run_results` 加 3 × N 个 `s{i}_*` belief 列、
+> `run_meta` 加 2 列、并 INSERT `(4, utcnow_iso())` 进 `schema_version`）。`init_schema`
+> 链式调用 v2→v3→v4，幂等。`Settings.BELIEF_PROTOCOL=false` 时所有 belief 列写 NULL，
+> 既有 accuracy 指标输出零变化。完整设计见 `ANALYSIS_DESIGN_v4.md`。
 
 连接初始化 PRAGMA（所有 sqlite3 连接都执行一遍）：
 ```sql
@@ -500,6 +512,9 @@ PRAGMA busy_timeout = 5000;      -- 多 reader 场景下避免 SQLITE_BUSY
 | `s{i}_response_id`            | 最后一轮 `ChatCompletion.id`（provider 唯一 ID，便于追溯 / 申诉）                                        |
 | `s{i}_system_fingerprint`     | 最后一轮 `ChatCompletion.system_fingerprint`（provider 提供时；用于检测 provider 端模型路由变更）        |
 | `s{i}_service_tier`           | 最后一轮 `ChatCompletion.service_tier`（OpenAI 等返回的实际 tier，例：`default` / `scale` / `flex`）     |
+| `s{i}_belief_final`           | v4. 最末步 `parser.parse_belief(content, q)` 返回的 `Belief.probabilities` 序列化为 JSON（`{letter: float}`）；解析失败或 `BELIEF_PROTOCOL=false` 时 NULL |
+| `s{i}_belief_trace`           | v4. 整个循环每步的 belief 摘要 JSON 数组，元素键 `step / p / confidence / delta_reason`；中间步解析失败的元素为 `null`；全部步骤都失败时整列 NULL |
+| `s{i}_belief_parse_ok`        | v4. 末步 belief 是否合法解析（0/1）；与 `parse_ok` **独立**，belief 失败 MUST NOT 影响 boxed 路径的 `parse_ok` / `correct`；error / cutoff 行写 0 |
 
 > 5 个新增字段（`finish_reason` / `response_id` / `system_fingerprint` / `service_tier`
 > / `step_metrics`）只反映**最后一次** `llm.chat` 的封装；中间步骤的 finish_reason
@@ -510,6 +525,13 @@ PRAGMA busy_timeout = 5000;      -- 多 reader 场景下避免 SQLITE_BUSY
 > `prompt_templates_hash` **独立分离**：前者只刻 `prompts.REFLECTION_PROTOCOL`
 > 的内容指纹（开/关 + 文本变更皆敏感），便于跨 run 区分"反思协议是否启用 / 是否
 > 改版"，而不会污染主模板的内容指纹。
+>
+> v4 新增 `run_meta.belief_protocol_text` / `belief_protocol_hash`：与 reflection 协议
+> 字段**完全平行**，刻 `prompts.BELIEF_PROTOCOL` 的内容指纹；同样不污染
+> `prompt_templates_hash`、不污染 `reflection_protocol_hash`，三个指纹彼此独立。
+> v4 同时把 `belief_protocol_hash` 顶层写入 `manifest.json`（与 `reflection_protocol_hash`
+> 同级），让"不开 DB 也能 grep 协议指纹"覆盖两个协议；并加 `analysis_schema: "v4"`
+> 顶层字段，让分析模块按需分发概率族指标 / accuracy-only fallback。
 
 ### 5.3 断点续跑
 
@@ -1019,6 +1041,21 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
 | `per_model_by_choice_type.csv`    | `model × choice_type` 切片，同指标集                                              |
 | `error_breakdown.csv`             | `model × error_kind` 计数 + 样本占比（含 `<ok>` 与 `skipped_training_cutoff`）    |
 | `overall.json`                    | 全部切片的结构化聚合，方便二次处理                                                |
+
+### 11.5 概率族指标（v4 — 设计完成，逐 Phase 实施中）
+
+v4 引入了一等公民的概率族指标（label-wise & decision-wise Brier / NLL / MBS /
+BI / ABI、Murphy 三分解、ECE、Reliability bins）+ 多试聚合器（arithmetic /
+logit-space mean / LOO-tuned shrinkage）+ 分层贝叶斯校准（per-question_type
+Platt + 可选 per-source $\delta_s$ + Dirichlet/temperature）+ 配对 bootstrap 推断
+（5000 次重抽 + Holm-Bonferroni + 难度分层 + posterior-over-BI）+ 行为分析
+（belief evolution / tool PDP / reflection A/B / confidence-calibration 联合诊断）。
+
+完整数学体系与产物清单见 `ANALYSIS_DESIGN_v4.md`；OpenSpec 落地计划见
+`openspec/changes/probabilistic-analysis-v4/`。Phase 0（schema v4 + LLM 输出
+协议 + parser）已完成，Phase 1-3（指标计算 + 校准 + 行为分析）按 `tasks.md`
+逐步推进。`Settings.BELIEF_PROTOCOL=false` 时既有 accuracy 指标输出零变化，
+向后完全兼容。
 
 ---
 

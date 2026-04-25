@@ -85,8 +85,10 @@ continues into that same folder.
 ```
 runs/
   {run_id}/
-    manifest.json           # run-level metadata: run_id, sampling_n, models,
-                            #   filters, source/metadata/templates hashes,
+    manifest.json           # run-level metadata: run_id, schema_version,
+                            #   analysis_schema, sampling_n, models, filters,
+                            #   source/metadata/templates hashes,
+                            #   reflection_protocol_hash, belief_protocol_hash,
                             #   started_at / finished_at
     db/
       {model_slug}.db       # one SQLite per model (see schema below)
@@ -112,14 +114,23 @@ Each model DB holds:
   independently replayable).
 * `run_meta` — single row: `run_id, model, sampling_n, config/filters
   snapshot, source/metadata/templates hashes, training_cutoff, started_at,
-  finished_at`.
+  finished_at, reflection_protocol_text/hash, belief_protocol_text/hash`.
+  The two protocol fingerprints are independent of `prompt_templates_hash`
+  and of each other — see DESIGN.md §5 for why.
 * **`run_results` wide table** — one row per question:
   - `question_id` (PK), `user_prompt` (rendered once per question)
-  - for each `i` in `0..SAMPLING_N-1`, a `s{i}_*` group of 14 columns:
+  - for each `i` in `0..SAMPLING_N-1`, a `s{i}_*` group of columns
+    (v3 = 20 columns; v4 adds 3 belief columns):
     `final_answer_letters / final_answer_raw / correct / parse_ok /
     tool_calls_count / react_steps / prompt_tokens / completion_tokens /
     reasoning_tokens / latency_ms / messages_trace / search_calls / error /
-    created_at`.
+    created_at` (v2 base) +
+    `finish_reason / nudges_used / step_metrics / response_id /
+    system_fingerprint / service_tier` (v3 observability) +
+    `belief_final / belief_trace / belief_parse_ok` (v4 belief).
+  - Old DBs are auto-migrated via `ALTER TABLE ADD COLUMN` on first re-open;
+    `Settings.BELIEF_PROTOCOL=false` keeps the new belief columns NULL and
+    leaves all v3 accuracy metrics byte-identical to pre-v4 runs.
 
 **The DB stores raw observations only.** No aggregates are pre-computed —
 all metrics (pass@1, pass_any@N, majority vote, etc.) come from the
