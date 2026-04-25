@@ -124,6 +124,19 @@ runs/
       pairwise_significance.csv     # α=0.05 flag (raw + Holm)
       posterior_pairwise.csv        # P(BI_A > BI_B)
       paired_delta_bi_by_difficulty.csv  # paired bootstrap per tertile
+      # ---- Phase 3 behavior ----
+      belief_evolution.csv          # per-(model, q, k): volatility,
+                                    #   inter-trial variance,
+                                    #   convergence_step, evidence_efficiency,
+                                    #   counterevidence_engaged
+      reflection_ab.csv             # paired A/B (when sibling runs share
+                                    #   every hash except reflection)
+      tool_usage_pdp.csv            # per-(model, feature, value) PDP for
+                                    #   Pr(correct|x) and E[NLL|x]
+      confidence_calibration.csv    # subjective confidence vs hit rate
+      numeric_confidence_calibration.csv  # max_p binning vs hit rate
+      figs/                         # only after `python scripts/plot_analysis.py`
+                                    #   (matplotlib not in core deps)
     logs/
       {run_id}.log
 ```
@@ -165,6 +178,26 @@ can also be invoked standalone:
 ```bash
 python -m forecast_eval.analysis runs/{run_id}
 ```
+
+### On-demand plots (Phase 3)
+
+`matplotlib` is **not** in `environment.yml` because the analysis path is
+expected to stay dependency-light. To turn the structured outputs above into
+PNGs, install matplotlib locally and run the script that ships under
+`scripts/`:
+
+```bash
+pip install matplotlib
+python scripts/plot_analysis.py runs/{run_id}
+```
+
+This populates `runs/{run_id}/analysis/figs/` (already in `.gitignore`) with
+reliability diagrams (uncal + cal), BI bar charts with paired-bootstrap CIs,
+ΔBI forest, Murphy three-decomposition stacked bars, per-question belief
+trajectories (5 sample questions), tool-usage PDP per feature, and a
+difficulty grid heatmap. Each plot is best-effort: when the corresponding
+CSV/JSON is missing (e.g. no paired runs → no `reflection_ab.csv`), the
+plot is silently skipped instead of failing the whole pipeline.
 
 ## Resume semantics
 

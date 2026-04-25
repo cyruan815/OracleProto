@@ -347,6 +347,34 @@ scaling 都强制用 leave-one-out（每题 $q$ 的校准参数从 $\mathcal{Q}_
 膨胀。如果未来 Phase 2.x 加 Dirichlet calibration 等需要更复杂数值方法的
 变种，再视情况按 design.md Open Q1 引入 scipy。
 
+#### Phase 3 confidence-calibration 联合诊断（v4）
+
+`forecast_eval/analysis/behavior.py::confidence_calibration` 把模型自报的
+`confidence ∈ {low, medium, high}` 当成"主观置信"，把 $\max_l p_l$ 当成
+"数值置信"，分别和命中率对照。`confidence_conflict_models` 在两类断层上
+返回模型集合：
+
+* **语言保守 + 数值过度自信**：`low` 桶 `mean_max_p > 0.70`，模型嘴上保守
+  但数字暴露真实信心；
+* **语言自信 + 数值不到位**：`high` 桶 `mean_max_p < 0.55`，模型口头吹自己
+  但 max_p 撑不起这个口径。
+
+命中其一 → `per_model_summary.md` 模型名后追加 `conflict*` 哨兵（与
+Phase 2 的 `cal*` 并列）。这是论文里**没有**的诊断维度——BLF 论文
+（arXiv 2604.18576v2）只覆盖二值预测，*language confidence* 与 *numeric
+max_p* 在 binary $p$ 下退化成同一信号；本项目把 yes_no / multiple_choice
+统一到 per-option Bernoulli 之后，两个量首次解耦：language confidence 是
+LLM 直接生成的离散 token，numeric max_p 是一阶概率向量的统计量，二者来源
+完全不同。当它们在系统性范围内不一致时，要么 prompt 没把"low/medium/high"
+和数值校准锚定上（calibration prompting failure），要么模型在写文字时
+做 hedge、在写数字时按真实 token logit 自相调（hedging-vs-revealing
+divergence）。前者通过 prompt 改写解决，后者是模型本征属性，
+反映了**模型 self-report 不可信**——和 chain-of-thought faithfulness
+研究指向同一个底层问题。
+`conflict*` 因此不是单纯的"过拟"哨兵，而是把"语言/数值不一致"作为新的
+质量维度暴露给 reviewer，让 prompt-engineering 与 reflection 协议设计有
+实证依据可循。
+
 ### 5.2 单 writer per model + WAL
 
 并发写入 SQLite 是经典坑。项目的策略：

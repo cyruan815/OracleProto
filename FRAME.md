@@ -1042,7 +1042,7 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
 | `error_breakdown.csv`             | `model × error_kind` 计数 + 样本占比（含 `<ok>` 与 `skipped_training_cutoff`）    |
 | `overall.json`                    | 全部切片的结构化聚合，方便二次处理                                                |
 
-### 11.5 概率族指标（v4 — Phase 0 + Phase 1 + Phase 2 已落地）
+### 11.5 概率族指标（v4 — Phase 0 + Phase 1 + Phase 2 + Phase 3 已落地）
 
 v4 在 accuracy 之外加了一阶 proper scoring rules 与难度调整指标。Phase 0 把
 LLM 的隐式概率信号收成结构化字段（`s{i}_belief_final` / `belief_trace` /
@@ -1147,12 +1147,63 @@ A 和 B 的 BS 数组——这控制 question-level 方差（论文 §G.2 量化
 | `paired_delta_bi_by_difficulty.csv` | 每个 tier 独立 paired bootstrap |
 
 `error_breakdown.csv` / `finish_reason_breakdown.csv` 的 byte-regression
-保护从 Phase 1 延续——Phase 2 不改这两个文件。Phase 3 计划交付物（行为分析
-+ 反思协议 A/B + 可视化）见 `ANALYSIS_DESIGN_v4.md` §6-§8 与
-`openspec/changes/probabilistic-analysis-v4/` 任务 25-32。
+保护从 Phase 1 延续——Phase 2 不改这两个文件。
+
+**行为分析**（`forecast_eval/analysis/behavior.py`）：
+
+Phase 3 把 `belief_trace` JSON 时间序列变成 5 个一等公民指标，并加上反思
+协议 A/B、tool-usage PDP、confidence joint diagnosis 三组诊断：
+
+| 指标 | 公式 | 解读 |
+| --- | --- | --- |
+| Trial-internal volatility | $V_{q,k} = \tfrac{1}{T-1}\sum_t \|b_t-b_{t-1}\|_2$ | 该 trial 内信念变化总幅度 |
+| Inter-trial variance | $\sigma_q = \mathrm{std}_k\,b^{(q,k)}_T$ | 论文 §4 Figure 2 同款 |
+| Convergence step | $C_{q,k} = \min\{t : \|b_T-b_t\|_2<0.05\}$ | 多少步达到最终信念 |
+| Evidence efficiency | $\eta_{q,k} = (\mathrm{NLL}(b_0) - \mathrm{NLL}(b_T))/\max(1, \text{search\_calls})$ | 每次搜索带来的信息增益 |
+| Counterevidence engagement | 至少一条 counterevidence 字符串中出现非最终选 letter（letter 匹配，无 NLP） | 是否做了反方向自检 |
+
+反思协议 A/B（`find_paired_runs` + `reflection_ab_report`）扫描全部 run，
+按"`reflection_protocol_hash` 不同、其他全部 hash 相同"配对；配对算 ΔBI /
+Δσ / ΔC / Δη 的 paired bootstrap 95% CI，按 question_type 分层报告。指纹
+不一致 MUST NOT 配对——这是 spec 26.5 的硬约束。
+
+Tool-usage PDP（`tool_usage_pdp`）用纯 Python IRLS 拟合
+$\Pr(\text{correct}\mid\mathbf{x})$（logistic）与 $\mathbb{E}[\mathrm{NLL}\mid\mathbf{x}]$
+（ridge linear）在 5 个特征上的关系——
+`tool_calls_count / react_steps / latency_ms / prompt_tokens / completion_tokens`，
+对每特征做 quantile 网格 partial dependence。L2 正则 + 步长裁剪保证 IRLS
+稳定（Phase 2 在饱和 sigmoid 上学到的教训）。
+
+Confidence-calibration 联合诊断（`confidence_calibration` /
+`numeric_confidence_calibration`）：把 `belief_trace` 最末步的
+`confidence ∈ {low, medium, high}` 当主观置信，把 `max_l p_l` 当数值置信，
+分别和命中率对照。`confidence_conflict_models` 哨兵：
+（a）`low` 桶 `mean_max_p > 0.70` —— 语言保守 + 数值过度自信；
+（b）`high` 桶 `mean_max_p < 0.55` —— 语言自信 + 数值不到位。命中其一就
+在 `per_model_summary.md` 模型名后追加 `conflict*`。这是论文里**没有**的
+诊断维度——论文只有二值 $p$，无法把 *language* 和 *numeric* confidence 解耦。
+
+**Phase 3 产物清单**：
+
+| 文件 | 内容 |
+| --- | --- |
+| `belief_evolution.csv` | per-(model, q, k) 5 指标行 |
+| `reflection_ab.csv` | 配对 run 的 ΔBI / Δσ / ΔC / Δη paired bootstrap CI（含 per-qtype 切片） |
+| `tool_usage_pdp.csv` | per-(model, feature, value) PDP 行 |
+| `confidence_calibration.csv` | per-(model, low/medium/high) 主观置信 vs 命中率 |
+| `numeric_confidence_calibration.csv` | per-(model, max_p bin) 数值置信 vs 命中率 |
+| `per_model_summary.md` | 追加 `conflict*` 哨兵（与既有 `cal*` 并列） |
+
+**可视化**：`scripts/plot_analysis.py` 是按需 CLI（matplotlib 仅在用户机
+本地装），读 `analysis/*.csv` + `*.json` 出 reliability / BI bar / ΔBI
+forest / Murphy stacked / belief trajectory / tool PDP / difficulty grid
+共 8 类图，落 `analysis/figs/`（`.gitignore` 隔离）。matplotlib 不进
+`environment.yml`、不影响 CI。
 
 `Settings.BELIEF_PROTOCOL=false` 时旧 accuracy 列输出零变化、新概率列照样
-通过 fallback 计算（虽然校准信号被削弱）—— 向后完全兼容。
+通过 fallback 计算（虽然校准信号被削弱）；行为分析则降级到空交付物（v3 老
+run 没有 belief_trace、`belief_evolution.csv` 不写）。这套向后兼容保证
+v3→v4 单向迁移不重跑历史 run。
 
 ---
 
