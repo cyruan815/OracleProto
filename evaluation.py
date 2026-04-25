@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import signal
 import sqlite3
@@ -37,7 +38,24 @@ from forecast_eval import loader, runner
 from forecast_eval.config import Settings
 from forecast_eval.errors import AuthError
 from forecast_eval.llm import AuthError as LLMAuthError
+from forecast_eval.prompts import REFLECTION_PROTOCOL
 from forecast_eval.types import QFilter
+
+
+def _compute_reflection_protocol(settings: Settings) -> tuple[str | None, str | None]:
+    """Return `(text, hash16)` when reflection is enabled, else `(None, None)`.
+
+    The hash is sha256 truncated to the first 16 hex chars — wide enough to
+    distinguish meaningful protocol revisions, narrow enough to read in logs.
+    Independent of `prompt_templates_hash` (DESIGN.md decision 2): the
+    reflection protocol is appended outside the canonical template body, so
+    runs with and without it stay comparable on `prompt_templates_hash` alone.
+    """
+    if not settings.REACT_REFLECTION_PROTOCOL:
+        return None, None
+    text = REFLECTION_PROTOCOL
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return text, digest
 
 
 QUESTION_TYPE_CHOICES = ("yes_no", "binary_named", "multiple_choice")
@@ -97,8 +115,12 @@ def _write_manifest(
     source_db_hash: str,
     metadata_hash: str,
     prompt_templates_hash: str,
+    reflection_protocol_hash: str | None,
     started_at: str,
 ) -> None:
+    # `reflection_protocol_hash` lives at the top level so users can grep
+    # manifest.json without opening any DB. The full text stays inside
+    # `run_meta.reflection_protocol_text` (per-model DB).
     payload: dict[str, Any] = {
         "run_id": run_id,
         "schema_version": dbmod.SCHEMA_VERSION,
@@ -118,6 +140,7 @@ def _write_manifest(
             "metadata": metadata_hash,
             "prompt_templates": prompt_templates_hash,
         },
+        "reflection_protocol_hash": reflection_protocol_hash,
         "started_at": started_at,
         "finished_at": None,
     }
@@ -154,6 +177,8 @@ def _init_model_db(
     source_db_hash: str,
     metadata_hash: str,
     prompt_templates_hash: str,
+    reflection_protocol_text: str | None,
+    reflection_protocol_hash: str | None,
 ) -> tuple[sqlite3.Connection, dict[str, str], list]:
     conn = dbmod.connect(db_path)
     dbmod.init_schema(conn, settings.SAMPLING_N)
@@ -171,6 +196,8 @@ def _init_model_db(
         metadata_hash=metadata_hash,
         prompt_templates_hash=prompt_templates_hash,
         training_cutoff=cutoff.isoformat() if cutoff else None,
+        reflection_protocol_text=reflection_protocol_text,
+        reflection_protocol_hash=reflection_protocol_hash,
     )
     return conn, templates, questions
 
@@ -210,6 +237,7 @@ async def _run_async(
     source_hash = dbmod.compute_source_db_hash(source_path)
     metadata_hash = dbmod.compute_metadata_hash(raw_features)
     templates_hash = dbmod.compute_prompt_templates_hash(templates_preview)
+    reflection_text, reflection_hash = _compute_reflection_protocol(settings)
 
     filters_snapshot: dict[str, Any] = {
         **filters.snapshot(),
@@ -241,6 +269,8 @@ async def _run_async(
                 source_db_hash=source_hash,
                 metadata_hash=metadata_hash,
                 prompt_templates_hash=templates_hash,
+                reflection_protocol_text=reflection_text,
+                reflection_protocol_hash=reflection_hash,
             )
             conns[model] = conn
             templates_by_model[model] = templates
@@ -258,6 +288,7 @@ async def _run_async(
             source_db_hash=source_hash,
             metadata_hash=metadata_hash,
             prompt_templates_hash=templates_hash,
+            reflection_protocol_hash=reflection_hash,
             started_at=started_at,
         )
 
