@@ -97,10 +97,17 @@ class Settings(BaseSettings):
     # schema at all — Tavily is never hit and TAVILY_API_KEY becomes optional.
     ENABLE_WEB_SEARCH: bool = True
 
-    # Tavily
+    # Tavily — 详见 .env.example 中各字段注释
     TAVILY_API_KEY: str = ""
     TAVILY_MAX_RESULTS: int = 5
-    TAVILY_INCLUDE_RAW_CONTENT: bool = False
+    # basic | advanced (Tavily 官方 search_depth)
+    TAVILY_SEARCH_DEPTH: str = "basic"
+    # false | markdown | text (旧版 bool 'true' 兼容映射到 'markdown')
+    TAVILY_INCLUDE_RAW_CONTENT: str = "markdown"
+    # 单结果 raw_content 截断长度; 0 = 不截断
+    TAVILY_RAW_CONTENT_MAX_CHARS: int = 8000
+    # false | basic | advanced (Tavily 内部 LLM 速答, 默认关闭以免污染评测)
+    TAVILY_INCLUDE_ANSWER: str = "false"
     TAVILY_END_DATE_OFFSET_DAYS: int = -1
     SEARCH_MAX_CONCURRENCY: int = 5
     SEARCH_RETRY_MAX: int = 3
@@ -156,6 +163,46 @@ class Settings(BaseSettings):
     def _parse_training_cutoffs(cls, v: Any) -> dict[str, date]:
         return _parse_cutoffs(v)
 
+    @field_validator("TAVILY_INCLUDE_RAW_CONTENT", mode="before")
+    @classmethod
+    def _parse_include_raw_content(cls, v: Any) -> str:
+        # 兼容旧布尔值: True → "markdown", False → "false"
+        if isinstance(v, bool):
+            return "markdown" if v else "false"
+        s = str(v).strip().lower()
+        if s == "true":
+            return "markdown"
+        if s in ("false", "markdown", "text"):
+            return s
+        raise ValueError(
+            f"TAVILY_INCLUDE_RAW_CONTENT must be one of false|markdown|text "
+            f"(or legacy bool); got {v!r}"
+        )
+
+    @field_validator("TAVILY_INCLUDE_ANSWER", mode="before")
+    @classmethod
+    def _parse_include_answer(cls, v: Any) -> str:
+        if isinstance(v, bool):
+            return "basic" if v else "false"
+        s = str(v).strip().lower()
+        if s == "true":
+            return "basic"
+        if s in ("false", "basic", "advanced"):
+            return s
+        raise ValueError(
+            f"TAVILY_INCLUDE_ANSWER must be one of false|basic|advanced; got {v!r}"
+        )
+
+    @field_validator("TAVILY_SEARCH_DEPTH", mode="before")
+    @classmethod
+    def _parse_search_depth(cls, v: Any) -> str:
+        s = str(v).strip().lower()
+        if s in ("basic", "advanced"):
+            return s
+        raise ValueError(
+            f"TAVILY_SEARCH_DEPTH must be one of basic|advanced; got {v!r}"
+        )
+
     @field_validator("RUN_ID")
     @classmethod
     def _validate_run_id(cls, v: str) -> str:
@@ -192,6 +239,8 @@ class Settings(BaseSettings):
             raise ValueError("concurrency settings must be >= 1")
         if self.REACT_MAX_STEPS < 1 or self.REACT_MAX_SEARCH_CALLS < 0:
             raise ValueError("REACT_MAX_STEPS must be >= 1 and REACT_MAX_SEARCH_CALLS >= 0")
+        if self.TAVILY_RAW_CONTENT_MAX_CHARS < 0:
+            raise ValueError("TAVILY_RAW_CONTENT_MAX_CHARS must be >= 0 (0 = no truncation)")
         return self
 
     def __repr__(self) -> str:
