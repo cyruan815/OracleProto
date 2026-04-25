@@ -62,6 +62,10 @@ def _sample_payload(
         "response_id": "resp_test",
         "system_fingerprint": "fp_test",
         "service_tier": "default",
+        # v4 belief columns — same KeyError contract as v3.
+        "belief_final": None,
+        "belief_trace": None,
+        "belief_parse_ok": 0,
     }
 
 
@@ -386,8 +390,9 @@ def _build_v2_db(db_path: Path, sampling_n: int) -> sqlite3.Connection:
 
 
 def test_init_schema_migrates_v2_to_v3(tmp_path: Path) -> None:
-    """An existing v2 DB should be ALTERed in place to v3 on re-open, without
-    losing any v2 data and without re-creating the schema."""
+    """An existing v2 DB must be ALTERed through the v2→v3→v4 chain on re-open
+    without losing v2 data and without re-creating the schema. The historical
+    `version=2` row is preserved alongside the new `3` and `4` stamps."""
     db_path = tmp_path / "v2.db"
     conn = _build_v2_db(db_path, sampling_n=2)
     _seed_question(conn, "q42")
@@ -406,7 +411,7 @@ def test_init_schema_migrates_v2_to_v3(tmp_path: Path) -> None:
         int(r["version"])
         for r in conn.execute("SELECT version FROM schema_version").fetchall()
     }
-    assert versions == {2, 3}, "migration must keep the v2 row and stamp v3"
+    assert versions == {2, 3, 4}, "chain migration must keep v2 row and stamp v3 + v4"
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()}
     for i in range(2):
@@ -417,12 +422,17 @@ def test_init_schema_migrates_v2_to_v3(tmp_path: Path) -> None:
             "response_id",
             "system_fingerprint",
             "service_tier",
+            "belief_final",
+            "belief_trace",
+            "belief_parse_ok",
         ):
             assert f"s{i}_{name}" in cols, f"missing s{i}_{name} after migration"
 
     meta_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_meta)").fetchall()}
     assert "reflection_protocol_text" in meta_cols
     assert "reflection_protocol_hash" in meta_cols
+    assert "belief_protocol_text" in meta_cols
+    assert "belief_protocol_hash" in meta_cols
 
     # Pre-existing v2 data survives; new columns default to NULL.
     row = conn.execute("SELECT * FROM run_results WHERE question_id='q42'").fetchone()
@@ -430,14 +440,16 @@ def test_init_schema_migrates_v2_to_v3(tmp_path: Path) -> None:
     assert row["s0_created_at"] == legacy_created_at
     assert row["s0_finish_reason"] is None
     assert row["s0_nudges_used"] is None
+    assert row["s0_belief_final"] is None
+    assert row["s0_belief_parse_ok"] is None
 
-    # Idempotency: a second init_schema must not stamp v3 again.
+    # Idempotency: a second init_schema must not re-stamp v3 / v4.
     dbmod.init_schema(conn, sampling_n=2)
     versions_after = {
         int(r["version"])
         for r in conn.execute("SELECT version FROM schema_version").fetchall()
     }
-    assert versions_after == {2, 3}
+    assert versions_after == {2, 3, 4}
 
 
 def test_register_run_meta_writes_reflection_fields(tmp_path: Path) -> None:

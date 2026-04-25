@@ -78,6 +78,12 @@ def _sample(
         "response_id": "resp_test",
         "system_fingerprint": "fp_test",
         "service_tier": "default",
+        # v4 belief columns: all NULL / 0 here because these fixtures don't
+        # exercise the BELIEF_PROTOCOL path. Phase 1 will add fixtures that
+        # populate them; Phase 0 just keeps the writer happy.
+        "belief_final": None,
+        "belief_trace": None,
+        "belief_parse_ok": 0,
     }
 
 

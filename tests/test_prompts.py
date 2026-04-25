@@ -7,6 +7,7 @@ import pytest
 
 from forecast_eval import loader
 from forecast_eval.prompts import (
+    BELIEF_PROTOCOL,
     REFLECTION_PROTOCOL,
     _build_nudge_message,
     index_to_letter,
@@ -206,3 +207,82 @@ def test_nudge_message_mentions_counts_and_new_angle() -> None:
     assert "NEW angle" in msg or "new angle" in msg.lower()
     assert "end_date" not in msg
     assert "training cutoff" not in msg.lower()
+
+
+# ---- v4 belief protocol -----------------------------------------------------
+
+
+def test_belief_protocol_contains_required_fields() -> None:
+    """Static contract: the protocol body must mention the belief tag and
+    every required JSON key so the model has unambiguous instructions."""
+    for marker in (
+        "<belief>",
+        "</belief>",
+        "probabilities",
+        "confidence",
+        "key_evidence",
+        "counterevidence",
+        "decision_rule",
+    ):
+        assert marker in BELIEF_PROTOCOL, f"BELIEF_PROTOCOL missing required marker {marker!r}"
+
+
+def test_belief_protocol_token_budget_under_800() -> None:
+    """Soft budget check. Goal is ~500 tokens (cl100k_base); ceiling is 800.
+
+    Skips if `tiktoken` isn't installed — Phase 0 deliberately avoids adding
+    new heavy deps, and a char-based proxy is sufficient signal here. The
+    char proxy uses 3.5 chars/token (English text average), giving ~enough
+    headroom that anyone running the test locally can spot regressions."""
+    try:
+        import tiktoken
+    except ImportError:
+        # Fallback: char-count proxy — 800 tokens * ~3.5 chars ≈ 2800 chars.
+        assert len(BELIEF_PROTOCOL) < 3500, (
+            f"BELIEF_PROTOCOL length {len(BELIEF_PROTOCOL)} chars exceeds soft "
+            "budget; install tiktoken for an exact token count."
+        )
+        return
+    enc = tiktoken.get_encoding("cl100k_base")
+    n = len(enc.encode(BELIEF_PROTOCOL))
+    assert n < 800, f"BELIEF_PROTOCOL is {n} tokens (cl100k_base); budget < 800"
+
+
+def test_belief_protocol_appended_when_provided(templates: dict[str, str]) -> None:
+    q = _yes_no_question()
+    plain = render_user_prompt(q, templates)
+    with_belief = render_user_prompt(q, templates, belief_protocol=BELIEF_PROTOCOL)
+    # Belief is appended ONLY at the tail; original body is a strict prefix.
+    assert with_belief.startswith(plain)
+    assert with_belief != plain
+    assert "<belief>" in with_belief
+    assert "</belief>" in with_belief
+
+
+def test_belief_protocol_default_is_off(templates: dict[str, str]) -> None:
+    q = _yes_no_question()
+    rendered = render_user_prompt(q, templates)
+    assert "<belief>" not in rendered
+    assert "Belief Protocol" not in rendered
+
+
+def test_belief_protocol_none_equivalent_to_off(templates: dict[str, str]) -> None:
+    q = _yes_no_question()
+    assert render_user_prompt(q, templates) == render_user_prompt(
+        q, templates, belief_protocol=None
+    )
+
+
+def test_reflection_then_belief_order(templates: dict[str, str]) -> None:
+    """When BOTH protocols are enabled, reflection comes BEFORE belief."""
+    q = _yes_no_question()
+    rendered = render_user_prompt(
+        q,
+        templates,
+        reflection_protocol=REFLECTION_PROTOCOL,
+        belief_protocol=BELIEF_PROTOCOL,
+    )
+    refl_pos = rendered.find("Forecasting Protocol")
+    belief_pos = rendered.find("Belief Protocol")
+    assert refl_pos > 0 and belief_pos > 0
+    assert refl_pos < belief_pos, "reflection MUST appear before belief in the rendered message"

@@ -67,6 +67,12 @@ def _sample_payload(sample_idx: int, error: str | None) -> dict:
         "response_id": None,
         "system_fingerprint": None,
         "service_tier": None,
+        # v4 belief columns — error/cutoff rows mirror runner.{_skipped_cutoff_row,
+        # _error_row}: None / None / 0 because no LLM response means no belief
+        # block to parse.
+        "belief_final": None,
+        "belief_trace": None,
+        "belief_parse_ok": 0,
     }
 
 

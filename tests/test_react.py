@@ -190,8 +190,14 @@ async def test_step_metrics_and_nudges(
 
     metrics = json.loads(result.step_metrics)
     assert len(metrics) == 2
-    expected_keys = {"step", "prompt", "completion", "reasoning", "latency_ms", "finish_reason", "n_tool_calls"}
+    # v4 step_metrics schema adds `belief` (always None when BELIEF_PROTOCOL
+    # is off — keeps the JSON shape uniform across protocol-on/off runs).
+    expected_keys = {
+        "step", "prompt", "completion", "reasoning", "latency_ms",
+        "finish_reason", "n_tool_calls", "belief",
+    }
     assert set(metrics[0]) == expected_keys
+    assert metrics[0]["belief"] is None
     # Step 0: tool_call assistant message — n_tool_calls should be 1.
     assert metrics[0]["step"] == 0
     assert metrics[0]["finish_reason"] == "tool_calls"
@@ -291,3 +297,186 @@ async def test_finish_reason_length_path(
     metrics = json.loads(result.step_metrics)
     assert len(metrics) == 1
     assert metrics[0]["finish_reason"] == "length"
+
+
+# ---- v4 belief capture ------------------------------------------------------
+
+
+def _belief_block(probs: dict[str, float], confidence: str = "medium") -> str:
+    return (
+        "<belief>"
+        + json.dumps(
+            {
+                "version": "v4.0",
+                "probabilities": probs,
+                "confidence": confidence,
+                "key_evidence": ["primary signal"],
+                "counterevidence": [],
+                "open_questions": [],
+                "decision_rule": "argmax",
+            }
+        )
+        + "</belief>"
+    )
+
+
+async def test_belief_capture(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When BELIEF_PROTOCOL=True and every step emits a valid `<belief>` block,
+    `step_metrics[i].belief` is populated, and the SampleResult's three new
+    fields reflect the LAST step's belief."""
+    settings = _make_settings(monkeypatch, BELIEF_PROTOCOL="true")
+    # Two steps: a tool call (with belief on the assistant message) then a
+    # final answer (with belief). The final-step belief drives belief_final.
+    step0_msg = _tool_msg("call_1", "search me")
+    step0_msg["content"] = (
+        "Initial belief: " + _belief_block({"A": 0.55, "B": 0.45}, confidence="low")
+    )
+    step1_msg = _final_msg(
+        "After research, "
+        + _belief_block({"A": 0.8, "B": 0.2}, confidence="high")
+        + " final \\boxed{Yes}"
+    )
+    script = [
+        (step0_msg, "tool_calls", {
+            "response_id": "resp0", "system_fingerprint": "fp_a", "service_tier": "default",
+        }),
+        (step1_msg, "stop", {
+            "response_id": "resp1", "system_fingerprint": "fp_b", "service_tier": "default",
+        }),
+    ]
+    monkeypatch.setattr(react, "llm_chat", _ScriptedLLM(script))
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    # Boxed-answer path is unchanged.
+    assert result.parse_ok == 1
+    assert result.correct == 1
+
+    # Three v4 fields populated from the LAST belief.
+    assert result.belief_parse_ok == 1
+    assert json.loads(result.belief_final) == {"A": 0.8, "B": 0.2}
+    trace = json.loads(result.belief_trace)
+    assert len(trace) == 2
+    assert trace[0]["p"] == {"A": 0.55, "B": 0.45}
+    assert trace[0]["confidence"] == "low"
+    assert trace[1]["p"] == {"A": 0.8, "B": 0.2}
+    assert trace[1]["confidence"] == "high"
+    # step_metrics elements carry per-step belief inline.
+    metrics = json.loads(result.step_metrics)
+    assert len(metrics) == 2
+    assert metrics[0]["belief"]["p"] == {"A": 0.55, "B": 0.45}
+    assert metrics[1]["belief"]["p"] == {"A": 0.8, "B": 0.2}
+
+
+async def test_belief_failure_fallback(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Last step ships a valid `\\boxed{...}` but NO `<belief>` block. The
+    boxed-answer path stays unaffected (parse_ok=1, correct=1) while the
+    three v4 fields fall back to None / None / 0."""
+    settings = _make_settings(monkeypatch, BELIEF_PROTOCOL="true")
+    step0_msg = _tool_msg("call_1", "evidence")
+    step0_msg["content"] = "Mid-flight: " + _belief_block({"A": 0.5, "B": 0.5})
+    # Final assistant message — boxed only, no belief tag.
+    step1_msg = _final_msg("Decided. \\boxed{Yes}")
+    script = [
+        (step0_msg, "tool_calls", {"response_id": "r0", "system_fingerprint": "f", "service_tier": "default"}),
+        (step1_msg, "stop", {"response_id": "r1", "system_fingerprint": "f", "service_tier": "default"}),
+    ]
+    monkeypatch.setattr(react, "llm_chat", _ScriptedLLM(script))
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    # Boxed-answer fields untouched: belief failure MUST NOT pollute parse_ok / correct.
+    assert result.parse_ok == 1
+    assert result.correct == 1
+    assert result.error is None
+
+    # Last-step belief failed → belief_parse_ok=0, belief_final=None.
+    # belief_trace still records the earlier successful step alongside the None.
+    assert result.belief_parse_ok == 0
+    assert result.belief_final is None
+    trace = json.loads(result.belief_trace)
+    assert len(trace) == 2
+    assert trace[0] is not None and trace[0]["p"] == {"A": 0.5, "B": 0.5}
+    assert trace[1] is None
+
+
+async def test_belief_protocol_disabled(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With BELIEF_PROTOCOL=False the user prompt MUST be byte-identical to
+    the v3 rendering, parse_belief MUST NOT be called, and the three v4
+    fields are None / None / 0."""
+    settings = _make_settings(monkeypatch)  # default: BELIEF_PROTOCOL stays False
+    assert settings.BELIEF_PROTOCOL is False
+
+    # Spy on parse_belief — this MUST stay at 0 calls.
+    parse_calls = {"n": 0}
+    real_parse = react.parse_belief
+
+    def _counting_parse(text: str, q):
+        parse_calls["n"] += 1
+        return real_parse(text, q)
+
+    monkeypatch.setattr(react, "parse_belief", _counting_parse)
+
+    # Even if the LLM accidentally emits a belief block, parse_belief MUST NOT run.
+    step0_msg = _final_msg(
+        "Even if I emit " + _belief_block({"A": 0.7, "B": 0.3}) + " final \\boxed{Yes}"
+    )
+    monkeypatch.setattr(
+        react,
+        "llm_chat",
+        _ScriptedLLM([(step0_msg, "stop", {"response_id": "r", "system_fingerprint": "f", "service_tier": "default"})]),
+    )
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    assert parse_calls["n"] == 0, "parse_belief MUST NOT be called when protocol is disabled"
+    assert result.parse_ok == 1
+    assert result.correct == 1
+    # All three v4 fields stay nil.
+    assert result.belief_final is None
+    assert result.belief_trace is None
+    assert result.belief_parse_ok == 0
+    # step_metrics still has the belief slot, but it's None.
+    metrics = json.loads(result.step_metrics)
+    assert metrics[0]["belief"] is None
+
+    # Render the v3 user message via the prompts API directly and compare —
+    # MUST be byte-identical to what the loop produced.
+    from forecast_eval.prompts import render_user_prompt
+    expected = render_user_prompt(
+        _yes_no_question(),
+        templates,
+        reflection_protocol=None,
+        belief_protocol=None,
+    )
+    assert result.user_prompt == expected
