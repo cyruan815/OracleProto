@@ -1042,20 +1042,61 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
 | `error_breakdown.csv`             | `model × error_kind` 计数 + 样本占比（含 `<ok>` 与 `skipped_training_cutoff`）    |
 | `overall.json`                    | 全部切片的结构化聚合，方便二次处理                                                |
 
-### 11.5 概率族指标（v4 — 设计完成，逐 Phase 实施中）
+### 11.5 概率族指标（v4 — Phase 0 + Phase 1 已落地）
 
-v4 引入了一等公民的概率族指标（label-wise & decision-wise Brier / NLL / MBS /
-BI / ABI、Murphy 三分解、ECE、Reliability bins）+ 多试聚合器（arithmetic /
-logit-space mean / LOO-tuned shrinkage）+ 分层贝叶斯校准（per-question_type
-Platt + 可选 per-source $\delta_s$ + Dirichlet/temperature）+ 配对 bootstrap 推断
-（5000 次重抽 + Holm-Bonferroni + 难度分层 + posterior-over-BI）+ 行为分析
-（belief evolution / tool PDP / reflection A/B / confidence-calibration 联合诊断）。
+v4 在 accuracy 之外加了一阶 proper scoring rules 与难度调整指标。Phase 0 把
+LLM 的隐式概率信号收成结构化字段（`s{i}_belief_final` / `belief_trace` /
+`belief_parse_ok`），Phase 1 用这些字段加上 §2.4 fallback 在 `analysis/` 包里
+计算 BS / NLL / MBS / BI / ABI 并写进 `per_model_summary.csv` 等。
 
-完整数学体系与产物清单见 `ANALYSIS_DESIGN_v4.md`；OpenSpec 落地计划见
-`openspec/changes/probabilistic-analysis-v4/`。Phase 0（schema v4 + LLM 输出
-协议 + parser）已完成，Phase 1-3（指标计算 + 校准 + 行为分析）按 `tasks.md`
-逐步推进。`Settings.BELIEF_PROTOCOL=false` 时既有 accuracy 指标输出零变化，
-向后完全兼容。
+**统一表示（per-option Bernoulli 标签向量）**：题目 $q$ 的真值
+$\mathbf{o}_q \in \{0,1\}^{k_q}$ 与预测 $\mathbf{p}_q \in [0,1]^{k_q}$ 都按 letter
+顺序排列；single 题型要求 $\sum_l p_l = 1$（容差 $10^{-3}$），multi 题型每个
+$p_l$ 是该选项是否属于答案集的独立 Bernoulli 概率。
+
+**一阶指标（`forecast_eval/analysis/proper_score.py`）**：
+
+| 指标 | 公式 | 适用范围 | CSV 列 |
+| --- | --- | --- | --- |
+| Label-wise Brier | $\mathrm{BS}_q^{\text{lab}} = \tfrac{1}{k_q}\sum_l (p_{q,l}-o_{q,l})^2$ | 所有题型 | `bi`（聚合后） |
+| Decision-wise Brier | $\mathrm{BS}_q^{\text{dec}} = \sum_l (p_{q,l}-o_{q,l})^2 = k_q\cdot\mathrm{BS}_q^{\text{lab}}$ | single only | `bi_dec` |
+| Brier Index | $\mathrm{BI} = 100(1 - \sqrt{\overline{\mathrm{BS}^{\text{lab}}}})$，**先取均值再开方** | 所有题型 | `bi` |
+| NLL | single：$-\log p_{q,l^*}$；multi：label-wise BCE；clip $\epsilon = 10^{-3}$ | 所有题型 | `nll` |
+| MBS | $100(\log_2 p_{q,l^*} + 1)$，clip 同 NLL | single only；multi 写 NULL | `mbs` |
+| ABI（crowd） | $\mathrm{ABI}^{(m_0)} = $ sign-aware $100(1\mp\sqrt{|\overline{\mathrm{ABS}^{(m_0)}}|})$，$\overline{\mathbf{p}}$ 排除 $m_0$ | 多模型 run | `abi_crowd` |
+| ABI（uniform） | 同上，但 baseline 是 $\mathbf{p}=(1/k,\dots,1/k)$ | 所有 run；单模型时 `abi_crowd` 退化等于此列 | `abi_uniform` |
+| fallback 占比 | 走 §2.4 fallback 的 question 数 / 该模型可评分 question 数 | 所有 run | `fallback_share` |
+
+**ABI 的符号约定**：$\overline{\mathrm{ABS}} \ge 0$（模型不优于 baseline）→
+$100(1 - \sqrt{\overline{\mathrm{ABS}}})$，落在 $[0, 100]$；
+$\overline{\mathrm{ABS}} < 0$（模型优于 baseline）→ $100(1 + \sqrt{|\cdot|})$，
+高过 100，保持"越好分越高"的单调。
+
+**§2.4 fallback**：当 `s{i}_belief_final IS NULL` 但 `s{i}_parse_ok = 1`
+（v3 老 run、或 v4 belief 解析失败但 boxed 解析成功）时，
+$p_l = 1-\epsilon$（命中 boxed letter）/ $\epsilon/(k-|\text{boxed}|)$（其他），
+$\epsilon = 0.05$。该 sample 走 fallback、`belief_parse_ok=0`。完全失败
+（`parse_ok=0`）的 sample MUST NOT 进概率指标均值，避免污染。
+
+**多试聚合**（Phase 1 默认）：per (model, question) 算 K 个 sample
+probability vector 的算术平均，再算每题 BS。Phase 2 会把默认换成 logit-space
+mean 并加 LOO shrinkage。Phase 1 单试 / 多试的差别只在于数值收敛速度，
+公式语义不变。
+
+**产物清单（Phase 1 已实现部分）**：
+
+| 文件 | 新增列 / 内容 |
+| --- | --- |
+| `per_model_summary.csv` / `.md` | 末尾追加 `bi / bi_dec / nll / mbs / abi_crowd / abi_uniform / fallback_share` |
+| `per_model_by_question_type.csv` | 同上 |
+| `per_model_by_choice_type.csv` | 同上 |
+| `overall.json` | 新增 `probabilistic` 子对象（per_model + 两个 slice），透传 manifest 的 `analysis_schema` |
+| `error_breakdown.csv` / `finish_reason_breakdown.csv` | **不变**（Phase 1 byte-regression 测试覆盖） |
+
+Phase 2-3 计划交付物（calibration / aggregation / inference / behavior）见
+`ANALYSIS_DESIGN_v4.md` §4-§8 与 `openspec/changes/probabilistic-analysis-v4/`。
+`Settings.BELIEF_PROTOCOL=false` 时旧 accuracy 列输出零变化、新概率列照样
+通过 fallback 计算（虽然校准信号被削弱）—— 向后完全兼容。
 
 ---
 

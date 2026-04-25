@@ -93,12 +93,19 @@ runs/
     db/
       {model_slug}.db       # one SQLite per model (see schema below)
     analysis/               # generated after the run finishes
-      per_model_summary.csv
-      per_model_summary.md
+      per_model_summary.csv         # accuracy + v4 probabilistic columns
+                                    #   (bi / bi_dec / nll / mbs /
+                                    #    abi_crowd / abi_uniform /
+                                    #    fallback_share)
+      per_model_summary.md          # markdown table, same schema
       per_model_by_question_type.csv
       per_model_by_choice_type.csv
-      error_breakdown.csv
-      overall.json
+      error_breakdown.csv           # byte-regression-tested vs v3
+      finish_reason_breakdown.csv   # byte-regression-tested vs v3
+      overall.json                  # full structured aggregate, with
+                                    #   `probabilistic` sub-object and
+                                    #   `analysis_schema` mirrored from
+                                    #   manifest
     logs/
       {run_id}.log
 ```
