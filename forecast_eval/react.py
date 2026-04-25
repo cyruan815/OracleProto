@@ -12,8 +12,13 @@ from loguru import logger
 from .config import Settings
 from .db import utcnow_iso
 from .llm import ChatResponse, chat as llm_chat
-from .parser import is_correct, parse_answer, parse_gt
-from .prompts import REFLECTION_PROTOCOL, _build_nudge_message, render_user_prompt
+from .parser import Belief, is_correct, parse_answer, parse_belief, parse_gt
+from .prompts import (
+    BELIEF_PROTOCOL,
+    REFLECTION_PROTOCOL,
+    _build_nudge_message,
+    render_user_prompt,
+)
 from .search import SearchResult, tavily_search
 from .tools import (
     WEB_SEARCH_SCHEMA,
@@ -29,6 +34,29 @@ def _compute_end_date(end_time: str, offset_days: int) -> str:
     return (date.fromisoformat(end_time) + timedelta(days=offset_days)).isoformat()
 
 
+def _belief_to_step_dict(step: int, b: Belief | None) -> dict[str, Any] | None:
+    """Project a parsed `Belief` into the per-step trace dict, or None on
+    parse failure. The `delta_reason` slot summarises *why this step changed*
+    by taking the first key_evidence bullet (or the first open_questions
+    bullet as a fallback) — this is what the v4 behavior analysis layer will
+    consume to plot belief evolution.
+    """
+    if b is None:
+        return None
+    if b.key_evidence:
+        delta_reason = b.key_evidence[0]
+    elif b.open_questions:
+        delta_reason = b.open_questions[0]
+    else:
+        delta_reason = ""
+    return {
+        "step": step,
+        "p": b.probabilities,
+        "confidence": b.confidence,
+        "delta_reason": delta_reason,
+    }
+
+
 def _record_step(
     step_metrics: list[dict[str, Any]],
     totals: dict[str, int],
@@ -36,6 +64,7 @@ def _record_step(
     step: int,
     resp: ChatResponse,
     latency_ms: int,
+    belief: Belief | None,
 ) -> None:
     """Append a per-step observability snapshot and accumulate token totals.
 
@@ -43,7 +72,10 @@ def _record_step(
     that message is the one the loop is about to append, so the count reflects
     "tool calls emitted by THIS step" (not total). `latency_ms` is the wall
     clock for this single `llm.chat` invocation, computed by the caller via
-    `time.monotonic()`.
+    `time.monotonic()`. `belief` is the v4 per-step `Belief` (or None when
+    the protocol is disabled or the block failed to parse) — the entry's
+    `belief` slot is always present (None when missing) so the JSON schema
+    is uniform across protocol-on / protocol-off runs.
     """
     assistant_msg = resp.message
     n_tool_calls = len(assistant_msg.get("tool_calls") or [])
@@ -56,6 +88,7 @@ def _record_step(
             "latency_ms": latency_ms,
             "finish_reason": resp.finish_reason,
             "n_tool_calls": n_tool_calls,
+            "belief": _belief_to_step_dict(step, belief),
         }
     )
     totals["prompt"] += resp.usage.prompt_tokens
@@ -112,16 +145,21 @@ async def run_react(
     for wrapping it and recording retry-exhausted / content-policy errors.
     """
     end_date = _compute_end_date(q.end_time, settings.TAVILY_END_DATE_OFFSET_DAYS)
+    belief_enabled = settings.BELIEF_PROTOCOL
     user_prompt = render_user_prompt(
         q,
         templates,
         reflection_protocol=REFLECTION_PROTOCOL if settings.REACT_REFLECTION_PROTOCOL else None,
+        belief_protocol=BELIEF_PROTOCOL if belief_enabled else None,
     )
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_prompt}]
 
     search_calls: list[dict[str, Any]] = []
     tokens = {"prompt": 0, "completion": 0, "reasoning": 0}
     step_metrics: list[dict[str, Any]] = []
+    # Aligned with each LLM step: index `i` holds the parsed Belief for step
+    # `i`, or None when parsing failed (or when the protocol is disabled).
+    beliefs_per_step: list[Belief | None] = []
     t0 = time.monotonic()
     final_raw = ""
     steps_executed = 0
@@ -148,9 +186,25 @@ async def run_react(
             tools=tool_schemas,
         )
         t_step_ms = int((time.monotonic() - t_step_start) * 1000)
-        _record_step(step_metrics, tokens, step=step, resp=resp, latency_ms=t_step_ms)
-        last_resp = resp
         assistant_msg = resp.message
+        # Belief parsing is independent of the boxed-answer path: a failed
+        # parse here MUST NOT pollute parse_ok / correct, MUST NOT trigger a
+        # retry, MUST NOT write `error`. When the protocol is disabled we
+        # skip parse_belief entirely and store None for this step.
+        if belief_enabled:
+            step_belief = parse_belief(assistant_msg.get("content") or "", q)
+        else:
+            step_belief = None
+        beliefs_per_step.append(step_belief)
+        _record_step(
+            step_metrics,
+            tokens,
+            step=step,
+            resp=resp,
+            latency_ms=t_step_ms,
+            belief=step_belief,
+        )
+        last_resp = resp
         messages.append(assistant_msg)
 
         tool_calls = assistant_msg.get("tool_calls") or []
@@ -221,6 +275,10 @@ async def run_react(
         gt = frozenset()
     correct = is_correct(parsed, gt) if parsed is not None else None
 
+    belief_final, belief_trace, belief_parse_ok = _finalize_belief_fields(
+        belief_enabled=belief_enabled, beliefs_per_step=beliefs_per_step
+    )
+
     return SampleResult(
         run_id=run_id,
         question_id=q.id,
@@ -251,4 +309,44 @@ async def run_react(
         response_id=last_resp.response_id if last_resp is not None else None,
         system_fingerprint=last_resp.system_fingerprint if last_resp is not None else None,
         service_tier=last_resp.service_tier if last_resp is not None else None,
+        belief_final=belief_final,
+        belief_trace=belief_trace,
+        belief_parse_ok=belief_parse_ok,
     )
+
+
+def _finalize_belief_fields(
+    *,
+    belief_enabled: bool,
+    beliefs_per_step: list[Belief | None],
+) -> tuple[str | None, str | None, int]:
+    """Aggregate per-step Beliefs into the three persisted fields.
+
+    Spec invariants (from the v4 react-loop / answer-scoring deltas):
+    - Protocol disabled → all three are None / None / 0.
+    - Last step's belief drives `belief_final` and `belief_parse_ok` (no
+      "borrowing" from earlier successful parses if the final step failed).
+    - `belief_trace` includes EVERY step (with None entries for failed ones)
+      whenever at least one step parsed successfully; if every step failed
+      it is None.
+    """
+    if not belief_enabled or not beliefs_per_step:
+        return None, None, 0
+
+    last_belief = beliefs_per_step[-1]
+    if last_belief is not None:
+        belief_parse_ok = 1
+        belief_final = json.dumps(last_belief.probabilities, ensure_ascii=False)
+    else:
+        belief_parse_ok = 0
+        belief_final = None
+
+    if any(b is not None for b in beliefs_per_step):
+        trace: list[dict[str, Any] | None] = [
+            _belief_to_step_dict(idx, b) for idx, b in enumerate(beliefs_per_step)
+        ]
+        belief_trace = json.dumps(trace, ensure_ascii=False)
+    else:
+        belief_trace = None
+
+    return belief_final, belief_trace, belief_parse_ok

@@ -127,6 +127,14 @@ class Settings(BaseSettings):
     # nudge 最多注入几次, 防止 LLM 与系统互相 nudge 死循环. REACT_MAX_STEPS 仍是硬天花板.
     REACT_MAX_NUDGES: int = 2
 
+    # 结构化置信度协议总开关 (v4). 启用后在 user prompt 末尾追加 belief 协议段
+    # (位置在 reflection 协议之后), 要求 LLM 在 \\boxed{...} 之前输出一段
+    # <belief>...</belief> JSON, 携带 probabilities / confidence / key_evidence /
+    # counterevidence / decision_rule. 与 reflection 协议互相独立, 不进
+    # prompt_templates_hash, 由 run_meta.belief_protocol_text/_hash 记录指纹.
+    # 默认关闭以保 v3 行为字节级一致; 启用前先在候选模型上 pilot 解析率.
+    BELIEF_PROTOCOL: bool = False
+
     # Sampling / Run
     SAMPLING_N: int = 5
     RUN_ID: str = ""

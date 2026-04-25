@@ -90,6 +90,12 @@ class SampleResult:
     system_fingerprint: str | None
     service_tier: str | None
 
+    # v4 belief observability (BELIEF_PROTOCOL). All None / 0 when the
+    # protocol is disabled or when belief parsing failed for every step.
+    belief_final: str | None
+    belief_trace: str | None
+    belief_parse_ok: int
+
     def to_row(self) -> dict[str, Any]:
         """Shape matching `forecast_eval.db.AsyncWriter.enqueue_result`.
 
@@ -121,6 +127,9 @@ class SampleResult:
             "response_id": self.response_id,
             "system_fingerprint": self.system_fingerprint,
             "service_tier": self.service_tier,
+            "belief_final": self.belief_final,
+            "belief_trace": self.belief_trace,
+            "belief_parse_ok": self.belief_parse_ok,
         }
 
 

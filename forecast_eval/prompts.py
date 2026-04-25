@@ -15,6 +15,11 @@ _BACKTICK_SAFE_ASCII_RANGE = set(range(ord("A"), ord("Z") + 1))
 # (因此 prompt_templates_hash 不受影响), 但会作为 user_prompt 字段落库, 完全可复盘.
 # 设计目标: 用 prompt-engineering 把模型从 "1 次 web_search 直接答" 拉到
 # "≥3 次不同角度 + 每次反思 + 反方向自检", 主要靠协议本身驱动, 不需要硬性最低次数.
+#
+# v4 新增 BELIEF_PROTOCOL: 与 reflection 协议平行的尾部追加段, 要求 LLM 在
+# \\boxed{...} 之前再输出一段 <belief>...</belief> 严格 JSON, 让概率族指标
+# (Brier / NLL / MBS / ECE / 校准曲线) 能直接落地. 同样不进 prompt_templates_hash;
+# 启用条件由 Settings.BELIEF_PROTOCOL 控制, 指纹独立记录在 run_meta.belief_protocol_*.
 REFLECTION_PROTOCOL = """\
 
 ---
@@ -37,6 +42,58 @@ REFLECTION_PROTOCOL = """\
 6. **Calibrate, then commit.** State your confidence (low / medium / high), the single most likely failure mode of your prediction, and the most decisive piece of evidence. Only after this self-check, output the final answer in the exact required `\\boxed{...}` format on the last line.
 
 **Quality bar.** A confident answer with only one search is almost always under-researched on this benchmark; multi-angle searches with explicit reflection consistently outperform one-shot guesses. Use the `web_search` tool generously — your search budget is large enough to support thorough investigation. Do NOT skip the protocol even if the answer feels obvious.
+"""
+
+
+# Belief protocol (v4). Appended AFTER reflection protocol when both are enabled.
+# Like reflection it's a tail-attachment to the user message: NOT part of
+# `prompt_templates`, so `prompt_templates_hash` is unchanged; the fingerprint
+# lives in `run_meta.belief_protocol_text` / `belief_protocol_hash`.
+#
+# Design intent: convert the model's implicit "evidence -> chosen letter" into
+# an explicit, scoreable probability vector, so the analysis layer can compute
+# proper scoring rules (Brier / NLL / MBS), calibration (ECE / Murphy
+# decomposition), and behavioral metrics (belief evolution, confidence
+# diagnosis) without re-prompting. Boxed answer remains for backward compat.
+BELIEF_PROTOCOL = """\
+
+---
+**Belief Protocol — emit a structured probability block BEFORE every `\\boxed{...}` answer.**
+
+After completing the forecasting protocol above, output a `<belief>...</belief>` block on its own line(s), THEN the final `\\boxed{...}` answer. The belief block is the object that gets scored by proper scoring rules (Brier / NLL); the boxed answer is kept only for backward compatibility. Probabilities matter — being well-calibrated beats being overconfident, even when the boxed letter is the same.
+
+**Required JSON schema** (strict; emit valid JSON only — no comments, no trailing commas):
+
+```
+<belief>{
+  "version": "v4.0",
+  "probabilities": { "<letter>": <float in [0, 1]>, ... },
+  "confidence": "low" | "medium" | "high",
+  "key_evidence":     [ "<= 280 chars per bullet, 1-4 bullets",  ... ],
+  "counterevidence":  [ "<= 280 chars per bullet, 0-3 bullets",  ... ],
+  "open_questions":   [ "<= 280 chars per bullet, 0-3 bullets",  ... ],
+  "decision_rule": "argmax" | "multi-select@<threshold>"
+}</belief>
+```
+
+**Probability rules.**
+- Use the SAME letter labels (`A`, `B`, ...) shown in the question's outcomes block. Emit one entry per outcome — every letter present in the question MUST appear as a key.
+- For single-answer questions (yes_no / binary_named / multiple_choice with one true label): the values MUST sum to `1.0` (tolerance `1e-3`).
+- For multi-select questions: each value is an INDEPENDENT Bernoulli (probability that THAT outcome is in the true set); values do NOT need to sum to 1.
+- Each value MUST lie in `[0, 1]`. Avoid the boundary unless you really mean it: `0.99` says "I'd accept long odds against this being wrong"; pick `0.85` if you would not.
+
+**Calibration norms.**
+- Calibrated probabilities are the goal. If you searched once and feel "maybe 60%", emit `0.6`, not `0.9`. Overconfidence is penalised quadratically (Brier) and exponentially (NLL).
+- `confidence` is your subjective bucket; pair it honestly with the spread of `probabilities`. `"high"` + flat distribution is incoherent.
+- `key_evidence` lists the strongest 1-4 facts that DROVE your top probability. `counterevidence` is the best case AGAINST your top choice — emit it even when you reject it; an empty `counterevidence` on a non-trivial question is a red flag.
+- `decision_rule` is `"argmax"` for single-answer; for multi-select, use `"multi-select@<t>"` with `<t>` your inclusion threshold (e.g. `"multi-select@0.5"`).
+
+**Output order (exact).**
+1. Your reasoning / search reflection (free text — anywhere in the message).
+2. The `<belief>{...}</belief>` JSON block.
+3. The final `\\boxed{...}` answer on the LAST line.
+
+If you cannot produce a valid belief block, emit your boxed answer anyway — the boxed path is independent and will still be scored. But a missing or malformed belief block costs you the probabilistic family of metrics for this sample, so default to emitting one whenever your reasoning supports it.
 """
 
 
@@ -92,6 +149,7 @@ def render_user_prompt(
     templates: dict[str, str],
     *,
     reflection_protocol: str | None = None,
+    belief_protocol: str | None = None,
 ) -> str:
     """Assemble the single user message handed to the LLM for one sample.
 
@@ -99,11 +157,14 @@ def render_user_prompt(
     function only branches on `q.question_type` and handles the three
     rendering rules from the prompt-rendering spec.
 
-    `reflection_protocol`, if provided, is appended verbatim after the canonical
-    template body. It is NOT part of `prompt_templates`, so the run's
-    `prompt_templates_hash` stays bit-identical to runs without the protocol —
-    the protocol's presence is recorded via `Settings.config_snapshot` in
-    `run_meta` and per-sample via the `user_prompt` field.
+    `reflection_protocol` and `belief_protocol`, if provided, are appended
+    verbatim after the canonical template body — reflection first, belief
+    last. Neither is part of `prompt_templates`, so the run's
+    `prompt_templates_hash` stays bit-identical to runs without either
+    protocol; their presence is recorded via `Settings.config_snapshot` in
+    `run_meta` (plus the dedicated `..._protocol_text` / `..._protocol_hash`
+    columns) and per-sample via the `user_prompt` field. Passing neither
+    yields the v3 byte-identical rendering.
     """
     options = json.loads(q.options)
 
@@ -130,7 +191,7 @@ def render_user_prompt(
     else:
         raise ValueError(f"unknown question_type: {q.question_type!r}")
 
-    body = templates["prompt_template"].format(
+    rendered = templates["prompt_template"].format(
         agent_role=templates["agent_role"],
         event=q.event,
         end_time=q.end_time,
@@ -139,5 +200,7 @@ def render_user_prompt(
         guidance=templates["guidance"],
     )
     if reflection_protocol:
-        return body + reflection_protocol
-    return body
+        rendered = rendered + reflection_protocol
+    if belief_protocol:
+        rendered = rendered + belief_protocol
+    return rendered

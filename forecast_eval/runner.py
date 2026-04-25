@@ -51,8 +51,9 @@ def generate_run_id(now: datetime | None = None) -> str:
 
 
 def _skipped_cutoff_row(q: Question, sample_idx: int) -> dict[str, Any]:
-    # `nudges_used=0` is meaningful (no LLM call happened), the other five v3
-    # fields are None — there is no envelope to take them from.
+    # `nudges_used=0` is meaningful (no LLM call happened), the other v3
+    # envelope fields are None. v4 belief fields are None / None / 0 because
+    # no assistant message exists to parse a belief block from.
     return SampleResult(
         run_id="",
         question_id=q.id,
@@ -79,12 +80,16 @@ def _skipped_cutoff_row(q: Question, sample_idx: int) -> dict[str, Any]:
         response_id=None,
         system_fingerprint=None,
         service_tier=None,
+        belief_final=None,
+        belief_trace=None,
+        belief_parse_ok=0,
     ).to_row()
 
 
 def _error_row(q: Question, sample_idx: int, error: str) -> dict[str, Any]:
     # Same shape as the cutoff row: nudges_used=0 because no react-loop counter
-    # ever ticked, and the four envelope strings are None.
+    # ever ticked, and the v3/v4 envelope fields are None / 0 — no LLM
+    # response means no belief block to parse either.
     return SampleResult(
         run_id="",
         question_id=q.id,
@@ -111,6 +116,9 @@ def _error_row(q: Question, sample_idx: int, error: str) -> dict[str, Any]:
         response_id=None,
         system_fingerprint=None,
         service_tier=None,
+        belief_final=None,
+        belief_trace=None,
+        belief_parse_ok=0,
     ).to_row()
 
 

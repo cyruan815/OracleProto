@@ -25,15 +25,16 @@ from typing import Any, Iterable
 from .config import Settings
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 # ---------- Per-sample column definitions ----------
 
 # Each sample_idx contributes this column suite (prefixed with "s{i}_").
-# v3 (2026-04) appended 6 observability columns at the tail. Keep the order
-# stable: existing code assumes new fields land after `created_at`, and the
-# migration path adds them with `ALTER TABLE ADD COLUMN` in this same order.
+# v3 (2026-04) appended 6 observability columns at the tail; v4 (2026-04)
+# appends 3 belief columns. Keep the order stable: existing code assumes new
+# fields land after `created_at`, and the migration path adds them with
+# `ALTER TABLE ADD COLUMN` in this same order.
 PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("final_answer_letters", "TEXT"),
     ("final_answer_raw", "TEXT"),
@@ -55,6 +56,9 @@ PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("response_id", "TEXT"),
     ("system_fingerprint", "TEXT"),
     ("service_tier", "TEXT"),
+    ("belief_final", "TEXT"),
+    ("belief_trace", "TEXT"),
+    ("belief_parse_ok", "INTEGER"),
 )
 PER_SAMPLE_FIELD_NAMES: tuple[str, ...] = tuple(name for name, _ in PER_SAMPLE_COLUMNS)
 
@@ -71,6 +75,19 @@ _V3_NEW_PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
 _V3_NEW_RUN_META_COLUMNS: tuple[tuple[str, str], ...] = (
     ("reflection_protocol_text", "TEXT"),
     ("reflection_protocol_hash", "TEXT"),
+)
+
+# Columns added in v4 (belief protocol observability). Same idempotent
+# `ALTER TABLE ADD COLUMN` template as v3; the migration sees v3-stamped DBs
+# and adds these three per-sample columns plus the two run_meta columns.
+_V4_NEW_PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("belief_final", "TEXT"),
+    ("belief_trace", "TEXT"),
+    ("belief_parse_ok", "INTEGER"),
+)
+_V4_NEW_RUN_META_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("belief_protocol_text", "TEXT"),
+    ("belief_protocol_hash", "TEXT"),
 )
 
 
@@ -118,7 +135,9 @@ CREATE TABLE IF NOT EXISTS run_meta (
     started_at                TEXT NOT NULL,
     finished_at               TEXT,
     reflection_protocol_text  TEXT,
-    reflection_protocol_hash  TEXT
+    reflection_protocol_hash  TEXT,
+    belief_protocol_text      TEXT,
+    belief_protocol_hash      TEXT
 );
 """
 
@@ -167,13 +186,16 @@ def init_schema(conn: sqlite3.Connection, sampling_n: int) -> None:
     `sampling_n`. Idempotent as long as `sampling_n` stays the same across runs
     that reuse the same DB.
 
-    For older DBs created under v2 we run the v2→v3 ALTER migration in-place
-    before validating the column suite, so resumed runs pick up the new columns
-    without losing data.
+    Older DBs are migrated in-place via the chain v2→v3→v4. Each step inspects
+    `PRAGMA table_info` and only ALTERs missing columns, so chained calls on
+    an already-migrated DB are no-ops. Migrations run in `init_schema`'s own
+    thread *before* `AsyncWriter` starts, so writers never see a half-migrated
+    schema.
     """
     conn.executescript(_STATIC_SCHEMA_SQL)
     conn.executescript(_run_results_ddl(sampling_n))
     _migrate_v2_to_v3(conn, sampling_n)
+    _migrate_v3_to_v4(conn, sampling_n)
     row = conn.execute(
         "SELECT version FROM schema_version WHERE version = ?",
         (SCHEMA_VERSION,),
@@ -199,7 +221,8 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection, sampling_n: int) -> None:
         int(r["version"])
         for r in conn.execute("SELECT version FROM schema_version").fetchall()
     }
-    if SCHEMA_VERSION in versions:
+    # Already past v2: nothing to do (covers v3, v4 and any future stamp).
+    if any(v >= 3 for v in versions):
         return
 
     existing_results = {
@@ -225,10 +248,53 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection, sampling_n: int) -> None:
 
     if altered and 2 in versions:
         # Record the upgrade only when we actually transformed a v2 DB; brand
-        # new v3 DBs go through the regular `init_schema` insert path below.
+        # new v3+ DBs go through the regular `init_schema` insert path below.
         conn.execute(
             "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-            (SCHEMA_VERSION, utcnow_iso()),
+            (3, utcnow_iso()),
+        )
+
+
+def _migrate_v3_to_v4(conn: sqlite3.Connection, sampling_n: int) -> None:
+    """Add the v4 belief columns in-place when an existing DB is still v3.
+
+    Same template as `_migrate_v2_to_v3`: inspect `PRAGMA table_info` first,
+    only ALTER missing columns, stamp `version=4` only when an actual upgrade
+    happened from a v3 stamp. Brand-new v4 DBs land at version=4 via
+    `init_schema`'s tail INSERT, not via this migration's stamp.
+    """
+    versions = {
+        int(r["version"])
+        for r in conn.execute("SELECT version FROM schema_version").fetchall()
+    }
+    if 4 in versions:
+        return
+
+    existing_results = {
+        r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()
+    }
+    existing_meta = {
+        r["name"] for r in conn.execute("PRAGMA table_info(run_meta)").fetchall()
+    }
+
+    altered = False
+    for i in range(sampling_n):
+        for name, sql_type in _V4_NEW_PER_SAMPLE_COLUMNS:
+            col = sample_col(i, name)
+            if col in existing_results:
+                continue
+            conn.execute(f"ALTER TABLE run_results ADD COLUMN {col} {sql_type}")
+            altered = True
+    for name, sql_type in _V4_NEW_RUN_META_COLUMNS:
+        if name in existing_meta:
+            continue
+        conn.execute(f"ALTER TABLE run_meta ADD COLUMN {name} {sql_type}")
+        altered = True
+
+    if altered and 3 in versions:
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (4, utcnow_iso()),
         )
 
 
@@ -357,12 +423,15 @@ def register_run_meta(
     started_at: str | None = None,
     reflection_protocol_text: str | None = None,
     reflection_protocol_hash: str | None = None,
+    belief_protocol_text: str | None = None,
+    belief_protocol_hash: str | None = None,
 ) -> None:
     """Insert or refresh the single `run_meta` row for this model's DB.
 
     `finished_at` and `started_at` are preserved on resume so the original
-    start timestamp survives. `reflection_protocol_text` / `..._hash` are
-    independent of `prompt_templates_hash` (DESIGN.md decision 2).
+    start timestamp survives. `reflection_protocol_text` / `..._hash` and
+    `belief_protocol_text` / `..._hash` are independent of
+    `prompt_templates_hash` (DESIGN.md decision 2 + v4 belief decision).
     """
     conn.execute(
         """
@@ -371,8 +440,9 @@ def register_run_meta(
             config_snapshot, filters_snapshot,
             source_db_hash, metadata_hash, prompt_templates_hash,
             training_cutoff, started_at, finished_at,
-            reflection_protocol_text, reflection_protocol_hash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            reflection_protocol_text, reflection_protocol_hash,
+            belief_protocol_text, belief_protocol_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
             model                    = excluded.model,
             sampling_n               = excluded.sampling_n,
@@ -383,7 +453,9 @@ def register_run_meta(
             prompt_templates_hash    = excluded.prompt_templates_hash,
             training_cutoff          = excluded.training_cutoff,
             reflection_protocol_text = excluded.reflection_protocol_text,
-            reflection_protocol_hash = excluded.reflection_protocol_hash
+            reflection_protocol_hash = excluded.reflection_protocol_hash,
+            belief_protocol_text     = excluded.belief_protocol_text,
+            belief_protocol_hash     = excluded.belief_protocol_hash
         """,
         (
             run_id,
@@ -398,6 +470,8 @@ def register_run_meta(
             started_at or utcnow_iso(),
             reflection_protocol_text,
             reflection_protocol_hash,
+            belief_protocol_text,
+            belief_protocol_hash,
         ),
     )
 
@@ -473,6 +547,10 @@ class AsyncWriter:
             "response_id": str | None,
             "system_fingerprint": str | None,
             "service_tier": str | None,
+            # v4 belief columns:
+            "belief_final": str | None,
+            "belief_trace": str | None,
+            "belief_parse_ok": int,
         }
 
     The writer looks up `sample_idx` and UPSERTs the matching `s{i}_*` columns
