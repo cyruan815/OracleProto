@@ -119,6 +119,11 @@ def _fleiss_kappa_from_counts(
 
     `n_matrix[i][j]` = count of category j votes on question i.
     `k_per_q[i]` = total raters on question i.
+
+    All rows MUST share the same number of categories — Fleiss κ's marginal
+    category proportions $p_j$ only have meaning inside a fixed category
+    space. Callers with mixed-k items must stratify by k first (see
+    `fleiss_kappa_single`).
     """
     valid = [
         (n_row, k) for n_row, k in zip(n_matrix, k_per_q) if k >= 2
@@ -129,6 +134,14 @@ def _fleiss_kappa_from_counts(
     n_categories = len(valid[0][0])
     if n_categories == 0:
         return None
+    if any(len(n_row) != n_categories for n_row, _ in valid):
+        # Defensive — the older single-pool implementation passed mixed-k
+        # rows here and silently produced an IndexError downstream. Surface
+        # the misuse so future regressions fail loudly at the call site.
+        raise ValueError(
+            "_fleiss_kappa_from_counts requires all rows to share the same "
+            "number of categories; stratify by k before calling."
+        )
 
     # Per-question observed agreement: P_i = (sum_j n_ij^2 - K_i) / (K_i (K_i - 1))
     p_i_values: list[float] = []
@@ -168,9 +181,13 @@ def fleiss_kappa_single(
 
     `k_per_q` carries the question's option count (number of categories).
     Returns None when no question has $K_q \\ge 2$ effective trials.
+
+    Stratified by k: standard Fleiss κ requires a shared category space, so
+    questions are bucketed by their option count, κ is computed per stratum,
+    then averaged across strata weighted by question count. Single-stratum
+    runs collapse to the textbook formula.
     """
-    n_matrix: list[list[int]] = []
-    keff_list: list[int] = []
+    by_k: dict[int, tuple[list[list[int]], list[int]]] = {}
     for qid, samples in samples_by_q.items():
         k = k_per_q.get(qid)
         if k is None or k <= 0:
@@ -179,11 +196,23 @@ def fleiss_kappa_single(
         if len(parsed) < 2:
             continue
         counts = _vote_counts_single(parsed, k)
-        n_matrix.append(counts)
-        keff_list.append(sum(counts))
-    if not n_matrix:
+        n_rows, keffs = by_k.setdefault(k, ([], []))
+        n_rows.append(counts)
+        keffs.append(sum(counts))
+    if not by_k:
         return None
-    return _fleiss_kappa_from_counts(n_matrix, keff_list)
+
+    parts: list[tuple[float, int]] = []  # (kappa, n_questions_in_stratum)
+    for _k, (n_rows, keffs) in by_k.items():
+        kappa = _fleiss_kappa_from_counts(n_rows, keffs)
+        if kappa is not None:
+            parts.append((kappa, len(n_rows)))
+    if not parts:
+        return None
+    total_w = sum(w for _, w in parts)
+    if total_w == 0:
+        return None
+    return sum(kappa * w for kappa, w in parts) / total_w
 
 
 def fleiss_kappa_multi_per_label(
