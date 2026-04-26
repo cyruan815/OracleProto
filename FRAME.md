@@ -667,7 +667,11 @@ LLM_BACKOFF_RATE_LIMIT_S=10,30,60,120,300
 LLM_BACKOFF_SERVER_5XX_S=5,15,30,60,120
 
 # -------- Tavily Search --------
+# 单 key 或 CSV 多 key (`tvly-aaa,tvly-bbb`); 多 key 由 TavilyKeyPool 做 least-used
+# 调度 + 401/403 永久拉黑 + 429 临时 cooldown, 详见 .env.example.
 TAVILY_API_KEY=tvly-REPLACE_ME
+# 单 key 命中 429 时临时拉黑秒数 (默认 60); 401/403 永久拉黑不受此参数影响.
+TAVILY_KEY_COOLDOWN_S=60
 TAVILY_MAX_RESULTS=5
 # search_depth: basic (1 credit/call, 默认) | advanced (2 credits/call)
 TAVILY_SEARCH_DEPTH=basic
@@ -740,7 +744,7 @@ LOG_DIR=./logs
 - **`WRITE_MESSAGES_TRACE`**：`true` 存完整 messages JSON（方便 debug 但 db 变大）；`false` 只存关键字段。
 - **`REACT_REFLECTION_PROTOCOL`**：`true`（默认）在每条 sample 的 user message 末尾追加多步推理脚手架（拆题 / ≥3 检索角度 / 每次搜索后反思 / 交叉验证 / 反方向自检 / 置信度声明）。协议文本不进 `dataset_metadata`，因此 `prompt_templates_hash` 不受影响，但渲染后的完整 user message 会写入每条 sample 的 `user_prompt` 字段，开关同时由 `run_meta.config_snapshot` 记录，可事后比对开/关协议下的行为差异。
 - **`REACT_MIN_SEARCH_CALLS` / `REACT_MAX_NUDGES`**：可选兜底机制。当 LLM 在 `web_search` 调用次数还不足 `REACT_MIN_SEARCH_CALLS` 时就试图给最终答案，系统会向消息序列注入一条 user nudge 提醒它再换角度检索；同一个 sample 最多 nudge `REACT_MAX_NUDGES` 次，整体仍受 `REACT_MAX_STEPS` / `REACT_MAX_SEARCH_CALLS` 硬上限约束。`REACT_MIN_SEARCH_CALLS=0`（默认）等价于关闭兜底，仅靠反思协议驱动；`ENABLE_WEB_SEARCH=false` 时 nudge 自动失效（无搜索可做）。Settings 校验会拒绝 `min > max`。
-- **脱敏**：`run_meta.config_snapshot` 写入前 `config.py` 必须对 `LLM_API_KEY` / `TAVILY_API_KEY` 等敏感字段执行 redaction（只保留前 4 位 + 长度 + `sha256[:12]`），敏感明文一律不落库。
+- **脱敏**：`run_meta.config_snapshot` 写入前 `config.py` 必须对 `LLM_API_KEY` / `TAVILY_API_KEY` 等敏感字段执行 redaction（只保留前 4 位 + 长度 + `sha256[:12]`），敏感明文一律不落库。`TAVILY_API_KEY` 现为 list[str]，每个 key 独立 redact，落盘形如 `[{prefix, sha256_12, length, provider}, ...]`，便于事后审计 "本 run 用了哪几把 key"。
 
 ---
 
