@@ -155,10 +155,16 @@ async def chat(
     # 命中 pattern 时显式不传这两个字段.
     reasoning_patterns = getattr(settings, "LLM_REASONING_MODEL_PATTERNS", []) or []
     skip_sampling = _is_reasoning_model(model, reasoning_patterns)
+    # OpenAI o-series / GPT-5 的 /v1/chat/completions 已弃用 `max_tokens`,
+    # 必须用 `max_completion_tokens`. 由 settings.MODEL_MAX_TOKENS_PARAM 按
+    # model slug 精确覆盖, 未声明的模型保持默认 `max_tokens`.
+    max_tokens_param = (
+        getattr(settings, "MODEL_MAX_TOKENS_PARAM", {}) or {}
+    ).get(model, "max_tokens")
     base_kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "max_tokens": max_tokens if max_tokens is not None else settings.LLM_MAX_TOKENS,
+        max_tokens_param: max_tokens if max_tokens is not None else settings.LLM_MAX_TOKENS,
         "timeout": timeout if timeout is not None else settings.LLM_TIMEOUT_S,
     }
     # Omit the `tools` key entirely when empty — some OpenAI-compatible providers

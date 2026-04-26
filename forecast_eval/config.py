@@ -26,6 +26,39 @@ def _parse_csv_int(raw: str | list[Any] | None) -> list[int]:
     return [int(x) for x in _parse_csv(raw)]
 
 
+_MAX_TOKENS_PARAM_ALLOWED = {"max_tokens", "max_completion_tokens"}
+
+
+def _parse_max_tokens_param(raw: str | dict[str, Any] | None) -> dict[str, str]:
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        items = [(str(k), str(v)) for k, v in raw.items()]
+    else:
+        items = []
+        for pair in str(raw).split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if "=" not in pair:
+                raise ValueError(
+                    f"MODEL_MAX_TOKENS_PARAM entry must be 'model=param_name', got: {pair!r}"
+                )
+            model_slug, name = pair.split("=", 1)
+            items.append((model_slug.strip(), name.strip()))
+    out: dict[str, str] = {}
+    for model_slug, name in items:
+        if not model_slug:
+            raise ValueError("MODEL_MAX_TOKENS_PARAM has an empty model slug")
+        if name not in _MAX_TOKENS_PARAM_ALLOWED:
+            raise ValueError(
+                f"MODEL_MAX_TOKENS_PARAM[{model_slug}]={name!r} must be one of "
+                f"{sorted(_MAX_TOKENS_PARAM_ALLOWED)}"
+            )
+        out[model_slug] = name
+    return out
+
+
 def _parse_cutoffs(raw: str | dict[str, Any] | None) -> dict[str, date]:
     if raw is None or raw == "":
         return {}
@@ -80,6 +113,11 @@ class Settings(BaseSettings):
     MODELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     MODEL_TRAINING_CUTOFFS: Annotated[dict[str, date], NoDecode] = Field(default_factory=dict)
     LLM_MAX_TOKENS: int = 12000
+    # 部分 provider (例如 OpenAI 官方 o-series / GPT-5 的 /v1/chat/completions)
+    # 已弃用 `max_tokens`, 改用 `max_completion_tokens`. 这里按 model slug 覆盖
+    # 实际请求体里使用的字段名; 未声明的模型默认仍使用 `max_tokens`.
+    # 格式: "<model_slug>=max_completion_tokens" 多组用逗号分隔.
+    MODEL_MAX_TOKENS_PARAM: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
     LLM_TIMEOUT_S: int = 240
     LLM_TEMPERATURE: float = 0.7
     LLM_TOP_P: float = 1.0
@@ -259,6 +297,11 @@ class Settings(BaseSettings):
     @classmethod
     def _parse_training_cutoffs(cls, v: Any) -> dict[str, date]:
         return _parse_cutoffs(v)
+
+    @field_validator("MODEL_MAX_TOKENS_PARAM", mode="before")
+    @classmethod
+    def _parse_max_tokens_param_field(cls, v: Any) -> dict[str, str]:
+        return _parse_max_tokens_param(v)
 
     @field_validator("TAVILY_INCLUDE_RAW_CONTENT", mode="before")
     @classmethod

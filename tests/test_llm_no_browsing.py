@@ -10,6 +10,7 @@ import pytest
 import respx
 from openai import AsyncOpenAI
 
+from forecast_eval.config import Settings
 from forecast_eval.llm import AuthError, chat, get_client
 from forecast_eval.tools import WEB_SEARCH_SCHEMA
 
@@ -26,6 +27,7 @@ class _StubSettings:
     LLM_BACKOFF_NETWORK_S: list[int] = None  # type: ignore[assignment]
     LLM_BACKOFF_RATE_LIMIT_S: list[int] = None  # type: ignore[assignment]
     LLM_BACKOFF_SERVER_5XX_S: list[int] = None  # type: ignore[assignment]
+    MODEL_MAX_TOKENS_PARAM: dict = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.LLM_BACKOFF_NETWORK_S is None:
@@ -36,6 +38,8 @@ class _StubSettings:
             self.LLM_BACKOFF_SERVER_5XX_S = [0, 0, 0]
         if self.LLM_REASONING_MODEL_PATTERNS is None:
             self.LLM_REASONING_MODEL_PATTERNS = ["o1", "o3", "o4", "r1", "qwq"]
+        if self.MODEL_MAX_TOKENS_PARAM is None:
+            self.MODEL_MAX_TOKENS_PARAM = {}
 
 
 def _success_body() -> dict[str, object]:
@@ -153,6 +157,62 @@ async def test_extra_tool_rejected_pre_flight() -> None:
 
 
 @respx.mock
+async def test_default_uses_max_tokens_field() -> None:
+    """未在 MODEL_MAX_TOKENS_PARAM 声明的模型, 请求体仍使用 `max_tokens`."""
+    route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
+        return_value=httpx.Response(200, json=_success_body())
+    )
+    settings = _StubSettings()
+    await chat(
+        model="openai/gpt-4o-mini",
+        messages=[{"role": "user", "content": "hi"}],
+        settings=settings,
+        client=_new_client(settings),
+    )
+    body = json.loads(route.calls.last.request.content.decode("utf-8"))
+    assert body.get("max_tokens") == settings.LLM_MAX_TOKENS
+    assert "max_completion_tokens" not in body
+
+
+@respx.mock
+async def test_max_completion_tokens_override_per_model() -> None:
+    """声明覆盖的模型, 请求体使用 `max_completion_tokens` 而非 `max_tokens`."""
+    route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
+        return_value=httpx.Response(200, json=_success_body())
+    )
+    settings = _StubSettings()
+    settings.MODEL_MAX_TOKENS_PARAM = {"openai/gpt-5": "max_completion_tokens"}
+    await chat(
+        model="openai/gpt-5",
+        messages=[{"role": "user", "content": "hi"}],
+        settings=settings,
+        client=_new_client(settings),
+    )
+    body = json.loads(route.calls.last.request.content.decode("utf-8"))
+    assert body.get("max_completion_tokens") == settings.LLM_MAX_TOKENS
+    assert "max_tokens" not in body
+
+
+@respx.mock
+async def test_max_tokens_param_does_not_affect_other_models() -> None:
+    """覆盖只针对声明的 slug, 其它模型保持默认 `max_tokens`."""
+    route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
+        return_value=httpx.Response(200, json=_success_body())
+    )
+    settings = _StubSettings()
+    settings.MODEL_MAX_TOKENS_PARAM = {"openai/gpt-5": "max_completion_tokens"}
+    await chat(
+        model="anthropic/claude-sonnet-4.5",
+        messages=[{"role": "user", "content": "hi"}],
+        settings=settings,
+        client=_new_client(settings),
+    )
+    body = json.loads(route.calls.last.request.content.decode("utf-8"))
+    assert body.get("max_tokens") == settings.LLM_MAX_TOKENS
+    assert "max_completion_tokens" not in body
+
+
+@respx.mock
 async def test_auth_error_raises_auth_error_not_retried() -> None:
     route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
         return_value=httpx.Response(401, json={"error": {"message": "bad key"}})
@@ -166,3 +226,53 @@ async def test_auth_error_raises_auth_error_not_retried() -> None:
             client=_new_client(settings),
         )
     assert route.call_count == 1
+
+
+def _settings_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
+    base = {
+        "LLM_API_KEY": "sk-or-v1-TEST_ABCDEFGH",
+        "MODELS": "openai/gpt-5",
+        "TAVILY_API_KEY": "tvly-TEST_ABCDEFGH",
+    }
+    base.update(overrides)
+    for k, v in base.items():
+        monkeypatch.setenv(k, v)
+
+
+def test_settings_parses_max_tokens_param_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    _settings_env(
+        monkeypatch,
+        MODEL_MAX_TOKENS_PARAM=(
+            "openai/gpt-5=max_completion_tokens,openai/o3=max_completion_tokens"
+        ),
+    )
+    s = Settings(_env_file=None)
+    assert s.MODEL_MAX_TOKENS_PARAM == {
+        "openai/gpt-5": "max_completion_tokens",
+        "openai/o3": "max_completion_tokens",
+    }
+
+
+def test_settings_max_tokens_param_defaults_to_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    _settings_env(monkeypatch)
+    s = Settings(_env_file=None)
+    assert s.MODEL_MAX_TOKENS_PARAM == {}
+
+
+def test_settings_rejects_unknown_max_tokens_param_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings_env(
+        monkeypatch,
+        MODEL_MAX_TOKENS_PARAM="openai/gpt-5=max_total_tokens",
+    )
+    with pytest.raises(ValueError, match="max_completion_tokens"):
+        Settings(_env_file=None)
+
+
+def test_settings_rejects_malformed_max_tokens_param_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings_env(monkeypatch, MODEL_MAX_TOKENS_PARAM="openai/gpt-5")
+    with pytest.raises(ValueError, match="model=param_name"):
+        Settings(_env_file=None)
