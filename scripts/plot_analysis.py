@@ -138,65 +138,6 @@ def _r_values_in_grid(grid_rows: list[dict[str, str]]) -> list[int]:
 # --------------------------------------------------------------------------- #
 
 
-def plot_reliability(
-    plt, data: dict, out_path: Path, *, title: str
-) -> None:
-    """Per-model reliability diagram from `reliability_data*.json`.
-
-    Each model gets one polyline of (mean_p, mean_o) per non-empty bin. Light
-    gray y=x reference. Bin counts are NOT shown — it would clutter the line
-    plot; users who care can read the JSON directly.
-    """
-    if not data:
-        return
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.plot([0, 1], [0, 1], color="gray", linestyle="--", linewidth=1, label="ideal")
-    for model, by_qtype in sorted(data.items()):
-        # Aggregate bins across question_types — match `_bins_for_model_qtype`'s
-        # output schema.
-        all_pts: list[tuple[float, float]] = []
-        if isinstance(by_qtype, dict):
-            for qt, bins in sorted(by_qtype.items()):
-                if not isinstance(bins, list):
-                    continue
-                for b in bins:
-                    if not isinstance(b, dict):
-                        continue
-                    n = b.get("n") or 0
-                    if n <= 0:
-                        continue
-                    mp = b.get("mean_p")
-                    mo = b.get("mean_o")
-                    if mp is None or mo is None:
-                        continue
-                    all_pts.append((float(mp), float(mo)))
-        elif isinstance(by_qtype, list):
-            for b in by_qtype:
-                n = b.get("n") or 0
-                if n <= 0:
-                    continue
-                mp = b.get("mean_p")
-                mo = b.get("mean_o")
-                if mp is None or mo is None:
-                    continue
-                all_pts.append((float(mp), float(mo)))
-        all_pts.sort()
-        if not all_pts:
-            continue
-        xs = [p[0] for p in all_pts]
-        ys = [p[1] for p in all_pts]
-        ax.plot(xs, ys, marker="o", linewidth=1.5, label=model)
-    ax.set_xlabel("predicted probability")
-    ax.set_ylabel("observed frequency")
-    ax.set_title(title)
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.legend(loc="best", fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=140)
-    plt.close(fig)
-
-
 def plot_bi_bar_with_ci(
     plt, summary_rows: list[dict], paired_rows: list[dict], out_path: Path
 ) -> None:
@@ -292,47 +233,144 @@ def plot_delta_bi_forest(
     plt.close(fig)
 
 
-def plot_brier_decomposition(
-    plt, decomp_rows: list[dict], out_path: Path
+def plot_fss_bar_with_ci(
+    plt, summary_rows: list[dict], pairwise_rows: list[dict], out_path: Path
 ) -> None:
-    """Stacked bar of Murphy three-decomposition (rel - res + unc) per model."""
-    if not decomp_rows:
+    """v5 main figure: horizontal bar of `fss` per model with half-CI from
+    the v5 multi-metric paired bootstrap (rows where `metric == 'fss'`).
+    Mirrors `plot_bi_bar_with_ci` for FSS — Decision 15."""
+    if not summary_rows:
         return
-    # Use uncalibrated columns; calibrated also exists but uncal is the
-    # "honest" signal pre-correction.
-    by_model: dict[str, dict[str, float]] = {}
-    for r in decomp_rows:
-        m = r.get("model")
-        if not m:
+    fss_by_model: dict[str, float] = {}
+    for r in summary_rows:
+        v = _to_float(r.get("fss"))
+        if v is not None:
+            fss_by_model[r["model"]] = v
+    if not fss_by_model:
+        return
+    half_ci_by_model: dict[str, list[float]] = {}
+    for r in pairwise_rows:
+        if r.get("metric") != "fss":
             continue
-        by_model[m] = {
-            "rel": _to_float(r.get("rel_uncal")) or 0.0,
-            "res": _to_float(r.get("res_uncal")) or 0.0,
-            "unc": _to_float(r.get("unc_uncal")) or 0.0,
-        }
-    if not by_model:
-        return
-    models = sorted(by_model.keys())
-    fig, ax = plt.subplots(figsize=(max(6, 1.2 * len(models)), 5))
-    rel = [by_model[m]["rel"] for m in models]
-    res_neg = [-by_model[m]["res"] for m in models]
-    unc = [by_model[m]["unc"] for m in models]
-    ax.bar(models, rel, color="#C44E52", label="rel (calibration ↓ better)")
-    ax.bar(models, res_neg, bottom=rel, color="#55A868", label="−res (resolution ↑ better)")
-    ax.bar(
-        models,
-        unc,
-        bottom=[r + n for r, n in zip(rel, res_neg)],
-        color="#8172B2",
-        label="unc (irreducible)",
-    )
-    ax.set_ylabel("Brier components")
-    ax.set_title("Murphy three-decomposition (uncalibrated)")
-    ax.legend(loc="best", fontsize=8)
-    ax.tick_params(axis="x", rotation=45)
+        for col in ("model_a", "model_b"):
+            m = r.get(col)
+            if not m:
+                continue
+            ci_low = _to_float(r.get("ci_low"))
+            ci_high = _to_float(r.get("ci_high"))
+            if ci_low is None or ci_high is None:
+                continue
+            half = (ci_high - ci_low) / 2.0
+            half_ci_by_model.setdefault(m, []).append(half)
+    half_ci_avg = {
+        m: (sum(v) / len(v) if v else 0.0) for m, v in half_ci_by_model.items()
+    }
+    models = sorted(fss_by_model.keys(), key=lambda m: fss_by_model[m])
+    fig, ax = plt.subplots(figsize=(8, max(3, 0.5 * len(models) + 2)))
+    ys = list(range(len(models)))
+    bars = [fss_by_model[m] for m in models]
+    errs = [half_ci_avg.get(m, 0.0) for m in models]
+    ax.barh(ys, bars, xerr=errs, color="#55A868", alpha=0.85)
+    ax.axvline(0, color="gray", linestyle="--", linewidth=1)
+    ax.set_yticks(ys)
+    ax.set_yticklabels(models)
+    ax.set_xlabel("FSS (Tversky α=2 β=0.5, chance-corrected) — higher better")
+    ax.set_title("FSS per model (error bar = mean half-CI from paired bootstrap)")
     fig.tight_layout()
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
+
+
+def plot_delta_fss_forest(
+    plt, pairwise_rows: list[dict], out_path: Path
+) -> None:
+    """v5 forest plot of pairwise ΔFSS with 95% CI; rows where
+    `metric == 'fss'` from `pairwise_bootstrap.csv`. Decision 15."""
+    rows = []
+    for r in pairwise_rows:
+        if r.get("metric") != "fss":
+            continue
+        delta = _to_float(r.get("delta_mean"))
+        if delta is None:
+            continue
+        ci_low = _to_float(r.get("ci_low"))
+        ci_high = _to_float(r.get("ci_high"))
+        rows.append({
+            "label": f"{r.get('model_a', '?')} vs {r.get('model_b', '?')}",
+            "delta": delta,
+            "ci_low": ci_low if ci_low is not None else delta,
+            "ci_high": ci_high if ci_high is not None else delta,
+            "p_value": _to_float(r.get("p_value")) or 1.0,
+        })
+    if not rows:
+        return
+    rows.sort(key=lambda r: abs(r["delta"]), reverse=True)
+    rows = rows[:30]
+    rows.reverse()
+    fig, ax = plt.subplots(figsize=(8, max(3, 0.4 * len(rows) + 2)))
+    ys = list(range(len(rows)))
+    deltas = [r["delta"] for r in rows]
+    err_lo = [d - r["ci_low"] for d, r in zip(deltas, rows)]
+    err_hi = [r["ci_high"] - d for d, r in zip(deltas, rows)]
+    colors = ["#C44E52" if r["p_value"] < 0.05 else "#4C72B0" for r in rows]
+    ax.errorbar(deltas, ys, xerr=[err_lo, err_hi], fmt="o", color="black", ecolor=colors, capsize=3)
+    ax.axvline(0, color="gray", linestyle="--", linewidth=1)
+    ax.set_yticks(ys)
+    ax.set_yticklabels([r["label"] for r in rows], fontsize=8)
+    ax.set_xlabel("ΔFSS = FSS_A − FSS_B (red = p < 0.05)")
+    ax.set_title("Pairwise ΔFSS forest plot")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+def plot_entropy_accuracy_grid(
+    plt, bins_rows: list[dict], out_dir: Path,
+) -> list[Path]:
+    """v5 entropy-Acc joint grid — one PNG per model with 3 buckets × 3 metrics
+    (Acc / MV Acc / Fleiss κ). Per-model bucket boundaries differ (Decision 5)."""
+    if not bins_rows:
+        return []
+    by_model: dict[str, list[dict]] = {}
+    for r in bins_rows:
+        m = r.get("model")
+        if not m:
+            continue
+        by_model.setdefault(m, []).append(r)
+    written: list[Path] = []
+    bucket_order = {"low": 0, "mid": 1, "high": 2}
+    for model in sorted(by_model.keys()):
+        rows = sorted(
+            by_model[model],
+            key=lambda b: bucket_order.get(b.get("bucket", ""), 99),
+        )
+        if not rows:
+            continue
+        labels = [r.get("bucket", "?") for r in rows]
+        acc_vals = [_to_float(r.get("acc")) or 0.0 for r in rows]
+        mv_vals = [_to_float(r.get("mv_acc")) or 0.0 for r in rows]
+        fk_vals = [_to_float(r.get("fleiss_kappa")) or 0.0 for r in rows]
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharey=False)
+        axes[0].bar(labels, acc_vals, color="#4C72B0")
+        axes[0].set_title("Pass@1 Acc")
+        axes[0].set_ylim(0, 1)
+        axes[1].bar(labels, mv_vals, color="#55A868")
+        axes[1].set_title("Majority Vote Acc")
+        axes[1].set_ylim(0, 1)
+        axes[2].bar(labels, fk_vals, color="#C44E52")
+        axes[2].set_title("Fleiss κ")
+        axes[2].set_ylim(-0.2, 1)
+        for ax in axes:
+            ax.set_xlabel("entropy bucket (per-model)")
+        fig.suptitle(f"{model} — entropy-accuracy grid (per-model tertiles)")
+        fig.tight_layout()
+        safe = model.replace("/", "_").replace(":", "_")
+        out_path = out_dir / f"entropy_accuracy_grid_{safe}.png"
+        fig.savefig(out_path, dpi=140)
+        plt.close(fig)
+        if out_path.exists():
+            written.append(out_path)
+    return written
 
 
 def plot_belief_trajectories(
@@ -961,48 +999,44 @@ def render_all(run_dir: Path) -> list[Path]:
     figs_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
-    # Reliability diagrams.
-    rel_uncal = _read_json(analysis_dir / "reliability_data.json")
-    if rel_uncal:
-        out = figs_dir / "reliability_diagram_per_model.png"
-        plot_reliability(plt, rel_uncal, out, title="Reliability (uncalibrated)")
-        if out.exists():
-            written.append(out)
-    rel_cal = _read_json(analysis_dir / "reliability_data_calibrated.json")
-    if rel_cal:
-        out = figs_dir / "reliability_diagram_calibrated.png"
-        plot_reliability(plt, rel_cal, out, title="Reliability (calibrated)")
-        if out.exists():
-            written.append(out)
-
     summary_rows = _read_csv(analysis_dir / "per_model_summary.csv")
-    cal_summary_rows = _read_csv(analysis_dir / "per_model_summary_calibrated.csv")
     paired_rows = _read_csv(analysis_dir / "paired_delta_bi.csv")
-    decomp_rows = _read_csv(analysis_dir / "brier_decomposition.csv")
+    pairwise_v5_rows = _read_csv(analysis_dir / "pairwise_bootstrap.csv")
     by_diff_rows = _read_csv(analysis_dir / "per_model_by_difficulty.csv")
     paired_diff_rows = _read_csv(analysis_dir / "paired_delta_bi_by_difficulty.csv")
     pdp_rows = _read_csv(analysis_dir / "tool_usage_pdp.csv")
+    entropy_acc_rows = _read_csv(analysis_dir / "entropy_accuracy_bins.csv")
 
-    if summary_rows or cal_summary_rows:
-        out = figs_dir / "bi_bar_with_ci.png"
-        plot_bi_bar_with_ci(
-            plt,
-            summary_rows or cal_summary_rows,
-            paired_rows,
-            out,
-        )
+    # v5 main figure: FSS bar with CI.
+    if summary_rows:
+        out = figs_dir / "fss_bar_with_ci.png"
+        plot_fss_bar_with_ci(plt, summary_rows, pairwise_v5_rows, out)
         if out.exists():
             written.append(out)
 
+    # v5 main figure: ΔFSS forest.
+    if pairwise_v5_rows:
+        out = figs_dir / "delta_fss_forest.png"
+        plot_delta_fss_forest(plt, pairwise_v5_rows, out)
+        if out.exists():
+            written.append(out)
+
+    # v5 main figure: per-model entropy-Acc grid (Decision 9).
+    if entropy_acc_rows:
+        new_pngs = plot_entropy_accuracy_grid(plt, entropy_acc_rows, figs_dir)
+        written.extend(p for p in new_pngs if p not in written)
+
+    # Appendix: BI bar with CI (companion to FSS, for BLF anchoring — Decision 15).
+    if summary_rows:
+        out = figs_dir / "bi_bar_with_ci.png"
+        plot_bi_bar_with_ci(plt, summary_rows, paired_rows, out)
+        if out.exists():
+            written.append(out)
+
+    # Appendix: ΔBI forest plot (v4 carry-over).
     if paired_rows:
         out = figs_dir / "delta_bi_forest.png"
         plot_delta_bi_forest(plt, paired_rows, out)
-        if out.exists():
-            written.append(out)
-
-    if decomp_rows:
-        out = figs_dir / "brier_decomp_stacked.png"
-        plot_brier_decomposition(plt, decomp_rows, out)
         if out.exists():
             written.append(out)
 

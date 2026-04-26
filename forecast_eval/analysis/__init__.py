@@ -1,8 +1,8 @@
-"""Post-run statistics for one evaluation run.
+"""Post-run statistics for one evaluation run (v5: discrete-native primary).
 
 Reads `RUNS_ROOT/{run_id}/db/*.db` (one SQLite per model), computes the metric
-suite from FRAME.md §11, and writes the results as CSV/Markdown/JSON under
-`RUNS_ROOT/{run_id}/analysis/`.
+suite from `ANALYSIS_DESIGN_v5.md`, and writes the results as CSV/Markdown/JSON
+under `RUNS_ROOT/{run_id}/analysis/`.
 
 Pure read side: this module never mutates the per-model DBs.
 
@@ -12,19 +12,36 @@ Entry points:
     * `python -m forecast_eval.analysis RUNS_ROOT/{run_id}` — CLI to re-run
       analysis against existing DBs.
 
-The v4 refactor (probabilistic-analysis-v4 task 12) split the original
-single-file `analysis.py` into a package with focused modules:
+v5 changes from v4:
+
+* `calibration.py` deprecated and removed: at K=5 the empirical probability
+  has only 6 discrete levels per label, making Reliability Diagram /
+  Murphy decomposition / Platt scaling statistically meaningless. The 5
+  associated outputs (`reliability_data*.json` / `brier_decomposition.csv`
+  / `calibration_params.json` / `per_model_summary_calibrated.csv`) are no
+  longer written.
+* `consistency.py` is new: K-trial-only metrics — Fleiss' κ, predictive
+  entropy, entropy-accuracy joint analysis (per-model tertile bucketing),
+  VCI, MVG.
+* `inference.py` extended with `metric_paired_bootstrap` for FSS / Acc /
+  MV_Acc / Fleiss κ / EBI; the v4 BS-paired bootstrap is preserved
+  (grid analysis depends on it).
+* `accuracy.py` new functions: `tversky_score`, `fss`, `cohen_kappa`,
+  `hamming_score`. FSS is the v5 main metric.
+
+Module layout:
 
 * `flatten.py`     — `_flatten_db` pivot + `SampleRow` (incl. v4 `probabilities`).
-* `accuracy.py`    — pass@1 / pass_any@N / majority_vote / breakdowns.
-* `proper_score.py` — Phase 1 BS / NLL / MBS / BI / ABI (added in task 14).
-* `aggregation.py` — Phase 2 K-trial aggregators + LOO shrinkage (task 19).
-* `calibration.py` — Phase 2 Platt / temperature / ECE / Murphy + LOO (task 20).
-* `inference.py`   — Phase 2 paired bootstrap + Holm + difficulty tertile + posterior (task 21).
-* `writers.py`     — CSV / Markdown / JSON serialisation (incl. Phase 2 outputs).
+* `accuracy.py`    — pass@1 + v5 FSS / Cohen κ / Hamming.
+* `consistency.py` — v5 K-trial Fleiss κ / entropy / entropy-Acc bins / VCI / MVG.
+* `proper_score.py` — BS / NLL / MBS / BI / ABI (companion probabilistic).
+* `aggregation.py` — K-trial aggregators + LOO shrinkage.
+* `inference.py`   — v4 BS-paired bootstrap + v5 multi-metric paired bootstrap.
+* `behavior.py`    — belief evolution + reflection A/B + tool PDP + confidence (v3 / v4 carry-over).
+* `grid.py`        — grid (R, C) analysis (orthogonal to v5).
+* `writers.py`     — CSV / Markdown / JSON serialisation.
 
-The public surface area is intentionally tiny: external callers should only
-import `run_analysis` from this module.
+External callers should only import `run_analysis` from this module.
 """
 from __future__ import annotations
 
@@ -39,6 +56,9 @@ from .accuracy import (
     _error_breakdown,
     _finish_reason_breakdown,
     _slice_by,
+    cohen_kappa,
+    fss,
+    hamming_score,
 )
 from .aggregation import ShrinkageResult, loo_shrinkage
 from .behavior import (
@@ -49,20 +69,27 @@ from .behavior import (
     reflection_ab_report,
     tool_usage_pdp,
 )
-from .calibration import ModelCalibrationReport, calibrate_run
+from .consistency import (
+    ConsistencyReport,
+    build_consistency_report,
+    entropy_accuracy_bins,
+)
 from .flatten import (
     CUTOFF,
     SampleRow,
     _ANALYSIS_FIELDS,
     _answer_gt_for,
     _flatten_db,
+    _question_options_for,
     gt_vector,
 )
 from .inference import (
+    DEFAULT_METRIC_FNS,
     DifficultyTertile,
     PairedBootstrapResult,
     difficulty_tertile,
     paired_bootstrap_by_difficulty,
+    pairwise_metric_bootstrap,
     pairwise_paired_bootstrap,
 )
 from .probabilistic import (
@@ -77,23 +104,22 @@ from .proper_score import (
 from .writers import (
     _SUMMARY_FIELDS,
     _write_belief_evolution_csv,
-    _write_brier_decomposition_csv,
-    _write_calibration_params_json,
     _write_confidence_calibration_csv,
+    _write_entropy_accuracy_bins_csv,
     _write_error_breakdown_csv,
     _write_finish_reason_breakdown_csv,
+    _write_inter_trial_consistency_csv,
+    _write_metric_pairwise_bootstrap_csv,
     _write_numeric_confidence_calibration_csv,
     _write_overall_json,
     _write_paired_delta_bi_by_difficulty_csv,
     _write_paired_delta_bi_csv,
     _write_pairwise_significance_csv,
     _write_per_model_by_difficulty_csv,
-    _write_per_model_summary_calibrated_csv,
     _write_per_model_summary_csv,
     _write_per_model_summary_md,
     _write_posterior_pairwise_csv,
     _write_reflection_ab_csv,
-    _write_reliability_data_json,
     _write_shrinkage_alpha_curve_csv,
     _write_slice_csv,
     _write_tool_usage_pdp_csv,
@@ -253,7 +279,7 @@ def run_analysis(run_dir: Path) -> list[Path]:
     models: list[str] = manifest["models"]
     model_files: dict[str, str] = manifest["model_files"]
     sampling_n_top: int = manifest.get("sampling_n", 1)
-    # `analysis_schema` was added in v4 manifests. v3 runs replayed under v4
+    # `analysis_schema` was added in v4 manifests. v3 runs replayed under v4/v5
     # code don't carry the field; treat that as "v3 fallback semantics".
     analysis_schema: str | None = manifest.get("analysis_schema")
 
@@ -269,6 +295,7 @@ def run_analysis(run_dir: Path) -> list[Path]:
     sampling_n_by_model: dict[str, int] = {}
     samples_by_model: dict[str, list[SampleRow]] = {}
     gt_map_global: dict[str, frozenset[str]] = {}
+    options_map_global: dict[str, list[str]] = {}
 
     summary_payload: dict[str, tuple[int, Aggregate]] = {}
     slice_qtype_payload: dict[str, tuple[int, dict[str, Aggregate]]] = {}
@@ -288,11 +315,14 @@ def run_analysis(run_dir: Path) -> list[Path]:
             sampling_n_by_model[model] = sampling_n
             samples = _flatten_db(conn, sampling_n, model)
             gt_map = _answer_gt_for(conn)
+            options_map = _question_options_for(conn)
             # Each per-model DB carries its own `questions` copy. Union them
             # so the probabilistic crowd baseline can use a question even if
             # one of the models skipped it (e.g. cutoff).
             for qid, gt in gt_map.items():
                 gt_map_global.setdefault(qid, gt)
+            for qid, opts in options_map.items():
+                options_map_global.setdefault(qid, opts)
             agg = _aggregate(samples, sampling_n, gt_map=gt_map)
             agg_qtype = _slice_by(samples, lambda s: s.question_type, sampling_n, gt_map)
             agg_ctype = _slice_by(samples, lambda s: s.choice_type, sampling_n, gt_map)
@@ -310,15 +340,46 @@ def run_analysis(run_dir: Path) -> list[Path]:
 
     prob_report = build_probabilistic_report(samples_by_model, gt_map_global)
 
+    # ------------------------------------------------------------------ #
+    # v5 discrete-native family per model: FSS / Cohen κ / Hamming /
+    # ConsistencyReport / per-model entropy-Acc bins. All return None /
+    # empty-list on K=1 fixtures or missing data — graceful degradation.
+    # ------------------------------------------------------------------ #
+    fss_per_model: dict[str, dict] = {}
+    cohen_kappa_per_model: dict[str, float | None] = {}
+    hamming_per_model: dict[str, float | None] = {}
+    consistency_per_model: dict[str, ConsistencyReport] = {}
+    entropy_acc_per_model: dict[str, list[dict]] = {}
+    samples_by_model_by_q: dict[str, dict[str, list[SampleRow]]] = {}
+    for model, samples in samples_by_model.items():
+        fss_per_model[model] = fss(samples, gt_map_global)
+        # cohen_kappa needs samples grouped by question.
+        by_q: dict[str, list[SampleRow]] = {}
+        for s in samples:
+            by_q.setdefault(s.question_id, []).append(s)
+        samples_by_model_by_q[model] = by_q
+        cohen_kappa_per_model[model] = cohen_kappa(by_q, gt_map_global)
+        hamming_per_model[model] = hamming_score(samples, gt_map_global)
+        consistency_per_model[model] = build_consistency_report(
+            samples, gt_map_global, options_map_global,
+        )
+        entropy_acc_per_model[model] = entropy_accuracy_bins(
+            by_q, gt_map_global, options_map_global,
+        )
+
     written: list[Path] = []
-    # `per_model_summary.md` is written AFTER calibration so the markdown can
-    # surface uncal/cal columns + the `cal*` overfit warning (spec 20.8). The
-    # CSV is independent and can ship immediately.
+    # v5: per_model_summary.csv now carries v3 + FSS + Consistency + v4
+    # probabilistic columns; markdown synthesises them with the K=5
+    # disclaimer footnote.
     if summary_payload:
         written.append(_write_per_model_summary_csv(
             analysis_dir / "per_model_summary.csv",
             summary_payload,
             prob=prob_report.per_model,
+            fss_per_model=fss_per_model,
+            cohen_kappa_per_model=cohen_kappa_per_model,
+            hamming_per_model=hamming_per_model,
+            consistency_per_model=consistency_per_model,
         ))
     if slice_qtype_payload:
         written.append(_write_slice_csv(
@@ -357,13 +418,45 @@ def run_analysis(run_dir: Path) -> list[Path]:
     ))
 
     # ------------------------------------------------------------------ #
-    # Phase 2 deliverables — only attempted when at least one model
-    # produced probability vectors. Empty-input branches keep the analysis
-    # idempotent on v3 fixtures with no boxed answers.
+    # v5 K-trial consistency outputs — always produced; rows with K=1
+    # carry NULL aggregates but the row is present so the writer schema
+    # stays uniform.
+    # ------------------------------------------------------------------ #
+    if consistency_per_model:
+        written.append(_write_inter_trial_consistency_csv(
+            analysis_dir / "inter_trial_consistency.csv",
+            consistency_per_model,
+        ))
+    # Skip writing entropy_accuracy_bins.csv when no model produced any
+    # bucket (e.g. all-K=1 run) — empty file is more confusing than absent.
+    if any(bins for bins in entropy_acc_per_model.values()):
+        written.append(_write_entropy_accuracy_bins_csv(
+            analysis_dir / "entropy_accuracy_bins.csv",
+            entropy_acc_per_model,
+        ))
+
+    # ------------------------------------------------------------------ #
+    # v5 multi-metric paired bootstrap on FSS / Acc / MV_Acc / Fleiss κ /
+    # EBI. Skips metrics that return None on the data (e.g. EBI on
+    # v3-style fixtures, Fleiss κ on K=1).
+    # ------------------------------------------------------------------ #
+    if len(samples_by_model_by_q) >= 2:
+        metric_results = pairwise_metric_bootstrap(
+            samples_by_model_by_q, gt_map_global, DEFAULT_METRIC_FNS,
+        )
+        if metric_results:
+            written.append(_write_metric_pairwise_bootstrap_csv(
+                analysis_dir / "pairwise_bootstrap.csv",
+                metric_results,
+            ))
+
+    # ------------------------------------------------------------------ #
+    # v4 probabilistic deliverables — kept (Decision 3) as companion
+    # outputs; calibration / reliability / Murphy decomposition removed
+    # (Decision 2).
     # ------------------------------------------------------------------ #
     rows_by_model = prob_report.rows_by_model
     has_any_rows = any(rows for rows in rows_by_model.values())
-    cal_reports: dict[str, ModelCalibrationReport] = {}
     if has_any_rows:
         # Aggregation: per-(model, choice_type) shrinkage curves.
         shrinkage_per_key = _shrinkage_per_model_per_ctype(
@@ -375,36 +468,12 @@ def run_analysis(run_dir: Path) -> list[Path]:
                 shrinkage_per_key,
             ))
 
-        # Calibration: per-(model, cell) Platt / Temperature with LOO.
+        # Inference: pairwise paired bootstrap + Holm + posterior (BS-based,
+        # kept for grid.py dependency and the v4 probabilistic narrative).
         from .probabilistic import _build_crowd_gammas_per_model
 
         crowd_gammas_by_model = _build_crowd_gammas_per_model(rows_by_model)
         uniform_gammas_global = _gamma_uniform_per_qid(rows_by_model)
-        cal_reports = calibrate_run(
-            rows_by_model,
-            crowd_gammas_by_model=crowd_gammas_by_model,
-            uniform_gammas=uniform_gammas_global,
-        )
-        if cal_reports:
-            written.append(_write_calibration_params_json(
-                analysis_dir / "calibration_params.json", cal_reports,
-            ))
-            written.append(_write_per_model_summary_calibrated_csv(
-                analysis_dir / "per_model_summary_calibrated.csv", cal_reports,
-            ))
-            written.append(_write_reliability_data_json(
-                analysis_dir / "reliability_data.json",
-                cal_reports, calibrated=False,
-            ))
-            written.append(_write_reliability_data_json(
-                analysis_dir / "reliability_data_calibrated.json",
-                cal_reports, calibrated=True,
-            ))
-            written.append(_write_brier_decomposition_csv(
-                analysis_dir / "brier_decomposition.csv", cal_reports,
-            ))
-
-        # Inference: pairwise paired bootstrap + Holm + posterior.
         bs_by_model_qid = _bs_by_model_qid_from_rows(rows_by_model)
         if len(bs_by_model_qid) >= 2:
             pairs = pairwise_paired_bootstrap(bs_by_model_qid)
@@ -517,16 +586,19 @@ def run_analysis(run_dir: Path) -> list[Path]:
             "grid analysis failed; continuing without grid_*.csv outputs"
         )
 
-    # `per_model_summary.md` is written last so it can include calibration
-    # columns + the `cal*` overfit warning AND the Phase 3 `conflict*`
-    # marker. When neither Phase 2 nor Phase 3 outputs are available, the
-    # writer falls back to v3+Phase-1 columns automatically.
+    # `per_model_summary.md` is written last so it includes the v5 discrete
+    # family (FSS / Cohen κ / Fleiss κ / mean entropy / VCI / MVG) alongside
+    # the v3 accuracy columns and v4 companion probabilistic columns. The
+    # `conflict*` marker (Phase 3 confidence A/B) survives — the v5
+    # `cal*` marker is gone (calibration deprecated).
     if summary_payload:
         written.append(_write_per_model_summary_md(
             analysis_dir / "per_model_summary.md",
             summary_payload,
             prob=prob_report.per_model,
-            cal=cal_reports if cal_reports else None,
+            fss_per_model=fss_per_model,
+            cohen_kappa_per_model=cohen_kappa_per_model,
+            consistency_per_model=consistency_per_model,
             confidence_conflict_models=conflict_models or None,
         ))
     return written

@@ -441,8 +441,16 @@ def test_per_model_summary_csv_v3_columns_unchanged(tmp_path: Path) -> None:
         "avg_nudges_used",
     ]
     assert columns[: len(expected_v3)] == expected_v3
-    # And the trailing columns must exactly match the Phase 1 additions.
-    assert columns[len(expected_v3):] == [
+    # v5 inserts 8 discrete-native + consistency columns between v3 and v4
+    # probabilistic columns (Decision: FSS-family next to pass@1).
+    expected_v5 = [
+        "fss", "fss_pe_mean", "cohen_kappa", "hamming_score",
+        "fleiss_kappa", "mean_entropy", "vci", "mvg",
+    ]
+    assert columns[len(expected_v3):len(expected_v3) + len(expected_v5)] == expected_v5
+    # v4 probabilistic family is now the trailing block (not the only
+    # post-v3 block as in v4 layout).
+    assert columns[len(expected_v3) + len(expected_v5):] == [
         "bi", "bi_dec", "nll", "mbs", "abi_crowd", "abi_uniform", "fallback_share",
     ]
 
@@ -467,30 +475,43 @@ def test_overall_json_carries_analysis_schema(tmp_path: Path) -> None:
 
 
 def test_phase2_deliverables_present(tmp_path: Path) -> None:
-    """Phase 2 task 22 / 24.1: every spec'd output file lands under analysis/.
+    """v5: every spec'd output file lands under analysis/.
 
     The fixture goes through the §2.4 fallback path (belief_final IS NULL),
-    which is enough to exercise every Phase 2 writer: shrinkage scans the
-    fallback probability vectors, calibration fits on them, paired bootstrap
-    contrasts m/a vs m/b, and the difficulty tertile slices the union set.
+    which is enough to exercise the writers: shrinkage scans the fallback
+    probability vectors, BS-paired bootstrap contrasts m/a vs m/b, the
+    difficulty tertile slices the union set, and the v5 inter-trial
+    consistency / pairwise bootstrap files emit.
+
+    Calibration / Reliability / Murphy decomposition outputs are gone in v5
+    (Decision 2 — K=5 makes them statistically meaningless).
     """
     run_dir = _build_fixture_run(tmp_path)
     written = {p.name for p in analysis.run_analysis(run_dir)}
     expected = {
         "shrinkage_alpha_curve.csv",
-        "calibration_params.json",
-        "per_model_summary_calibrated.csv",
-        "reliability_data.json",
-        "reliability_data_calibrated.json",
-        "brier_decomposition.csv",
         "paired_delta_bi.csv",
         "pairwise_significance.csv",
         "posterior_pairwise.csv",
         "per_model_by_difficulty.csv",
         "paired_delta_bi_by_difficulty.csv",
+        # v5 additions
+        "inter_trial_consistency.csv",
+        "pairwise_bootstrap.csv",
     }
     missing = expected - written
-    assert not missing, f"Phase 2 outputs missing: {sorted(missing)}"
+    assert not missing, f"Expected outputs missing: {sorted(missing)}"
+    # v5 removed outputs MUST NOT appear.
+    forbidden = {
+        "calibration_params.json",
+        "per_model_summary_calibrated.csv",
+        "reliability_data.json",
+        "reliability_data_calibrated.json",
+        "brier_decomposition.csv",
+    }
+    assert not (forbidden & written), (
+        f"v5 deprecated outputs leaked: {sorted(forbidden & written)}"
+    )
 
 
 def test_shrinkage_alpha_curve_csv_format(tmp_path: Path) -> None:
@@ -511,44 +532,6 @@ def test_shrinkage_alpha_curve_csv_format(tmp_path: Path) -> None:
     seen_alphas = sorted({float(r["alpha"]) for r in rows})
     assert seen_alphas[0] == pytest.approx(0.0)
     assert seen_alphas[-1] == pytest.approx(1.0)
-
-
-def test_calibration_params_json_layout(tmp_path: Path) -> None:
-    """`calibration_params.json`: per-model per-cell with method + numeric params."""
-    run_dir = _build_fixture_run(tmp_path)
-    analysis.run_analysis(run_dir)
-    payload = json.loads((run_dir / "analysis" / "calibration_params.json").read_text())
-    # m/a and m/b both fitted.
-    assert set(payload) == {"m/a", "m/b"}
-    for model_cells in payload.values():
-        for cell_name, cell in model_cells.items():
-            assert "method" in cell
-            assert cell["method"] in ("platt", "temperature")
-            if cell["method"] == "platt":
-                assert "a" in cell and "b" in cell
-            else:
-                assert "T" in cell
-            assert "n_questions" in cell
-            assert "question_type" in cell
-            assert "choice_type" in cell
-
-
-def test_per_model_summary_calibrated_csv_columns(tmp_path: Path) -> None:
-    run_dir = _build_fixture_run(tmp_path)
-    analysis.run_analysis(run_dir)
-    path = run_dir / "analysis" / "per_model_summary_calibrated.csv"
-    with path.open(encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        cols = reader.fieldnames or []
-    for required in (
-        "model", "n_questions", "fallback_share",
-        "bi_uncal", "bi_cal", "nll_uncal", "nll_cal",
-        "ece_uncal", "ece_cal",
-        "abi_crowd_uncal", "abi_crowd_cal",
-        "abi_uniform_uncal", "abi_uniform_cal",
-        "overfit_warning",
-    ):
-        assert required in cols, f"missing column {required}"
 
 
 def test_paired_delta_bi_includes_holm(tmp_path: Path) -> None:
@@ -587,34 +570,6 @@ def test_per_model_by_difficulty_three_tiers(tmp_path: Path) -> None:
         assert int(r["n_questions"]) >= 0
 
 
-def test_brier_decomposition_csv_has_uncal_and_cal(tmp_path: Path) -> None:
-    run_dir = _build_fixture_run(tmp_path)
-    analysis.run_analysis(run_dir)
-    path = run_dir / "analysis" / "brier_decomposition.csv"
-    with path.open(encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-        cols = reader.fieldnames or []
-    for required in ("model", "kind", "rel", "res", "unc", "total"):
-        assert required in cols
-    kinds = {r["kind"] for r in rows}
-    assert kinds.issubset({"uncalibrated", "calibrated"})
-
-
-def test_reliability_data_json_layout(tmp_path: Path) -> None:
-    run_dir = _build_fixture_run(tmp_path)
-    analysis.run_analysis(run_dir)
-    uncal = json.loads((run_dir / "analysis" / "reliability_data.json").read_text())
-    cal = json.loads((run_dir / "analysis" / "reliability_data_calibrated.json").read_text())
-    # Same model set in both.
-    assert set(uncal) == set(cal)
-    for model in uncal:
-        for qtype, bins in uncal[model].items():
-            assert isinstance(bins, list)
-            for b in bins:
-                assert {"bin_lo", "bin_hi", "n", "mean_p", "mean_o"}.issubset(b)
-
-
 def test_posterior_pairwise_csv_probabilities_in_unit_interval(tmp_path: Path) -> None:
     run_dir = _build_fixture_run(tmp_path)
     analysis.run_analysis(run_dir)
@@ -625,3 +580,85 @@ def test_posterior_pairwise_csv_probabilities_in_unit_interval(tmp_path: Path) -
     for r in rows:
         p = float(r["prob_a_better"])
         assert 0.0 <= p <= 1.0
+
+
+# --------------------------------------------------------------------------- #
+# v5 writer-level tests (Phase D / E)
+# --------------------------------------------------------------------------- #
+
+
+def test_per_model_summary_csv_has_v5_columns(tmp_path: Path) -> None:
+    """v5 columns are present and at least one model has values populated."""
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    path = run_dir / "analysis" / "per_model_summary.csv"
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        cols = reader.fieldnames or []
+        rows = list(reader)
+    for required in (
+        "fss", "fss_pe_mean", "cohen_kappa", "hamming_score",
+        "fleiss_kappa", "mean_entropy", "vci", "mvg",
+    ):
+        assert required in cols, f"v5 column missing: {required}"
+    # At least one model should have a numeric FSS (the fixture has scoreable
+    # questions for both models on q1 + q2).
+    fss_values = [r["fss"] for r in rows if r["fss"]]
+    assert fss_values, "Expected at least one model with non-empty FSS"
+
+
+def test_per_model_summary_md_no_calibration_columns(tmp_path: Path) -> None:
+    """v5 markdown removes BI_cal / NLL_cal / ECE_* columns and the cal* marker."""
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    md = (run_dir / "analysis" / "per_model_summary.md").read_text(encoding="utf-8")
+    for forbidden in ("BI_cal", "NLL_cal", "ECE_uncal", "ECE_cal", "cal*"):
+        assert forbidden not in md, f"v5 markdown contains forbidden token: {forbidden}"
+    # FSS column heading is present in the table (sandwiched between pass@1
+    # and pass_any@N — Decision: FSS adjacent to pass@1).
+    assert "FSS" in md
+    # K=5 disclaimer footnote is present.
+    assert "K=5 parallel trials" in md or "discrete probability" in md
+
+
+def test_inter_trial_consistency_csv_format(tmp_path: Path) -> None:
+    """v5: inter_trial_consistency.csv has one row per model with the 5 columns."""
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    path = run_dir / "analysis" / "inter_trial_consistency.csv"
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        cols = reader.fieldnames or []
+        rows = list(reader)
+    assert cols == [
+        "model", "fleiss_kappa", "mean_entropy", "vci", "mvg",
+        "n_questions_used",
+    ]
+    assert len(rows) == 2  # m/a + m/b
+    model_names = {r["model"] for r in rows}
+    assert model_names == {"m/a", "m/b"}
+
+
+def test_metric_pairwise_bootstrap_csv_format(tmp_path: Path) -> None:
+    """v5: pairwise_bootstrap.csv has the v5 column schema and at least one
+    metric reports rows for the m/a vs m/b pair."""
+    run_dir = _build_fixture_run(tmp_path)
+    analysis.run_analysis(run_dir)
+    path = run_dir / "analysis" / "pairwise_bootstrap.csv"
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        cols = reader.fieldnames or []
+        rows = list(reader)
+    assert cols == [
+        "metric", "model_a", "model_b", "n_questions",
+        "delta_mean", "ci_low", "ci_high",
+        "p_value", "cohens_d", "sig_at_05",
+    ]
+    # At least FSS or Acc should produce a row for m/a vs m/b.
+    pair_rows = [
+        r for r in rows
+        if r["model_a"] == "m/a" and r["model_b"] == "m/b"
+    ]
+    assert pair_rows, "Expected at least one metric for m/a vs m/b pair"
+    metric_names = {r["metric"] for r in pair_rows}
+    assert metric_names & {"fss", "acc"}

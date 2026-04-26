@@ -93,34 +93,38 @@ runs/
     db/
       {model_slug}.db       # one SQLite per model (see schema below)
     analysis/               # generated after the run finishes
-      per_model_summary.csv         # accuracy + v4 probabilistic columns
+      per_model_summary.csv         # v3 accuracy + v5 discrete-native
+                                    #   (FSS / Cohen κ / Hamming / Fleiss κ /
+                                    #    mean entropy / VCI / MVG) +
+                                    #   v4 companion probabilistic
                                     #   (bi / bi_dec / nll / mbs /
                                     #    abi_crowd / abi_uniform /
                                     #    fallback_share)
-      per_model_summary.md          # markdown table; Phase 2 adds
-                                    #   BI_cal / NLL_cal / ECE_uncal /
-                                    #   ECE_cal columns + `cal*` overfit
-                                    #   marker when LOO calibration looks
-                                    #   over-confident
-      per_model_summary_calibrated.csv  # Phase 2: BI/NLL/ECE/ABI uncal+cal
+      per_model_summary.md          # markdown table with v5 main columns;
+                                    #   probabilistic columns flagged with
+                                    #   `†` and a K=5-resolution disclaimer
       per_model_by_question_type.csv
       per_model_by_choice_type.csv
-      per_model_by_difficulty.csv   # Phase 2: γ-tertile slice (low/mid/high)
+      per_model_by_difficulty.csv   # γ-tertile slice (low/mid/high)
       error_breakdown.csv           # byte-regression-tested vs v3
       finish_reason_breakdown.csv   # byte-regression-tested vs v3
       overall.json                  # full structured aggregate, with
                                     #   `probabilistic` sub-object and
                                     #   `analysis_schema` mirrored from
                                     #   manifest
-      # ---- Phase 2 calibration ----
-      calibration_params.json       # per-(model, cell) Platt / temperature
-      reliability_data.json
-      reliability_data_calibrated.json
-      brier_decomposition.csv       # Murphy rel/res/unc, uncal + cal
-      # ---- Phase 2 aggregation ----
+      # ---- v5 K-trial consistency ----
+      inter_trial_consistency.csv   # per-model Fleiss κ / mean entropy /
+                                    #   VCI / MVG
+      entropy_accuracy_bins.csv     # per-model × tertile (Acc / MV Acc /
+                                    #   Fleiss κ); per-model bucket
+                                    #   boundaries differ by design
+      pairwise_bootstrap.csv        # multi-metric paired bootstrap:
+                                    #   FSS / Acc / MV_Acc / Fleiss κ / EBI ×
+                                    #   model pairs × ΔMean / 95% CI /
+                                    #   p-value / Cohen's d / sig flag
+      # ---- v4 probabilistic (companion) ----
       shrinkage_alpha_curve.csv     # per-(model, ctype) LOO α scan
-      # ---- Phase 2 inference ----
-      paired_delta_bi.csv           # pairwise ΔBS + Holm-adj p + posterior
+      paired_delta_bi.csv           # BS-paired ΔBS + Holm-adj p + posterior
       pairwise_significance.csv     # α=0.05 flag (raw + Holm)
       posterior_pairwise.csv        # P(BI_A > BI_B)
       paired_delta_bi_by_difficulty.csv  # paired bootstrap per tertile
@@ -209,12 +213,39 @@ python scripts/plot_analysis.py runs/{run_id}
 ```
 
 This populates `runs/{run_id}/analysis/figs/` (already in `.gitignore`) with
-reliability diagrams (uncal + cal), BI bar charts with paired-bootstrap CIs,
-ΔBI forest, Murphy three-decomposition stacked bars, per-question belief
-trajectories (5 sample questions), tool-usage PDP per feature, and a
-difficulty grid heatmap. Each plot is best-effort: when the corresponding
-CSV/JSON is missing (e.g. no paired runs → no `reflection_ab.csv`), the
-plot is silently skipped instead of failing the whole pipeline.
+**v5 main figures**: FSS bar with CI, ΔFSS forest, per-model entropy-Acc
+grid (3 buckets × 3 metrics: Acc / MV Acc / Fleiss κ); plus **appendix /
+companion figures**: BI bar with CI (BLF anchor), ΔBI forest, difficulty
+grid heatmap, per-question belief trajectories (5 sample questions), and
+tool-usage PDP per feature. v5 removed the reliability-diagram and Murphy
+three-decomposition figures (Decision 2: K=5 makes them statistically
+meaningless). Each plot is best-effort: when the corresponding CSV/JSON
+is missing, the plot is silently skipped instead of failing the pipeline.
+
+### On-demand FSS sensitivity (v5)
+
+`per_model_summary.csv` reports a single canonical FSS at the published
+$(α, β) = (2, 0.5)$. Reviewers asking "why not Jaccard $(1, 1)$ or strict
+$(3, 0.5)$?" run the sensitivity sweep on demand:
+
+```bash
+python scripts/fss_sensitivity.py runs/{run_id}              # 4-tier sweep
+python scripts/fss_sensitivity.py runs/{run_id} --alpha 1 --beta 1   # single point
+```
+
+This writes `runs/{run_id}/analysis/fss_sensitivity.csv` with one row per
+(model, $(α, β)$). The default sweep covers four tiers:
+
+| (α, β)    | Semantics                                        |
+| --------- | ------------------------------------------------ |
+| (1, 1)    | Jaccard / symmetric — FP and FN equally penalised |
+| (1, 0.5)  | Mild asymmetry — multi-selection error 2× missed |
+| (2, 0.5)  | **v5 default** — multi-selection error 4× missed |
+| (3, 0.5)  | Strict — multi-selection error 6× missed         |
+
+The script is **not** invoked by `run_analysis`; the sensitivity CSV
+carries a provenance comment on top so a reviewer reading the bare file
+won't mistake it for the main metric.
 
 ## Grid search quickstart
 
