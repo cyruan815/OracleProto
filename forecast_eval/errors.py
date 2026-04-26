@@ -27,6 +27,33 @@ class AuthError(Exception):
     """
 
 
+# v5.1 (harness-resilience): content-policy needles for HTTP 400 bodies.
+# `_body_matches` runs case-insensitive substring matching on `_error_body`,
+# so needles MUST be lowercase ASCII or already-lowercase-CJK (CJK is not
+# affected by .lower()). Update only here when a new provider's rejection
+# vocabulary appears.
+#
+# Coverage:
+# - English (OpenAI / Anthropic style): content_policy / content_filter / safety
+# - Aliyun DashScope (qwen* via dashscope.aliyuncs.com): data_inspection_failed,
+#   "inappropriate content" (the canonical message body)
+# - 智谱 / 百川 / 月之暗面 / 通用国内 provider: 中文审核 token
+CONTENT_POLICY_NEEDLES: tuple[str, ...] = (
+    "content_policy",
+    "content filter",
+    "content_filter",
+    "safety",
+    "content_policy_violation",
+    "data_inspection_failed",
+    "inappropriate content",
+    "sensitive",
+    "敏感",
+    "违规",
+    "不当内容",
+    "审核未通过",
+)
+
+
 def _status_code(exc: BaseException) -> Optional[int]:
     """Try to pull an HTTP status code out of an httpx / openai exception."""
     resp = getattr(exc, "response", None)
@@ -63,8 +90,28 @@ def _body_matches(exc: BaseException, needles: tuple[str, ...]) -> bool:
 
 
 def classify(exc: BaseException) -> ErrorKind:
-    """Map an outgoing-HTTP exception to a coarse ErrorKind for retry decisions."""
-    if isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout)):
+    """Map an outgoing-HTTP exception to a coarse ErrorKind for retry decisions.
+
+    Network family covers the full httpx transient-failure set: connect /
+    read / write / pool timeouts plus `RemoteProtocolError` (server hung up
+    mid-response) — all of these are bona-fide network blips that earn a
+    retry, not data errors that should fail the sample. Older versions of
+    this function only listed `ConnectError / ReadTimeout / ConnectTimeout /
+    WriteTimeout`, which dropped `RemoteProtocolError` into `UNKNOWN` and the
+    sample failed with no retry.
+    """
+    if isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+            httpx.WriteTimeout,
+            httpx.WriteError,
+            httpx.PoolTimeout,
+            httpx.RemoteProtocolError,
+        ),
+    ):
         return ErrorKind.NETWORK
     if isinstance(exc, asyncio.TimeoutError):
         return ErrorKind.NETWORK
@@ -78,7 +125,12 @@ def classify(exc: BaseException) -> ErrorKind:
         if 500 <= code <= 599:
             return ErrorKind.SERVER_5XX
         if code == 400:
-            if _body_matches(exc, ("content_policy", "content filter", "content_filter", "safety")):
+            # CONTENT_POLICY MUST be checked before BAD_REQUEST. Some bodies
+            # carry both `data_inspection_failed` (provider-side moderation,
+            # we should not retry but ALSO should not silently look like a
+            # bug-in-our-request) and a generic "invalid request" wrapper.
+            # Spec llm-integration §"Content policy 不重试" pins priority.
+            if _body_matches(exc, CONTENT_POLICY_NEEDLES):
                 return ErrorKind.CONTENT_POLICY
             if _body_matches(exc, ("model_not_found", "invalid_request", "invalid request", "invalid model")):
                 return ErrorKind.BAD_REQUEST

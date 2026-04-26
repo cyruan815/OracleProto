@@ -96,6 +96,12 @@ class SampleResult:
     belief_trace: str | None
     belief_parse_ok: int
 
+    # v5.1 (harness-resilience) — 1 iff the ReAct loop exited with an empty
+    # `final_raw` and the no-tool bail-out retry kicked in. 0 otherwise. The
+    # field has a default so legacy callers (cutoff / error-row builders)
+    # don't need to pass it explicitly.
+    final_answer_retry_used: int = 0
+
     def to_row(self) -> dict[str, Any]:
         """Shape matching `forecast_eval.db.AsyncWriter.enqueue_result`.
 
@@ -130,6 +136,7 @@ class SampleResult:
             "belief_final": self.belief_final,
             "belief_trace": self.belief_trace,
             "belief_parse_ok": self.belief_parse_ok,
+            "final_answer_retry_used": self.final_answer_retry_used,
         }
 
 

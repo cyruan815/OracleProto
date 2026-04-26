@@ -142,6 +142,13 @@ class Settings(BaseSettings):
     REACT_MIN_SEARCH_CALLS: int = 0
     # nudge 最多注入几次, 防止 LLM 与系统互相 nudge 死循环. REACT_MAX_STEPS 仍是硬天花板.
     REACT_MAX_NUDGES: int = 2
+    # v5.1 harness-resilience 开关: 默认开, 允许关闭做对照实验.
+    # 见 openspec/changes/harness-resilience-v1.
+    # REACT_FINAL_ANSWER_RETRY=True: 循环正常结束但 final_raw=="" 时, 用 tools=[] 再调一次 LLM.
+    # REACT_BUDGET_EXCEEDED_DROP_TOOLS=True: 一旦累计 web_search >= REACT_MAX_SEARCH_CALLS, 之后
+    #   每轮都以 tools=[] 调用 LLM, 让模型只能输出 content (而非反复撞 budget exceeded).
+    REACT_FINAL_ANSWER_RETRY: bool = True
+    REACT_BUDGET_EXCEEDED_DROP_TOOLS: bool = True
 
     # 网格搜索锚点 (可选): 当 .env 配置多值 R / C 时, paper 主图固定 R = GRID_DEFAULT_R
     # 画 BI vs C 曲线; 类似地 GRID_DEFAULT_C 控制 BI vs R 曲线的 C 锚点. 未设置时
@@ -390,6 +397,17 @@ class Settings(BaseSettings):
             )
         if self.REACT_MAX_NUDGES < 0:
             raise ValueError("REACT_MAX_NUDGES must be >= 0")
+        # v5.1 harness-resilience 开关: pydantic 已校验 bool 类型; 这里只做防御性 type guard,
+        # 防止测试通过 model_copy(update={...}) 把任意值塞进来.
+        if not isinstance(self.REACT_FINAL_ANSWER_RETRY, bool):
+            raise ValueError(
+                f"REACT_FINAL_ANSWER_RETRY must be bool; got {type(self.REACT_FINAL_ANSWER_RETRY).__name__}"
+            )
+        if not isinstance(self.REACT_BUDGET_EXCEEDED_DROP_TOOLS, bool):
+            raise ValueError(
+                f"REACT_BUDGET_EXCEEDED_DROP_TOOLS must be bool; got "
+                f"{type(self.REACT_BUDGET_EXCEEDED_DROP_TOOLS).__name__}"
+            )
         if self.TAVILY_RAW_CONTENT_MAX_CHARS < 0:
             raise ValueError("TAVILY_RAW_CONTENT_MAX_CHARS must be >= 0 (0 = no truncation)")
         # Optional grid anchors: when set, must be one of the configured cells.

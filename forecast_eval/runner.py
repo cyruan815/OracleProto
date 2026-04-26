@@ -88,6 +88,7 @@ def _skipped_cutoff_row(q: Question, sample_idx: int) -> dict[str, Any]:
         belief_final=None,
         belief_trace=None,
         belief_parse_ok=0,
+        final_answer_retry_used=0,
     ).to_row()
 
 
@@ -124,6 +125,7 @@ def _error_row(q: Question, sample_idx: int, error: str) -> dict[str, Any]:
         belief_final=None,
         belief_trace=None,
         belief_parse_ok=0,
+        final_answer_retry_used=0,
     ).to_row()
 
 
@@ -281,7 +283,7 @@ def _log_progress(
         )
     else:
         logger.info(
-            "[run={}] [{}/{}] q={} qt={} ct={} model={} sample={}/{} correct={} parse_ok={} steps={} tool_calls={} latency={}ms",
+            "[run={}] [{}/{}] q={} qt={} ct={} model={} sample={}/{} correct={} parse_ok={} steps={} tool_calls={} latency={}ms retry={}",
             run_id,
             done,
             total,
@@ -296,6 +298,7 @@ def _log_progress(
             row.get("react_steps"),
             row.get("tool_calls_count"),
             row.get("latency_ms"),
+            row.get("final_answer_retry_used"),
         )
 
 

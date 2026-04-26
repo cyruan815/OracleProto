@@ -25,16 +25,17 @@ from typing import Any, Iterable
 from .config import Settings
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 # ---------- Per-sample column definitions ----------
 
 # Each sample_idx contributes this column suite (prefixed with "s{i}_").
 # v3 (2026-04) appended 6 observability columns at the tail; v4 (2026-04)
-# appends 3 belief columns. Keep the order stable: existing code assumes new
-# fields land after `created_at`, and the migration path adds them with
-# `ALTER TABLE ADD COLUMN` in this same order.
+# appends 3 belief columns; v5 (2026-04, harness-resilience) appends 1
+# `final_answer_retry_used` indicator. Keep the order stable: existing code
+# assumes new fields land after `created_at`, and the migration path adds them
+# with `ALTER TABLE ADD COLUMN` in this same order.
 PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("final_answer_letters", "TEXT"),
     ("final_answer_raw", "TEXT"),
@@ -59,6 +60,7 @@ PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("belief_final", "TEXT"),
     ("belief_trace", "TEXT"),
     ("belief_parse_ok", "INTEGER"),
+    ("final_answer_retry_used", "INTEGER"),
 )
 PER_SAMPLE_FIELD_NAMES: tuple[str, ...] = tuple(name for name, _ in PER_SAMPLE_COLUMNS)
 
@@ -88,6 +90,14 @@ _V4_NEW_PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
 _V4_NEW_RUN_META_COLUMNS: tuple[tuple[str, str], ...] = (
     ("belief_protocol_text", "TEXT"),
     ("belief_protocol_hash", "TEXT"),
+)
+
+# Columns added in v5 (harness-resilience: final_answer_retry tracker). Same
+# idempotent ALTER TABLE template as v3 / v4. Only one new per-sample column;
+# no run_meta column added (the run-wide config_snapshot already records the
+# REACT_FINAL_ANSWER_RETRY / REACT_BUDGET_EXCEEDED_DROP_TOOLS settings).
+_V5_NEW_PER_SAMPLE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("final_answer_retry_used", "INTEGER"),
 )
 
 
@@ -196,6 +206,7 @@ def init_schema(conn: sqlite3.Connection, sampling_n: int) -> None:
     conn.executescript(_run_results_ddl(sampling_n))
     _migrate_v2_to_v3(conn, sampling_n)
     _migrate_v3_to_v4(conn, sampling_n)
+    _migrate_v4_to_v5(conn, sampling_n)
     row = conn.execute(
         "SELECT version FROM schema_version WHERE version = ?",
         (SCHEMA_VERSION,),
@@ -295,6 +306,41 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection, sampling_n: int) -> None:
         conn.execute(
             "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
             (4, utcnow_iso()),
+        )
+
+
+def _migrate_v4_to_v5(conn: sqlite3.Connection, sampling_n: int) -> None:
+    """Add the v5 harness-resilience columns when an existing DB is still v4.
+
+    Same idempotent template as `_migrate_v3_to_v4`: inspect `PRAGMA table_info`
+    first, only ALTER missing columns, stamp `version=5` only when an actual
+    upgrade happened from a v4 stamp. Brand-new v5 DBs land at version=5 via
+    `init_schema`'s tail INSERT, not via this migration's stamp.
+    """
+    versions = {
+        int(r["version"])
+        for r in conn.execute("SELECT version FROM schema_version").fetchall()
+    }
+    if 5 in versions:
+        return
+
+    existing_results = {
+        r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()
+    }
+
+    altered = False
+    for i in range(sampling_n):
+        for name, sql_type in _V5_NEW_PER_SAMPLE_COLUMNS:
+            col = sample_col(i, name)
+            if col in existing_results:
+                continue
+            conn.execute(f"ALTER TABLE run_results ADD COLUMN {col} {sql_type}")
+            altered = True
+
+    if altered and 4 in versions:
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (5, utcnow_iso()),
         )
 
 
@@ -625,6 +671,8 @@ class AsyncWriter:
             "belief_final": str | None,
             "belief_trace": str | None,
             "belief_parse_ok": int,
+            # v5 harness-resilience column:
+            "final_answer_retry_used": int,
         }
 
     The writer looks up `sample_idx` and UPSERTs the matching `s{i}_*` columns

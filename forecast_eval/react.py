@@ -181,12 +181,26 @@ async def run_react(
 
     for step in range(settings.REACT_MAX_STEPS):
         steps_executed = step + 1
+        # v5.1 (harness-resilience) D1: once the cumulative web_search budget
+        # is spent, drop the tool schema for subsequent LLM calls so the model
+        # is forced down the no-tool path (assistant_msg.tool_calls becomes
+        # empty → existing `if not tool_calls: ... break` finalises). Default
+        # opt-out via REACT_BUDGET_EXCEEDED_DROP_TOOLS=False restores legacy
+        # behaviour (model keeps requesting web_search and gets `search budget
+        # exceeded` tool_result echoes).
+        if (
+            settings.REACT_BUDGET_EXCEEDED_DROP_TOOLS
+            and len(search_calls) >= settings.REACT_MAX_SEARCH_CALLS
+        ):
+            tools_for_this_step: list[dict[str, Any]] = []
+        else:
+            tools_for_this_step = tool_schemas
         t_step_start = time.monotonic()
         resp = await llm_chat(
             model=model,
             messages=messages,
             settings=settings,
-            tools=tool_schemas,
+            tools=tools_for_this_step,
         )
         t_step_ms = int((time.monotonic() - t_step_start) * 1000)
         assistant_msg = resp.message
@@ -270,6 +284,49 @@ async def run_react(
             messages.append(tool_result_message(tc_id, result.to_llm_payload()))
 
     # Loop exited either by break or by exhausting REACT_MAX_STEPS.
+    # v5.1 (harness-resilience) D2: if the loop exited cleanly with an empty
+    # `final_raw` (e.g. step budget consumed by tool_calls and the model never
+    # produced a content turn), nudge once with `tools=[]` to force a
+    # `\boxed{...}` answer. We do NOT increment `nudges_used` (semantically
+    # different from "nudge to keep searching"); we DO add the call to
+    # `react_steps` and `step_metrics` so the trace stays auditable.
+    final_answer_retry_used = 0
+    if final_raw == "" and settings.REACT_FINAL_ANSWER_RETRY:
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Time to commit. Output your final \\boxed{...} answer now "
+                    "without further searches or tool calls."
+                ),
+            }
+        )
+        t_retry_start = time.monotonic()
+        retry_resp = await llm_chat(
+            model=model,
+            messages=messages,
+            settings=settings,
+            tools=[],
+        )
+        t_retry_ms = int((time.monotonic() - t_retry_start) * 1000)
+        retry_msg = retry_resp.message
+        # Skip belief parsing on the bail-out turn — we are explicitly asking
+        # for a boxed answer, not a structured belief block.
+        beliefs_per_step.append(None)
+        _record_step(
+            step_metrics,
+            tokens,
+            step=steps_executed,
+            resp=retry_resp,
+            latency_ms=t_retry_ms,
+            belief=None,
+        )
+        last_resp = retry_resp
+        messages.append(retry_msg)
+        steps_executed += 1
+        final_raw = retry_msg.get("content") or ""
+        final_answer_retry_used = 1
+
     parsed = parse_answer(final_raw, q)
     try:
         gt = parse_gt(q.answer)
@@ -315,6 +372,7 @@ async def run_react(
         belief_final=belief_final,
         belief_trace=belief_trace,
         belief_parse_ok=belief_parse_ok,
+        final_answer_retry_used=final_answer_retry_used,
     )
 
 
