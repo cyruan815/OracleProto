@@ -313,3 +313,318 @@ def test_pairwise_paired_bootstrap_intersection_only():
 
 def test_pairwise_paired_bootstrap_empty_input():
     assert pairwise_paired_bootstrap({}) == []
+
+
+# --------------------------------------------------------------------------- #
+# v5 multi-metric paired bootstrap
+# --------------------------------------------------------------------------- #
+
+
+def _make_sample(
+    *,
+    model: str,
+    question_id: str,
+    sample_idx: int = 0,
+    parsed: frozenset[str] | None = None,
+    options: list[str] | None = None,
+    correct: int | None = 1,
+    parse_ok: int = 1,
+    choice_type: str = "single",
+    probabilities: list[float] | None = None,
+):
+    """Construct a SampleRow with v5-friendly defaults."""
+    import json as _json
+
+    from forecast_eval.analysis.flatten import SampleRow as _SR
+
+    if options is None:
+        options = ["A", "B", "C", "D"]
+    final = _json.dumps(sorted(parsed)) if parsed is not None else None
+    return _SR(
+        model=model,
+        question_id=question_id,
+        question_type="single",
+        choice_type=choice_type,
+        options=options,
+        sample_idx=sample_idx,
+        correct=correct,
+        parse_ok=parse_ok,
+        tool_calls_count=0,
+        react_steps=0,
+        prompt_tokens=0,
+        completion_tokens=0,
+        reasoning_tokens=0,
+        latency_ms=0,
+        final_answer_letters=final,
+        error=None,
+        created_at="2026-04-26T00:00:00Z",
+        finish_reason="stop",
+        nudges_used=0,
+        belief_final=None,
+        belief_trace=None,
+        belief_parse_ok=0,
+        probabilities=probabilities,
+        is_fallback=False,
+    )
+
+
+def _build_two_model_fixture(
+    *,
+    n_questions: int,
+    K: int,
+    a_correct_per_q: list[int],
+    b_correct_per_q: list[int],
+):
+    """Build (samples_a_by_q, samples_b_by_q, gt_map): each model gets
+    `correct_per_q` correct trials out of K on each question."""
+    samples_a_by_q: dict = {}
+    samples_b_by_q: dict = {}
+    gt_map: dict = {}
+    for qi in range(n_questions):
+        qid = f"q{qi}"
+        gt = frozenset({"A"})
+        gt_map[qid] = gt
+        a_correct = a_correct_per_q[qi]
+        b_correct = b_correct_per_q[qi]
+        a_list = []
+        b_list = []
+        for k in range(K):
+            a_letter = "A" if k < a_correct else "B"
+            b_letter = "A" if k < b_correct else "B"
+            a_list.append(_make_sample(
+                model="model_a", question_id=qid, sample_idx=k,
+                parsed=frozenset({a_letter}),
+                correct=1 if a_letter == "A" else 0,
+            ))
+            b_list.append(_make_sample(
+                model="model_b", question_id=qid, sample_idx=k,
+                parsed=frozenset({b_letter}),
+                correct=1 if b_letter == "A" else 0,
+            ))
+        samples_a_by_q[qid] = a_list
+        samples_b_by_q[qid] = b_list
+    return samples_a_by_q, samples_b_by_q, gt_map
+
+
+def test_metric_paired_bootstrap_fss_strong_difference():
+    """Spec scenario: fixture A FSS=high / B FSS=low → p < 0.05, ΔFSS > 0."""
+    from forecast_eval.analysis.inference import (
+        DEFAULT_METRIC_FNS,
+        metric_paired_bootstrap,
+    )
+
+    n_q = 50
+    # A: 5/5 correct on every question (perfect FSS=1.0).
+    # B: 0/5 correct on every question (FSS = (0 - 0.25) / 0.75 = -0.333).
+    a_corr = [5] * n_q
+    b_corr = [0] * n_q
+    a, b, gt = _build_two_model_fixture(
+        n_questions=n_q, K=5, a_correct_per_q=a_corr, b_correct_per_q=b_corr,
+    )
+    res = metric_paired_bootstrap(
+        DEFAULT_METRIC_FNS["fss"], a, b, gt,
+        metric_name="fss", model_a="A", model_b="B",
+        n_bootstrap=1000,
+    )
+    assert res is not None
+    assert res.delta_mean > 1.0  # 1.0 - (-0.333) ≈ 1.333
+    assert res.p_two_sided < 0.01
+    assert res.ci_low > 0  # CI excludes 0 → significant
+    assert res.cohens_d > 0
+
+
+def test_metric_paired_bootstrap_fss_no_difference():
+    """A and B identical → ΔFSS ≈ 0, p high, |d| small."""
+    from forecast_eval.analysis.inference import (
+        DEFAULT_METRIC_FNS,
+        metric_paired_bootstrap,
+    )
+
+    n_q = 50
+    same_corr = [3] * n_q
+    a, b, gt = _build_two_model_fixture(
+        n_questions=n_q, K=5,
+        a_correct_per_q=same_corr, b_correct_per_q=list(same_corr),
+    )
+    res = metric_paired_bootstrap(
+        DEFAULT_METRIC_FNS["fss"], a, b, gt,
+        metric_name="fss", model_a="A", model_b="B",
+        n_bootstrap=1000,
+    )
+    assert res is not None
+    assert abs(res.delta_mean) < 1e-6
+    assert res.p_two_sided > 0.5
+    assert abs(res.cohens_d) < 1e-3
+
+
+def test_metric_paired_bootstrap_pairing_property():
+    """Paired property: when A and B are POSITIVELY correlated per-question
+    (both tend to get the same questions right or wrong), the paired
+    bootstrap CI on ΔFSS is NARROWER than the de-paired version.
+
+    This is the key invariant of paired bootstrap: variance of (A-B) under
+    paired sampling equals Var(A) + Var(B) - 2 Cov(A, B). For positively
+    correlated A and B, the -2 Cov term tightens the CI vs an independent
+    bootstrap (which sees Var(A) + Var(B)).
+
+    We simulate "independent" via a deterministic shuffle of A's question
+    labels — that breaks the correlation while keeping the marginal
+    distributions identical.
+    """
+    from forecast_eval.analysis.inference import (
+        DEFAULT_METRIC_FNS,
+        metric_paired_bootstrap,
+    )
+
+    n_q = 30
+    # Mostly correlated: half the questions both nail (5/5), half both miss
+    # (1/5 vs 0/5 — small constant offset, so positive Cov dominates).
+    a_corr = [5 if i % 2 == 0 else 1 for i in range(n_q)]
+    b_corr = [5 if i % 2 == 0 else 0 for i in range(n_q)]
+    a, b, gt = _build_two_model_fixture(
+        n_questions=n_q, K=5, a_correct_per_q=a_corr, b_correct_per_q=b_corr,
+    )
+    paired = metric_paired_bootstrap(
+        DEFAULT_METRIC_FNS["fss"], a, b, gt,
+        metric_name="fss", model_a="A", model_b="B",
+        n_bootstrap=1000, seed=1,
+    )
+    # Shuffle A's question_id labels via dict reshuffle.
+    import random as _r
+    qids = list(a.keys())
+    rng = _r.Random(99)
+    shuffled_qids = qids.copy()
+    rng.shuffle(shuffled_qids)
+    a_shuffled = {orig: a[shuf] for orig, shuf in zip(qids, shuffled_qids)}
+    shuffled = metric_paired_bootstrap(
+        DEFAULT_METRIC_FNS["fss"], a_shuffled, b, gt,
+        metric_name="fss", model_a="A", model_b="B",
+        n_bootstrap=1000, seed=1,
+    )
+    paired_width = paired.ci_high - paired.ci_low
+    shuffled_width = shuffled.ci_high - shuffled.ci_low
+    # Positive correlation → paired CI narrower (Var(A-B) gets the -2Cov term).
+    assert paired_width <= shuffled_width
+
+
+def test_pairwise_metric_bootstrap_default_metrics():
+    """5 metrics × C(3,2) = 3 pairs; ebi will return None (no probabilities),
+    so expect at least 12 (4 metrics × 3 pairs) results."""
+    from forecast_eval.analysis.inference import (
+        DEFAULT_METRIC_FNS,
+        pairwise_metric_bootstrap,
+    )
+
+    n_q = 20
+    samples_by_model_by_q: dict = {}
+    gt_map: dict = {}
+    for qi in range(n_q):
+        qid = f"q{qi}"
+        gt_map[qid] = frozenset({"A"})
+    for model_idx, model in enumerate(["model_x", "model_y", "model_z"]):
+        per_q: dict = {}
+        for qi in range(n_q):
+            qid = f"q{qi}"
+            samples = []
+            for k in range(5):
+                # Each model has different correctness pattern.
+                letter = "A" if (k + model_idx) % 3 != 0 else "B"
+                samples.append(_make_sample(
+                    model=model, question_id=qid, sample_idx=k,
+                    parsed=frozenset({letter}),
+                    correct=1 if letter == "A" else 0,
+                ))
+            per_q[qid] = samples
+        samples_by_model_by_q[model] = per_q
+
+    results = pairwise_metric_bootstrap(
+        samples_by_model_by_q, gt_map, DEFAULT_METRIC_FNS,
+        n_bootstrap=200,
+    )
+    assert len(results) >= 12
+    metric_names = {r.metric_name for r in results}
+    assert {"fss", "acc", "mv_acc", "fleiss_kappa"}.issubset(metric_names)
+    # Sorted by (metric_name, model_a, model_b).
+    keys = [(r.metric_name, r.model_a, r.model_b) for r in results]
+    assert keys == sorted(keys)
+
+
+def test_metric_paired_bootstrap_ebi_skips_when_no_probabilities():
+    """v3-style fixture (probabilities=None) → ebi metric returns None."""
+    from forecast_eval.analysis.inference import (
+        DEFAULT_METRIC_FNS,
+        metric_paired_bootstrap,
+    )
+
+    n_q = 10
+    a, b, gt = _build_two_model_fixture(
+        n_questions=n_q, K=5,
+        a_correct_per_q=[3] * n_q, b_correct_per_q=[2] * n_q,
+    )
+    res = metric_paired_bootstrap(
+        DEFAULT_METRIC_FNS["ebi"], a, b, gt,
+        metric_name="ebi", model_a="A", model_b="B",
+        n_bootstrap=200,
+    )
+    assert res is None
+
+
+def test_metric_paired_bootstrap_fleiss_skips_when_k1():
+    """K=1 fixture → fleiss_kappa returns None → bootstrap returns None."""
+    from forecast_eval.analysis.inference import (
+        DEFAULT_METRIC_FNS,
+        metric_paired_bootstrap,
+    )
+
+    n_q = 10
+    a, b, gt = _build_two_model_fixture(
+        n_questions=n_q, K=1,
+        a_correct_per_q=[1] * n_q, b_correct_per_q=[0] * n_q,
+    )
+    res = metric_paired_bootstrap(
+        DEFAULT_METRIC_FNS["fleiss_kappa"], a, b, gt,
+        metric_name="fleiss_kappa", model_a="A", model_b="B",
+        n_bootstrap=200,
+    )
+    assert res is None
+
+
+def test_cohens_d_known_values():
+    """Spec scenario: Δ = [0.10, 0.12, 0.08, 0.11, 0.09] →
+    mean=0.10, std≈0.0158, d ≈ 6.32."""
+    from forecast_eval.analysis.inference import cohens_d_from_bootstrap
+
+    deltas = [0.10, 0.12, 0.08, 0.11, 0.09]
+    d = cohens_d_from_bootstrap(deltas)
+    assert d == pytest.approx(6.32, abs=1e-1)
+
+
+def test_cohens_d_zero_delta_returns_zero():
+    """All deltas zero → d = 0 (no effect, no spread)."""
+    from forecast_eval.analysis.inference import cohens_d_from_bootstrap
+
+    assert cohens_d_from_bootstrap([0.0, 0.0, 0.0, 0.0]) == 0.0
+
+
+def test_cohens_d_empty_returns_zero():
+    """Empty input → d = 0 (no data)."""
+    from forecast_eval.analysis.inference import cohens_d_from_bootstrap
+
+    assert cohens_d_from_bootstrap([]) == 0.0
+
+
+def test_metric_paired_bootstrap_empty_common_returns_none():
+    """A and B share zero questions → None."""
+    from forecast_eval.analysis.inference import (
+        DEFAULT_METRIC_FNS,
+        metric_paired_bootstrap,
+    )
+
+    a = {"q0": [_make_sample(model="A", question_id="q0", parsed=frozenset({"A"}))]}
+    b = {"q1": [_make_sample(model="B", question_id="q1", parsed=frozenset({"A"}))]}
+    gt = {"q0": frozenset({"A"}), "q1": frozenset({"A"})}
+    res = metric_paired_bootstrap(
+        DEFAULT_METRIC_FNS["fss"], a, b, gt,
+        metric_name="fss", n_bootstrap=200,
+    )
+    assert res is None

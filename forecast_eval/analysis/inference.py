@@ -1,29 +1,44 @@
-"""Statistical inference for model comparisons (Phase 2 task 21).
+"""Statistical inference for model comparisons (v4 + v5).
 
-Implements the inference stack from `ANALYSIS_DESIGN_v4.md §3.4` and
-`specs/probabilistic-analysis/spec.md`:
+V4 (BS-paired bootstrap, kept for `grid.py` and the v4 probabilistic family):
 
 * `paired_bootstrap` — $B = 5000$ paired resamples on per-question Brier
   scores; returns 95% CI and two-sided p-value.
 * `holm_bonferroni` — FWER control across multi-comparison families;
   returns adjusted p-values in original order.
-* `difficulty_tertile` — tertile split on per-question $\\gamma_q$ (the
-  baseline difficulty proxy used by ABI).
-* `paired_bootstrap_by_difficulty` — runs `paired_bootstrap` once per
-  tertile so a model pair can be compared on equal-difficulty subsets.
-* `posterior_a_better_than_b` — direct Monte-Carlo posterior of
-  $\\Pr(\\mathrm{BI}_A > \\mathrm{BI}_B)$ on bootstrap samples.
-* `posterior_normal_fit` — closed-form normal approximation of the same
-  quantity; reported as a sanity-check side channel.
+* `difficulty_tertile` — tertile split on per-question $\\gamma_q$.
+* `paired_bootstrap_by_difficulty` — per-tertile `paired_bootstrap`.
+* `posterior_a_better_than_b` — Monte-Carlo $\\Pr(\\mathrm{BI}_A > \\mathrm{BI}_B)$.
+* `posterior_normal_fit` — closed-form normal approximation.
+* `pairwise_paired_bootstrap` — every model pair × Holm correction.
 
-Pure Python with `random` for the bootstrap RNG and `math.erf` for the
-normal CDF — no numpy / scipy dependency.
+V5 (multi-metric paired bootstrap, parameterised over `MetricFn`):
+
+* `metric_paired_bootstrap(metric_fn, samples_a_by_q, samples_b_by_q, gt_map, ...)`
+  — for any metric (FSS / Acc / MV_Acc / Fleiss κ / EBI). Returns ΔMean,
+  95% CI, two-sided p, Cohen's d.
+* `pairwise_metric_bootstrap(samples_by_model_by_q, gt_map, metric_fns)`
+  — orchestrate over (metric × model pair) cartesian product.
+* `DEFAULT_METRIC_FNS` — the 5 metric wrappers v5 publishes.
+* `cohens_d_from_bootstrap` — effect size from the resampled delta dist.
+
+Bootstrap iteration uses unique resample-keys (`f"{qid}__bs{j}"`) so a
+question sampled with replacement contributes its full sample-set
+multiple times to the metric — without dict-key collisions and without
+losing the "paired" structure (the same index hits both A and B).
+
+Pure Python: `random` for the RNG, `math.erf` for the normal CDF, no
+numpy / scipy dependency.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
+
+from .flatten import SampleRow, gt_vector
 
 
 # --------------------------------------------------------------------------- #
@@ -373,6 +388,370 @@ def pairwise_paired_bootstrap(
     return pairs
 
 
+# --------------------------------------------------------------------------- #
+# v5 multi-metric paired bootstrap
+# --------------------------------------------------------------------------- #
+
+
+# Per-(model, question) sample-list dict keyed by question_id, plus the
+# matching `gt_map`. The bootstrap subsets pass dicts keyed by unique
+# resample IDs (`{qid}__bs{j}`); the gt_map alongside is rebuilt with the
+# same keys, so the metric_fn never has to know whether it's looking at
+# the full set or a bootstrap subset.
+MetricFn = Callable[
+    [dict[str, list[SampleRow]], dict[str, frozenset[str]]],
+    float | None,
+]
+
+
+@dataclass(frozen=True)
+class MetricBootstrapResult:
+    """Output of `metric_paired_bootstrap`. Mirrors `PairedBootstrapResult`
+    but parameterised over the metric and reports Cohen's d effect size.
+
+    `delta_mean` is the OBSERVED delta on the full common question set
+    (A - B), not the bootstrap mean. Bootstrap is used only for CI / p / d.
+    `cohens_d` is `mean(bootstrap_means) / std(bootstrap_means)`; values
+    above 0.8 indicate large effect, 0.5-0.8 medium, < 0.2 trivial.
+    """
+
+    metric_name: str
+    model_a: str
+    model_b: str
+    delta_mean: float
+    ci_low: float
+    ci_high: float
+    p_two_sided: float
+    cohens_d: float
+    n_questions: int
+    n_bootstrap: int
+
+
+def cohens_d_from_bootstrap(deltas: list[float]) -> float:
+    """Cohen's d from a bootstrap delta distribution: $|\\bar{\\Delta}| / s$.
+
+    Returns 0.0 when the bootstrap variance is degenerate (all same value)
+    AND the mean is also 0 — signals "no effect". A non-zero mean with
+    zero variance returns +inf (ideal certainty); we clamp to 1e9 to keep
+    downstream formatting finite without losing the "very large" semantics.
+    """
+    n = len(deltas)
+    if n == 0:
+        return 0.0
+    mean = sum(deltas) / n
+    if n < 2:
+        return 0.0
+    var = sum((d - mean) ** 2 for d in deltas) / (n - 1)
+    if var <= 0:
+        if abs(mean) < 1e-12:
+            return 0.0
+        return 1e9 if mean > 0 else -1e9
+    return mean / math.sqrt(var)
+
+
+def _bootstrap_subset(
+    samples_by_q: dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+    qid_indices: list[str],
+) -> tuple[dict[str, list[SampleRow]], dict[str, frozenset[str]]]:
+    """Build a resample subset where each draw becomes a unique dict key.
+
+    `qid_indices` may contain duplicates (with-replacement). For draw index
+    $j$ we put `f"{qid}__bs{j}"` into both the sample dict and the gt dict,
+    so the metric function sees as many "questions" as draws.
+
+    Sample objects are NOT copied — we share references. This is safe
+    because v5 metric functions never mutate samples. SampleRow's
+    `question_id` field is overwritten via `dataclasses.replace` only inside
+    metric wrappers that need it (e.g. `_metric_fn_acc` calls `_aggregate`
+    which groups by `sample.question_id`).
+    """
+    sub_samples: dict[str, list[SampleRow]] = {}
+    sub_gt: dict[str, frozenset[str]] = {}
+    for j, qid in enumerate(qid_indices):
+        if qid not in samples_by_q or qid not in gt_map:
+            continue
+        # Unique key per draw position. Duplicate qids land under different
+        # keys → both copies contribute to the metric.
+        key = f"{qid}__bs{j}"
+        sub_samples[key] = samples_by_q[qid]
+        sub_gt[key] = gt_map[qid]
+    return sub_samples, sub_gt
+
+
+def metric_paired_bootstrap(
+    metric_fn: MetricFn,
+    samples_a_by_q: dict[str, list[SampleRow]],
+    samples_b_by_q: dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+    *,
+    metric_name: str,
+    model_a: str = "A",
+    model_b: str = "B",
+    n_bootstrap: int = 5000,
+    seed: int = 42,
+    ci_alpha: float = 0.05,
+) -> MetricBootstrapResult | None:
+    """Paired bootstrap on any metric defined by `MetricFn`.
+
+    Restricts to questions present in both A and B (the only fair surface).
+    Each iteration resamples question_ids with replacement, builds matching
+    A and B subsets via `_bootstrap_subset` (paired by index), evaluates
+    `metric_fn` on both, and records $\\Delta = m_A - m_B$.
+
+    Returns None if:
+    * the common question set is empty;
+    * the observed metric on A or B is None (metric not computable on this
+      data — e.g. Fleiss κ on K=1 fixture).
+
+    Two-sided p-value: $2 \\min(\\Pr(\\Delta_b \\le 0), \\Pr(\\Delta_b \\ge 0))$
+    on the bootstrap distribution.
+    """
+    common = sorted(set(samples_a_by_q.keys()) & set(samples_b_by_q.keys()))
+    if not common:
+        return None
+
+    # Observed delta on full common set — same dict-key-as-question convention
+    # so the metric_fn doesn't need a special "full set" branch.
+    full_a = {q: samples_a_by_q[q] for q in common}
+    full_b = {q: samples_b_by_q[q] for q in common}
+    full_gt = {q: gt_map[q] for q in common if q in gt_map}
+    metric_a_obs = metric_fn(full_a, full_gt)
+    metric_b_obs = metric_fn(full_b, full_gt)
+    if metric_a_obs is None or metric_b_obs is None:
+        return None
+    delta_obs = metric_a_obs - metric_b_obs
+
+    rng = random.Random(seed)
+    n = len(common)
+    bootstrap_deltas: list[float] = []
+    for _ in range(n_bootstrap):
+        # Same indices for A and B → "paired" property.
+        idxs = [rng.randrange(n) for _ in range(n)]
+        sub_qids = [common[i] for i in idxs]
+        sub_a, sub_gt_a = _bootstrap_subset(samples_a_by_q, gt_map, sub_qids)
+        sub_b, sub_gt_b = _bootstrap_subset(samples_b_by_q, gt_map, sub_qids)
+        m_a = metric_fn(sub_a, sub_gt_a)
+        m_b = metric_fn(sub_b, sub_gt_b)
+        if m_a is None or m_b is None:
+            # Skip degenerate iterations — should be rare for sensible n_bootstrap.
+            continue
+        bootstrap_deltas.append(m_a - m_b)
+
+    if not bootstrap_deltas:
+        return None
+
+    sorted_deltas = sorted(bootstrap_deltas)
+    n_b = len(sorted_deltas)
+    lo_idx = max(0, int(ci_alpha / 2 * n_b))
+    hi_idx = min(n_b - 1, int((1 - ci_alpha / 2) * n_b) - 1)
+    ci_low = sorted_deltas[lo_idx]
+    ci_high = sorted_deltas[hi_idx]
+
+    n_le_0 = sum(1 for d in bootstrap_deltas if d <= 0)
+    n_ge_0 = sum(1 for d in bootstrap_deltas if d >= 0)
+    p_low = n_le_0 / n_b
+    p_high = n_ge_0 / n_b
+    p_two = min(1.0, 2.0 * min(p_low, p_high))
+
+    return MetricBootstrapResult(
+        metric_name=metric_name,
+        model_a=model_a,
+        model_b=model_b,
+        delta_mean=delta_obs,
+        ci_low=ci_low,
+        ci_high=ci_high,
+        p_two_sided=p_two,
+        cohens_d=cohens_d_from_bootstrap(bootstrap_deltas),
+        n_questions=n,
+        n_bootstrap=n_b,
+    )
+
+
+def pairwise_metric_bootstrap(
+    samples_by_model_by_q: dict[str, dict[str, list[SampleRow]]],
+    gt_map: dict[str, frozenset[str]],
+    metric_fns: dict[str, MetricFn],
+    *,
+    n_bootstrap: int = 5000,
+    seed: int = 42,
+) -> list[MetricBootstrapResult]:
+    """For every (metric, ordered model pair), run `metric_paired_bootstrap`.
+
+    Pairs are `(model_a, model_b)` for `model_a < model_b` lex. A pair is
+    silently skipped when the metric is not computable on the data; the
+    caller decides whether to surface that as "row missing" or "p=NA".
+
+    Returns a flat list sorted by `(metric_name, model_a, model_b)` so the
+    writer can emit a deterministic CSV without a separate sort pass.
+    """
+    models = sorted(samples_by_model_by_q.keys())
+    out: list[MetricBootstrapResult] = []
+    for metric_name in sorted(metric_fns.keys()):
+        metric_fn = metric_fns[metric_name]
+        for i, ma in enumerate(models):
+            for mb in models[i + 1:]:
+                res = metric_paired_bootstrap(
+                    metric_fn,
+                    samples_by_model_by_q[ma],
+                    samples_by_model_by_q[mb],
+                    gt_map,
+                    metric_name=metric_name,
+                    model_a=ma,
+                    model_b=mb,
+                    n_bootstrap=n_bootstrap,
+                    seed=seed,
+                )
+                if res is not None:
+                    out.append(res)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Default metric wrappers (v5)
+# --------------------------------------------------------------------------- #
+
+
+def _flatten_with_dict_key_as_qid(
+    samples_by_q: dict[str, list[SampleRow]],
+) -> list[SampleRow]:
+    """Flatten `dict[key, list[SampleRow]]` → `list[SampleRow]` while
+    rewriting each sample's `question_id` to match the dict key.
+
+    Bootstrap subsets use synthetic keys like `qid__bs17`. Helpers like
+    `_aggregate` group samples by `sample.question_id`, so without the
+    rewrite a duplicated draw would silently merge into the original
+    qid bucket — defeating the bootstrap. We use `dataclasses.replace`
+    only when the key already differs (skip the copy on the natural full-set
+    case where `key == sample.question_id`).
+    """
+    flat: list[SampleRow] = []
+    for key, samples in samples_by_q.items():
+        for s in samples:
+            if s.question_id == key:
+                flat.append(s)
+            else:
+                flat.append(dataclasses.replace(s, question_id=key))
+    return flat
+
+
+def _metric_fn_fss(
+    samples_by_q: dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+) -> float | None:
+    """v5 main metric. `accuracy.fss` already accepts dicts directly."""
+    from .accuracy import fss
+
+    if not samples_by_q:
+        return None
+    result = fss(samples_by_q, gt_map)
+    return result["fss"]
+
+
+def _max_sampling_n(samples_by_q: dict[str, list[SampleRow]]) -> int:
+    """Largest unique sample_idx span across all questions; floor at 1."""
+    n = 1
+    for ss in samples_by_q.values():
+        if not ss:
+            continue
+        n = max(n, len({s.sample_idx for s in ss}))
+    return n
+
+
+def _metric_fn_acc(
+    samples_by_q: dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+) -> float | None:
+    """Per-sample pass@1 (the v3 `Aggregate.pass_at_1_avg`)."""
+    from .accuracy import _aggregate
+
+    if not samples_by_q:
+        return None
+    flat = _flatten_with_dict_key_as_qid(samples_by_q)
+    if not flat:
+        return None
+    sampling_n = _max_sampling_n(samples_by_q)
+    agg = _aggregate(flat, sampling_n=sampling_n, gt_map=gt_map)
+    return agg.pass_at_1_avg
+
+
+def _metric_fn_mv_acc(
+    samples_by_q: dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+) -> float | None:
+    """Majority-vote accuracy. Returns None when sampling_n < 2 (no MV signal)."""
+    from .accuracy import _aggregate
+
+    if not samples_by_q:
+        return None
+    sampling_n = _max_sampling_n(samples_by_q)
+    if sampling_n < 2:
+        return None
+    flat = _flatten_with_dict_key_as_qid(samples_by_q)
+    if not flat:
+        return None
+    agg = _aggregate(flat, sampling_n=sampling_n, gt_map=gt_map)
+    return agg.majority_vote_accuracy
+
+
+def _metric_fn_fleiss_kappa(
+    samples_by_q: dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+) -> float | None:
+    """Fleiss κ — needs an options_map; we synthesize from the first sample
+    of each dict key. Returns None when no question has K_q ≥ 2."""
+    from .consistency import fleiss_kappa
+
+    if not samples_by_q:
+        return None
+    options_map = {
+        key: ss[0].options
+        for key, ss in samples_by_q.items()
+        if ss and ss[0].options
+    }
+    if not options_map:
+        return None
+    return fleiss_kappa(samples_by_q, options_map)
+
+
+def _metric_fn_ebi(
+    samples_by_q: dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+) -> float | None:
+    """v4 BI on label-wise Brier — kept for v3-style fixtures with no
+    `probabilities` field, falls through to None automatically."""
+    from .probabilistic import _aggregate_question_probs
+    from .proper_score import brier_index, brier_score_lab
+
+    if not samples_by_q:
+        return None
+    bs_values: list[float] = []
+    for key, samples in samples_by_q.items():
+        gt = gt_map.get(key)
+        if gt is None or not samples or not samples[0].options:
+            continue
+        opts = samples[0].options
+        agg_probs = _aggregate_question_probs(samples)
+        if agg_probs is None:
+            continue
+        obs = gt_vector(gt, len(opts))
+        bs_values.append(brier_score_lab(agg_probs, obs))
+    if not bs_values:
+        return None
+    return brier_index(bs_values)
+
+
+# Public registry for `pairwise_metric_bootstrap`. Keys become the
+# `metric` column in `pairwise_bootstrap.csv`.
+DEFAULT_METRIC_FNS: dict[str, MetricFn] = {
+    "fss": _metric_fn_fss,
+    "acc": _metric_fn_acc,
+    "mv_acc": _metric_fn_mv_acc,
+    "fleiss_kappa": _metric_fn_fleiss_kappa,
+    "ebi": _metric_fn_ebi,
+}
+
+
 __all__ = [
     "PairedBootstrapResult",
     "DifficultyTertile",
@@ -384,4 +763,11 @@ __all__ = [
     "posterior_a_better_than_b",
     "posterior_normal_fit",
     "pairwise_paired_bootstrap",
+    # v5 multi-metric bootstrap
+    "MetricFn",
+    "MetricBootstrapResult",
+    "metric_paired_bootstrap",
+    "pairwise_metric_bootstrap",
+    "cohens_d_from_bootstrap",
+    "DEFAULT_METRIC_FNS",
 ]
