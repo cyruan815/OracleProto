@@ -206,6 +206,78 @@ def test_fleiss_kappa_single_uses_letter_argmax() -> None:
     assert fleiss_kappa_single(samples_by_q, k_per_q) == pytest.approx(1.0, abs=1e-6)
 
 
+def test_fleiss_kappa_single_mixed_k_perfect_agreement() -> None:
+    """Mixed option counts (k=2 and k=5) — every question unanimous → κ=1.0.
+
+    Regression: previous implementation pooled all questions into one
+    n_matrix using the first row's length as n_categories, so a k=2 row
+    followed by a k=5 row crashed with IndexError. With per-k stratification
+    each stratum's κ=1.0 and the weighted mean stays 1.0.
+    """
+    samples_by_q: dict[str, list[SampleRow]] = {}
+    options_map: dict[str, list[str]] = {}
+    # k=2 stratum, two unanimous questions
+    for qi in range(2):
+        qid = f"k2_q{qi}"
+        opts = ["A", "B"]
+        options_map[qid] = opts
+        for k in range(5):
+            samples_by_q.setdefault(qid, []).append(_make_sample(
+                question_id=qid, sample_idx=k,
+                options=opts, parsed=frozenset({"A"}),
+            ))
+    # k=5 stratum, two unanimous questions on a different letter
+    for qi in range(2):
+        qid = f"k5_q{qi}"
+        opts = ["A", "B", "C", "D", "E"]
+        options_map[qid] = opts
+        for k in range(5):
+            samples_by_q.setdefault(qid, []).append(_make_sample(
+                question_id=qid, sample_idx=k,
+                options=opts, parsed=frozenset({"B"}),
+            ))
+    kappa = fleiss_kappa(samples_by_q, options_map)
+    assert kappa == pytest.approx(1.0, abs=1e-6)
+
+
+def test_fleiss_kappa_single_mixed_k_weighted_average() -> None:
+    """Per-stratum κ then weighted by stratum question count.
+
+    Two k=2 questions split 3/2 → κ_{k=2} = (0.4 - 0.52) / (1 - 0.52) = -0.25.
+    Two k=5 questions unanimous → κ_{k=5} = 1.0.
+    Weighted mean (n_q=2 each) = (-0.25 + 1.0) / 2 = 0.375.
+    """
+    samples_by_q: dict[str, list[SampleRow]] = {}
+    options_map: dict[str, list[str]] = {}
+    for qi in range(2):
+        qid = f"k2_q{qi}"
+        opts = ["A", "B"]
+        options_map[qid] = opts
+        votes = [frozenset({"A"})] * 3 + [frozenset({"B"})] * 2
+        for k, parsed in enumerate(votes):
+            samples_by_q.setdefault(qid, []).append(_make_sample(
+                question_id=qid, sample_idx=k, options=opts, parsed=parsed,
+            ))
+    for qi in range(2):
+        qid = f"k5_q{qi}"
+        opts = ["A", "B", "C", "D", "E"]
+        options_map[qid] = opts
+        for k in range(5):
+            samples_by_q.setdefault(qid, []).append(_make_sample(
+                question_id=qid, sample_idx=k, options=opts, parsed=frozenset({"A"}),
+            ))
+    kappa = fleiss_kappa(samples_by_q, options_map)
+    assert kappa == pytest.approx(0.375, abs=1e-6)
+
+
+def test_fleiss_kappa_from_counts_rejects_mixed_widths() -> None:
+    """Sanity guard: feeding rows of different category counts must raise."""
+    from forecast_eval.analysis.consistency import _fleiss_kappa_from_counts
+
+    with pytest.raises(ValueError):
+        _fleiss_kappa_from_counts([[3, 2], [1, 1, 1, 1, 1]], [5, 5])
+
+
 def test_fleiss_kappa_multi_per_label_perfect() -> None:
     """Multi: 3 questions × 5 trials all selecting {A,B} → per-label binary
     Fleiss κ = 1.0 for selected labels, undefined for never-selected ones."""
