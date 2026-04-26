@@ -100,7 +100,13 @@ class Settings(BaseSettings):
 
     # Tavily — 详见 .env.example 中各字段注释
     TAVILY_API_KEY: str = ""
-    TAVILY_MAX_RESULTS: int = 5
+    # Grid-scannable: list of cell-local R values, parsed from CSV in .env.
+    # Single-value envs (`TAVILY_MAX_RESULTS=5`) parse to `[5]`; multi-value
+    # (`TAVILY_MAX_RESULTS=5,10`) drives the (R, C) cartesian dispatcher in
+    # evaluation.py. Per-cell sub-views downcast this to a single int via
+    # `model_copy(update={"TAVILY_MAX_RESULTS": R})` before being handed to
+    # `tavily_search`, so the Tavily request body always sees a single int.
+    TAVILY_MAX_RESULTS: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [5])
     # basic | advanced (Tavily 官方 search_depth)
     TAVILY_SEARCH_DEPTH: str = "basic"
     # false | markdown | text (旧版 bool 'true' 兼容映射到 'markdown')
@@ -116,7 +122,10 @@ class Settings(BaseSettings):
 
     # ReAct
     REACT_MAX_STEPS: int = 12
-    REACT_MAX_SEARCH_CALLS: int = 8
+    # Grid-scannable: list of cell-local C values, parsed from CSV. Same shape
+    # contract as TAVILY_MAX_RESULTS — dispatcher derives per-cell sub-views
+    # carrying a single int; runner / react never see the list form.
+    REACT_MAX_SEARCH_CALLS: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [8])
     # 反思协议总开关: 启用后 user prompt 末尾追加多步推理脚手架, 显著提升搜索 + 反思深度.
     # 不会写入 prompt_templates (因此 prompt_templates_hash 保持不变), 但会作为 user message
     # 实际文本落入每个 sample 的 user_prompt 字段, 同时通过 config_snapshot 记入 run_meta.
@@ -126,6 +135,12 @@ class Settings(BaseSettings):
     REACT_MIN_SEARCH_CALLS: int = 0
     # nudge 最多注入几次, 防止 LLM 与系统互相 nudge 死循环. REACT_MAX_STEPS 仍是硬天花板.
     REACT_MAX_NUDGES: int = 2
+
+    # 网格搜索锚点 (可选): 当 .env 配置多值 R / C 时, paper 主图固定 R = GRID_DEFAULT_R
+    # 画 BI vs C 曲线; 类似地 GRID_DEFAULT_C 控制 BI vs R 曲线的 C 锚点. 未设置时
+    # plot_analysis.py 默认取列表第一个值. 必须 ∈ 对应列表 (启动期校验).
+    GRID_DEFAULT_R: int | None = None
+    GRID_DEFAULT_C: int | None = None
 
     # 结构化置信度协议总开关 (v4). 启用后在 user prompt 末尾追加 belief 协议段
     # (位置在 reflection 协议之后), 要求 LLM 在 \\boxed{...} 之前输出一段
@@ -174,6 +189,35 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return [int(x) for x in v]
         return _parse_csv_int(v)
+
+    @field_validator(
+        "TAVILY_MAX_RESULTS",
+        "REACT_MAX_SEARCH_CALLS",
+        mode="before",
+    )
+    @classmethod
+    def _parse_grid_int_list(cls, v: Any) -> list[int]:
+        # Multi-value grid axis: CSV in .env, list/int passthrough for tests.
+        # Single-value envs degrade to a length-1 list (back-compat with v4
+        # `TAVILY_MAX_RESULTS=5`); empty values raise so we never silently
+        # swallow a misconfigured .env into a no-op dispatcher.
+        if isinstance(v, list):
+            parsed = [int(x) for x in v]
+        elif isinstance(v, int) and not isinstance(v, bool):
+            parsed = [int(v)]
+        else:
+            parsed = _parse_csv_int(v)
+        if not parsed:
+            raise ValueError(
+                "TAVILY_MAX_RESULTS / REACT_MAX_SEARCH_CALLS must be a non-empty CSV "
+                "of positive integers (e.g. '5' or '5,10')"
+            )
+        for n in parsed:
+            if n <= 0:
+                raise ValueError(
+                    f"TAVILY_MAX_RESULTS / REACT_MAX_SEARCH_CALLS values must be > 0; got {n}"
+                )
+        return parsed
 
     @field_validator("LLM_REASONING_MODEL_PATTERNS", mode="before")
     @classmethod
@@ -255,6 +299,14 @@ class Settings(BaseSettings):
                     f"MODELS entry {slug!r} must not end with ':online' — "
                     "provider-native browsing is not allowed (see information-barrier spec)"
                 )
+            # Defensive: real_model slugs containing `::` would collide with the
+            # virtual slug encoding `{real}::r{R}::c{C}` and break round-tripping
+            # in `db.parse_virtual_slug`. Reject early with a clear message.
+            if "::" in slug:
+                raise ValueError(
+                    f"MODELS entry {slug!r} must not contain '::' — that delimiter is "
+                    "reserved for grid-search virtual slugs (compose_virtual_slug)"
+                )
         required_keys = ["LLM_API_KEY"]
         if self.ENABLE_WEB_SEARCH:
             required_keys.append("TAVILY_API_KEY")
@@ -270,19 +322,48 @@ class Settings(BaseSettings):
             raise ValueError("SAMPLING_N must be >= 1")
         if self.LLM_MAX_CONCURRENCY < 1 or self.SEARCH_MAX_CONCURRENCY < 1:
             raise ValueError("concurrency settings must be >= 1")
-        if self.REACT_MAX_STEPS < 1 or self.REACT_MAX_SEARCH_CALLS < 0:
-            raise ValueError("REACT_MAX_STEPS must be >= 1 and REACT_MAX_SEARCH_CALLS >= 0")
+        if self.REACT_MAX_STEPS < 1:
+            raise ValueError("REACT_MAX_STEPS must be >= 1")
+        # REACT_MAX_SEARCH_CALLS is a list (multi-value grid axis); each entry
+        # must be a non-negative C value. The field_validator already requires
+        # > 0 at parse time, but keep this as a belt-and-braces guard for tests
+        # that construct Settings via overrides.
+        for c in self.REACT_MAX_SEARCH_CALLS:
+            if c < 0:
+                raise ValueError(
+                    f"REACT_MAX_SEARCH_CALLS contains a negative value: {c}"
+                )
+        for r in self.TAVILY_MAX_RESULTS:
+            if r <= 0:
+                raise ValueError(
+                    f"TAVILY_MAX_RESULTS must be > 0 per cell; got {r}"
+                )
         if self.REACT_MIN_SEARCH_CALLS < 0:
             raise ValueError("REACT_MIN_SEARCH_CALLS must be >= 0 (0 = disabled)")
-        if self.REACT_MIN_SEARCH_CALLS > self.REACT_MAX_SEARCH_CALLS:
+        # MIN is a single int but C is a list. Hard error only when MIN exceeds
+        # the smallest C in the grid (then no cell could honor the floor). When
+        # MIN exceeds *some* but not all cells, the dispatcher silently clamps
+        # `effective_min = min(MIN, C)` per cell — see DESIGN.md decision 4.
+        if self.REACT_MAX_SEARCH_CALLS and self.REACT_MIN_SEARCH_CALLS > min(self.REACT_MAX_SEARCH_CALLS):
             raise ValueError(
-                "REACT_MIN_SEARCH_CALLS must not exceed REACT_MAX_SEARCH_CALLS "
-                f"(min={self.REACT_MIN_SEARCH_CALLS}, max={self.REACT_MAX_SEARCH_CALLS})"
+                "REACT_MIN_SEARCH_CALLS must not exceed min(REACT_MAX_SEARCH_CALLS) "
+                f"(min_floor={self.REACT_MIN_SEARCH_CALLS}, c_list={self.REACT_MAX_SEARCH_CALLS})"
             )
         if self.REACT_MAX_NUDGES < 0:
             raise ValueError("REACT_MAX_NUDGES must be >= 0")
         if self.TAVILY_RAW_CONTENT_MAX_CHARS < 0:
             raise ValueError("TAVILY_RAW_CONTENT_MAX_CHARS must be >= 0 (0 = no truncation)")
+        # Optional grid anchors: when set, must be one of the configured cells.
+        if self.GRID_DEFAULT_R is not None and self.GRID_DEFAULT_R not in self.TAVILY_MAX_RESULTS:
+            raise ValueError(
+                f"GRID_DEFAULT_R={self.GRID_DEFAULT_R} not in TAVILY_MAX_RESULTS "
+                f"={self.TAVILY_MAX_RESULTS}; pick one of the configured cells"
+            )
+        if self.GRID_DEFAULT_C is not None and self.GRID_DEFAULT_C not in self.REACT_MAX_SEARCH_CALLS:
+            raise ValueError(
+                f"GRID_DEFAULT_C={self.GRID_DEFAULT_C} not in REACT_MAX_SEARCH_CALLS "
+                f"={self.REACT_MAX_SEARCH_CALLS}; pick one of the configured cells"
+            )
         return self
 
     def __repr__(self) -> str:

@@ -23,12 +23,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import itertools
 import json
 import signal
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -127,6 +128,8 @@ def _write_manifest(
     filters: QFilter,
     question_count: int,
     question_ids: list[str],
+    virtual_models: list[str],
+    real_models: list[str],
     model_files: dict[str, str],
     source_db_hash: str,
     metadata_hash: str,
@@ -140,12 +143,22 @@ def _write_manifest(
     # texts stay inside `run_meta.{reflection,belief}_protocol_text`.
     # `analysis_schema` lets the analysis layer dispatch on which v4 metric
     # families to compute (probabilistic family vs accuracy-only fallback).
+    #
+    # `models` and `model_files` carry the *virtual* slug list so the v4
+    # analysis main path (which iterates `manifest.models`) naturally walks
+    # every grid cell. The new top-level `grid` section captures the cartesian
+    # skeleton (R / C lists + default anchors + real_models) for analysis/grid
+    # to consume without opening per-cell .db files.
+    r_list = list(settings.TAVILY_MAX_RESULTS)
+    c_list = list(settings.REACT_MAX_SEARCH_CALLS)
+    default_r = settings.GRID_DEFAULT_R if settings.GRID_DEFAULT_R is not None else r_list[0]
+    default_c = settings.GRID_DEFAULT_C if settings.GRID_DEFAULT_C is not None else c_list[0]
     payload: dict[str, Any] = {
         "run_id": run_id,
         "schema_version": dbmod.SCHEMA_VERSION,
         "analysis_schema": "v4",
         "sampling_n": settings.SAMPLING_N,
-        "models": list(settings.MODELS),
+        "models": virtual_models,
         "model_files": model_files,
         "model_training_cutoffs": {
             m: d.isoformat() for m, d in settings.MODEL_TRAINING_CUTOFFS.items()
@@ -162,6 +175,14 @@ def _write_manifest(
         },
         "reflection_protocol_hash": reflection_protocol_hash,
         "belief_protocol_hash": belief_protocol_hash,
+        "grid": {
+            "r_list": r_list,
+            "c_list": c_list,
+            "default_r": default_r,
+            "default_c": default_c,
+            "real_models": real_models,
+            "n_cells": len(real_models) * len(r_list) * len(c_list),
+        },
         "started_at": started_at,
         "finished_at": None,
     }
@@ -188,12 +209,15 @@ def _finalise_manifest(manifest_path: Path, finished_at: str) -> None:
 def _init_model_db(
     *,
     db_path: Path,
-    settings: Settings,
+    cell_settings: Settings,
     run_id: str,
-    model: str,
+    virtual_model: str,
+    real_model: str,
+    R: int,
+    C: int,
+    effective_min_search_calls: int,
     source_path: Path,
     filters: QFilter,
-    config_snapshot: dict[str, Any],
     filters_snapshot: dict[str, Any],
     source_db_hash: str,
     metadata_hash: str,
@@ -203,16 +227,38 @@ def _init_model_db(
     belief_protocol_text: str | None,
     belief_protocol_hash: str | None,
 ) -> tuple[sqlite3.Connection, dict[str, str], list]:
+    """Initialise one .db file for a single grid cell.
+
+    `cell_settings` is the dispatcher-derived per-cell sub-view: its
+    TAVILY_MAX_RESULTS / REACT_MAX_SEARCH_CALLS are single ints (not lists).
+    `snapshot_settings(cell_settings)` therefore writes single-value R/C into
+    `config_snapshot`, so opening any one .db reveals exactly which grid cell
+    it represents (DESIGN.md decision 5).
+
+    `grid_origin` is recorded at the top level of the persisted config snapshot
+    via `register_run_meta` — auditors can read it without re-deriving from
+    the virtual slug.
+
+    `training_cutoff` is keyed by the *real* model slug (not the virtual one);
+    callers parse the slug and pass it explicitly.
+    """
     conn = dbmod.connect(db_path)
-    dbmod.init_schema(conn, settings.SAMPLING_N)
+    dbmod.init_schema(conn, cell_settings.SAMPLING_N)
     templates = loader.sync_prompt_templates(source_path, conn)
-    questions = loader.sync_questions(source_path, conn, filters, table=settings.SOURCE_TABLE)
-    cutoff = settings.MODEL_TRAINING_CUTOFFS.get(model)
+    questions = loader.sync_questions(source_path, conn, filters, table=cell_settings.SOURCE_TABLE)
+    cutoff = cell_settings.MODEL_TRAINING_CUTOFFS.get(real_model)
+    config_snapshot = dbmod.snapshot_settings(cell_settings)
+    grid_origin = {
+        "real_model": real_model,
+        "R": R,
+        "C": C,
+        "effective_min_search_calls": effective_min_search_calls,
+    }
     dbmod.register_run_meta(
         conn,
         run_id=run_id,
-        model=model,
-        sampling_n=settings.SAMPLING_N,
+        model=virtual_model,
+        sampling_n=cell_settings.SAMPLING_N,
         filters_snapshot=filters_snapshot,
         config_snapshot=config_snapshot,
         source_db_hash=source_db_hash,
@@ -223,8 +269,42 @@ def _init_model_db(
         reflection_protocol_hash=reflection_protocol_hash,
         belief_protocol_text=belief_protocol_text,
         belief_protocol_hash=belief_protocol_hash,
+        grid_origin=grid_origin,
     )
     return conn, templates, questions
+
+
+def _make_settings_factory(
+    global_settings: Settings,
+) -> Callable[[str, int, int], Settings]:
+    """Return a factory mapping `(virtual_slug, R, C)` -> cell-local sub-view.
+
+    Each sub-view downcasts TAVILY_MAX_RESULTS / REACT_MAX_SEARCH_CALLS to the
+    cell's single int and silently clamps REACT_MIN_SEARCH_CALLS to
+    `min(global_min, C)` (DESIGN.md decision 4). The original `global_settings`
+    instance is not mutated; pydantic-settings `model_copy(update=...)` returns
+    a fresh immutable copy each time. Results are memoised on `(slug, R, C)`
+    so repeated calls in the same run share a single Settings object.
+    """
+    cache: dict[tuple[str, int, int], Settings] = {}
+    global_min = global_settings.REACT_MIN_SEARCH_CALLS
+
+    def factory(slug: str, R: int, C: int) -> Settings:
+        key = (slug, int(R), int(C))
+        if key in cache:
+            return cache[key]
+        effective_min = min(global_min, C)
+        view = global_settings.model_copy(
+            update={
+                "TAVILY_MAX_RESULTS": R,
+                "REACT_MAX_SEARCH_CALLS": C,
+                "REACT_MIN_SEARCH_CALLS": effective_min,
+            }
+        )
+        cache[key] = view
+        return view
+
+    return factory
 
 
 async def _run_async(
@@ -270,8 +350,24 @@ async def _run_async(
         "question_count": len(questions_preview),
         "question_ids": [q.id for q in questions_preview],
     }
-    config_snapshot = dbmod.snapshot_settings(settings)
     started_at = dbmod.utcnow_iso()
+
+    # Cartesian-expand (real_model, R, C) -> virtual slug list. Single-value
+    # R / C in .env (length-1 lists) reduce this to one virtual slug per model,
+    # which is exactly the v4 single-cell behavior with a longer .db filename.
+    real_models = list(settings.MODELS)
+    r_list = list(settings.TAVILY_MAX_RESULTS)
+    c_list = list(settings.REACT_MAX_SEARCH_CALLS)
+    global_min = settings.REACT_MIN_SEARCH_CALLS
+    cell_index: dict[str, tuple[str, int, int, int]] = {}
+    virtual_models: list[str] = []
+    for real, R, C in itertools.product(real_models, r_list, c_list):
+        slug = dbmod.compose_virtual_slug(real, R, C)
+        effective_min = min(global_min, C)
+        cell_index[slug] = (real, R, C, effective_min)
+        virtual_models.append(slug)
+
+    settings_factory = _make_settings_factory(settings)
 
     model_files: dict[str, str] = {}
     conns: dict[str, sqlite3.Connection] = {}
@@ -279,18 +375,23 @@ async def _run_async(
     questions_by_model: dict[str, list] = {}
 
     try:
-        for model in settings.MODELS:
-            slug = dbmod.model_slug_safe(model)
-            db_path = db_dir / f"{slug}.db"
-            model_files[model] = db_path.name
+        for virtual_model in virtual_models:
+            real_model, R, C, effective_min = cell_index[virtual_model]
+            slug_safe = dbmod.model_slug_safe(virtual_model)
+            db_path = db_dir / f"{slug_safe}.db"
+            model_files[virtual_model] = db_path.name
+            cell_settings = settings_factory(virtual_model, R, C)
             conn, templates, questions = _init_model_db(
                 db_path=db_path,
-                settings=settings,
+                cell_settings=cell_settings,
                 run_id=run_id,
-                model=model,
+                virtual_model=virtual_model,
+                real_model=real_model,
+                R=R,
+                C=C,
+                effective_min_search_calls=effective_min,
                 source_path=source_path,
                 filters=filters,
-                config_snapshot=config_snapshot,
                 filters_snapshot=filters_snapshot,
                 source_db_hash=source_hash,
                 metadata_hash=metadata_hash,
@@ -300,9 +401,9 @@ async def _run_async(
                 belief_protocol_text=belief_text,
                 belief_protocol_hash=belief_hash,
             )
-            conns[model] = conn
-            templates_by_model[model] = templates
-            questions_by_model[model] = questions
+            conns[virtual_model] = conn
+            templates_by_model[virtual_model] = templates
+            questions_by_model[virtual_model] = questions
 
         manifest_path = run_dir / "manifest.json"
         _write_manifest(
@@ -312,6 +413,8 @@ async def _run_async(
             filters=filters,
             question_count=len(questions_preview),
             question_ids=[q.id for q in questions_preview],
+            virtual_models=virtual_models,
+            real_models=real_models,
             model_files=model_files,
             source_db_hash=source_hash,
             metadata_hash=metadata_hash,
@@ -321,18 +424,24 @@ async def _run_async(
             started_at=started_at,
         )
 
-        primary_model = settings.MODELS[0]
+        primary_model = virtual_models[0]
         templates = templates_by_model[primary_model]
         questions = questions_by_model[primary_model]
 
+        # The runner iterates `settings.MODELS` to build the task plan. To
+        # preserve that contract while expanding to virtual slugs, hand it a
+        # cell-local view of settings whose MODELS field is the virtual list.
+        runner_settings = settings.model_copy(update={"MODELS": virtual_models})
+
         try:
             stats = await runner.run(
-                settings=settings,
+                settings=runner_settings,
                 filters=filters,
                 questions=questions,
                 templates=templates,
                 run_id=run_id,
                 conns=conns,
+                settings_factory=settings_factory,
             )
         except (AuthError, LLMAuthError) as e:
             logger.error("AUTH error, aborting run: {}", e)

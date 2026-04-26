@@ -398,12 +398,65 @@ def model_slug_safe(model: str) -> str:
     `/` is converted to `__` (to keep the provider/model visual split) and any
     other character outside `[A-Za-z0-9._-]` becomes `_`. Collisions are not
     expected in practice because the original slug space is small.
+
+    Examples:
+        >>> model_slug_safe("anthropic/claude-sonnet-4.5")
+        'anthropic__claude-sonnet-4.5'
+        >>> model_slug_safe("openai/gpt-5::r5::c3")
+        'openai__gpt-5__r5__c3'
     """
     if not model:
         raise ValueError("model slug must not be empty")
     safe = model.replace("/", "__")
     safe = _UNSAFE_CHARS.sub("_", safe)
     return safe
+
+
+# ---------- Virtual slug for (real_model, R, C) grid cells ----------
+
+_VIRTUAL_SLUG_RE = re.compile(r"^(?P<real>.+?)::r(?P<R>\d+)::c(?P<C>\d+)$")
+
+
+def compose_virtual_slug(real_model: str, R: int, C: int) -> str:
+    """Encode a `(real_model, R, C)` grid cell into a single slug.
+
+    `R` is the cell-local `TAVILY_MAX_RESULTS` and `C` is the cell-local
+    `REACT_MAX_SEARCH_CALLS`. The returned slug is opaque to the runner /
+    DB schema / analysis main path: those layers treat it as just another
+    `model: str`. Only `evaluation.py` (dispatcher) calls this and only
+    `analysis/grid.py` reverses it via `parse_virtual_slug`.
+
+    The `::` delimiter is used because no LLM provider slug we encounter
+    contains it (OpenRouter `openai/gpt-5`, 阿里百炼 `qwen3-max`, etc.) and
+    `model_slug_safe` already normalises `:` to `_` for filesystem use.
+
+    Raises ValueError if `real_model` itself contains `::` (would break
+    round-tripping via `parse_virtual_slug`).
+    """
+    if "::" in real_model:
+        raise ValueError(
+            f"real_model slug must not contain '::' (got {real_model!r})"
+        )
+    return f"{real_model}::r{int(R)}::c{int(C)}"
+
+
+def parse_virtual_slug(slug: str) -> tuple[str, int, int] | None:
+    """Inverse of `compose_virtual_slug`.
+
+    Returns `(real_model, R, C)` when `slug` matches the virtual pattern,
+    else returns `None` (caller treats it as a plain non-virtual slug).
+    Never raises.
+
+    The regex uses non-greedy `(.+?)` to handle real_models that contain
+    `_` or other special characters; the `::r{R}::c{C}` tail is anchored
+    by `$` so trailing junk also yields `None`.
+    """
+    if not isinstance(slug, str):
+        return None
+    m = _VIRTUAL_SLUG_RE.match(slug)
+    if m is None:
+        return None
+    return m.group("real"), int(m.group("R")), int(m.group("C"))
 
 
 # ---------- Run meta (per-model DB) ----------
@@ -425,6 +478,7 @@ def register_run_meta(
     reflection_protocol_hash: str | None = None,
     belief_protocol_text: str | None = None,
     belief_protocol_hash: str | None = None,
+    grid_origin: dict[str, Any] | None = None,
 ) -> None:
     """Insert or refresh the single `run_meta` row for this model's DB.
 
@@ -432,7 +486,18 @@ def register_run_meta(
     start timestamp survives. `reflection_protocol_text` / `..._hash` and
     `belief_protocol_text` / `..._hash` are independent of
     `prompt_templates_hash` (DESIGN.md decision 2 + v4 belief decision).
+
+    `grid_origin`, when provided, is injected into the persisted
+    `config_snapshot` JSON under the top-level key `grid_origin`. The
+    dispatcher in `evaluation.py` assembles it as
+    `{"real_model": str, "R": int, "C": int, "effective_min_search_calls": int}`
+    so the resulting .db is self-describing about the grid cell it covers.
+    When omitted (legacy / non-grid path) the key is NOT written, preserving
+    byte-level compatibility with v4 single-cell snapshots.
     """
+    if grid_origin is not None:
+        config_snapshot = {**config_snapshot, "grid_origin": grid_origin}
+
     conn.execute(
         """
         INSERT INTO run_meta (

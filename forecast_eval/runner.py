@@ -15,7 +15,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -31,8 +31,13 @@ from .types import QFilter, Question, SampleResult
 @dataclass
 class Task:
     question: Question
-    model: str
+    model: str  # virtual slug `{real}::r{R}::c{C}` in grid runs, plain real slug otherwise
     sample_idx: int
+    # Cell-local Settings sub-view: TAVILY_MAX_RESULTS / REACT_MAX_SEARCH_CALLS
+    # are downcast to single ints by the dispatcher so `run_react` and
+    # `tavily_search` see the right (R, C) per task without contextvars or
+    # closures. See `evaluation.py::_make_settings_factory`.
+    settings: Settings
 
 
 @dataclass
@@ -128,6 +133,7 @@ def build_task_plan(
     settings: Settings,
     completed: dict[str, set[tuple[str, int]]],
     run_id: str,
+    settings_factory: Callable[[str, int, int], Settings] | None = None,
 ) -> tuple[list[Task], dict[str, list[dict[str, Any]]], RunStats]:
     """Expand (questions × models × samples), drop resumed cells, then split:
        - `todo`: LLM work to dispatch (per-model writers consume this)
@@ -137,17 +143,42 @@ def build_task_plan(
 
     Resume takes precedence over cutoff filtering — a cell already completed
     must never be re-emitted as skipped_training_cutoff.
+
+    `settings_factory(virtual_slug, R, C) -> Settings` returns the cell-local
+    Settings sub-view; the dispatcher in evaluation.py supplies it. When None
+    (legacy callers / tests), each task inherits the global `settings`
+    unchanged. Cutoff lookups always go through the real model name (parsed
+    out of virtual slug when applicable) so `MODEL_TRAINING_CUTOFFS` keeps the
+    human-friendly real slug as key.
     """
     stats = RunStats()
     todo: list[Task] = []
     cutoff_rows: dict[str, list[dict[str, Any]]] = {m: [] for m in settings.MODELS}
 
+    def _resolve_settings(slug: str) -> Settings:
+        if settings_factory is None:
+            return settings
+        parsed = dbmod.parse_virtual_slug(slug)
+        if parsed is None:
+            # Non-virtual slug: fall back to globals' first-element R/C so
+            # legacy single-cell callers still get a coherent sub-view.
+            R = int(settings.TAVILY_MAX_RESULTS[0]) if settings.TAVILY_MAX_RESULTS else 0
+            C = int(settings.REACT_MAX_SEARCH_CALLS[0]) if settings.REACT_MAX_SEARCH_CALLS else 0
+            return settings_factory(slug, R, C)
+        _real, R, C = parsed
+        return settings_factory(slug, R, C)
+
     for q in questions:
         q_end = date.fromisoformat(q.end_time)
         for model in settings.MODELS:
-            cutoff = settings.MODEL_TRAINING_CUTOFFS.get(model)
+            # `model` may be a virtual slug `{real}::r{R}::c{C}` — peel the real
+            # part off for cutoff lookup; falls back to `model` when not virtual.
+            parsed = dbmod.parse_virtual_slug(model)
+            real_model = parsed[0] if parsed is not None else model
+            cutoff = settings.MODEL_TRAINING_CUTOFFS.get(real_model)
             is_cutoff_hit = cutoff is not None and q_end <= cutoff
             done_for_model = completed.get(model, set())
+            cell_settings = _resolve_settings(model)
             for s in range(settings.SAMPLING_N):
                 stats.total += 1
                 key = (q.id, s)
@@ -158,7 +189,9 @@ def build_task_plan(
                     cutoff_rows[model].append(_skipped_cutoff_row(q, s))
                     stats.skipped_cutoff += 1
                     continue
-                todo.append(Task(question=q, model=model, sample_idx=s))
+                todo.append(
+                    Task(question=q, model=model, sample_idx=s, settings=cell_settings)
+                )
                 stats.planned += 1
 
     return todo, cutoff_rows, stats
@@ -167,7 +200,7 @@ def build_task_plan(
 async def _run_task_with_retry(
     task: Task,
     *,
-    settings: Settings,
+    _global_settings: Settings,  # kept for type / signal use; per-task config is read from task.settings
     templates: dict[str, str],
     run_id: str,
     llm_semaphore: asyncio.Semaphore,
@@ -177,6 +210,12 @@ async def _run_task_with_retry(
 
     AUTH errors re-raise so the caller aborts the whole run; everything else
     produces a row with `error=...` the writer can still land.
+
+    All cell-local config (TAVILY_MAX_RESULTS / REACT_MAX_SEARCH_CALLS / etc.)
+    is read from `task.settings` — the dispatcher's per-cell sub-view. The
+    `_global_settings` parameter is unused for per-task logic; we keep it as a
+    typed channel for future global-only signals (semaphore sizes are already
+    materialised by the caller).
     """
     try:
         async with llm_semaphore:
@@ -184,7 +223,7 @@ async def _run_task_with_retry(
                 task.question,
                 model=task.model,
                 sample_idx=task.sample_idx,
-                settings=settings,
+                settings=task.settings,
                 templates=templates,
                 run_id=run_id,
                 search_semaphore=search_semaphore,
@@ -262,6 +301,7 @@ async def run(
     templates: dict[str, str],
     run_id: str,
     conns: dict[str, sqlite3.Connection],
+    settings_factory: Callable[[str, int, int], Settings] | None = None,
 ) -> RunStats:
     """Orchestrate one run across all configured models.
 
@@ -274,11 +314,16 @@ async def run(
 
     This function then:
       * loads per-model resume sets
-      * plans the task list + cutoff rows (one list per model)
+      * plans the task list + cutoff rows (one list per model), each Task
+        carrying a cell-local settings sub-view from `settings_factory`
       * spawns one `AsyncWriter` per model
       * drives the ReAct loop across `LLM_MAX_CONCURRENCY` workers
       * finishes each model's `run_meta` row on clean exit (or leaves it open
         if aborted by AUTH)
+
+    `settings_factory(slug) -> Settings` lets the dispatcher inject per-cell
+    R / C as cell-local sub-views. When omitted (legacy callers), each Task
+    inherits the global `settings` unchanged, preserving v4 byte-level behavior.
     """
     sampling_n = settings.SAMPLING_N
     models = list(conns.keys())
@@ -292,6 +337,7 @@ async def run(
         settings=settings,
         completed=completed,
         run_id=run_id,
+        settings_factory=settings_factory,
     )
 
     logger.info(
@@ -328,7 +374,7 @@ async def run(
         try:
             row = await _run_task_with_retry(
                 task,
-                settings=settings,
+                _global_settings=settings,
                 templates=templates,
                 run_id=run_id,
                 llm_semaphore=llm_sem,
