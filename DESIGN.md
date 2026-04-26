@@ -459,6 +459,50 @@ LLM_BACKOFF_SERVER_5XX_S=5,15,30,60,120
 
 `error_breakdown.csv` 直接按这个分类切片。设计哲学：**所有失败行为都要能在报表里被分类汇总**——一个 `error="something went wrong"` 是没用的。
 
+#### 6.3.1 v5.1 harness-resilience：分类边界扩展
+
+跨 provider 评测时遇到的两类常见误分类：
+
+- **Aliyun 内容审核 (`data_inspection_failed`) 被误归 `bad_request`**：
+  v5.0 的 `_body_matches` 只识别 `content_policy / content_filter / safety` 等
+  英文 needle，DashScope (`https://dashscope.aliyuncs.com`) 返回的
+  `code=data_inspection_failed` 落入兜底 `bad_request`。v5.1 把 needle 列表
+  统一到 `errors.CONTENT_POLICY_NEEDLES`，新增 `data_inspection_failed` /
+  `inappropriate content` 与中文 token (`敏感` / `违规` / `不当内容` /
+  `审核未通过`)，命中即归 `content_policy`、保持 `MUST NOT 重试` 语义。
+- **远端断连 `RemoteProtocolError` 被误归 `unknown`**：v5.0 的网络异常元组
+  只列了 `ConnectError` / `ReadTimeout` / `ConnectTimeout` / `WriteTimeout`，
+  `httpx.RemoteProtocolError` ("Server disconnected without sending a response.")
+  落到 `UNKNOWN`，整个 sample 失败而不重试。v5.1 把网络异常族扩到与 httpx
+  现有 `NetworkError` 子集对齐：`+RemoteProtocolError / +WriteError /
+  +PoolTimeout`，LLM 端 (`errors.classify`) 与 Tavily 端 (`search._single_request`)
+  同步扩展。
+
+### 6.4 v5.1 ReAct 循环兜底机制
+
+跨模型对比时，**`parse_failure_rate` 必须只反映模型自身的格式失败，而非
+harness 上游的资源耗尽**。v5.0 在 `REACT_MAX_SEARCH_CALLS` 耗尽后仍向 LLM
+暴露 `web_search` schema，模型继续要工具撞 `REACT_MAX_STEPS` 上限，
+`final_raw=""` 直接 parse_ok=0。这把"工具饥渴"伪装成了"格式失败"。
+
+v5.1 加了两道防线：
+
+- **D1**: `REACT_BUDGET_EXCEEDED_DROP_TOOLS=True`（默认开）— 一旦累计搜索数
+  达到上限，下一轮 `llm_chat` 调用 `tools=[]`，让模型只能输出 content；
+  原有 "no tool_calls → break" 分支自然兜住。
+- **D2**: `REACT_FINAL_ANSWER_RETRY=True`（默认开）— 如果循环正常退出但
+  `final_raw == ""`（典型场景：步数耗尽前还在反复 tool_call），追加一条
+  "Time to commit. Output your final \boxed{...} answer now without further
+  searches or tool calls." user 消息，再以 `tools=[]` 调一次 LLM。该重试
+  计入 `react_steps` 与 `step_metrics`（每步可复盘），不计入 `nudges_used`
+  （语义不同），新独立列 `final_answer_retry_used` 记录 0/1。
+
+新分析列 `final_answer_retry_rate` 落在 `per_model_summary.csv`，让分析师
+可以单独看到"兜底兜了多少"，必要时再决定是否把它从 `pass_at_1` 分母里
+扣除。两个开关默认开，只用于 A/B 对照实验时关闭。schema 升级到 v5：
+`run_results` 每个 sample 槽位新增 `s{i}_final_answer_retry_used INTEGER`，
+旧 v4 DB 经 `init_schema` 自动 ALTER ADD（NULL 兼容）。
+
 ---
 
 ## 7. 配置即合约：`.env` 是单一事实来源

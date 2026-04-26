@@ -289,6 +289,33 @@ the grid in slug strings rather than introducing a new schema axis.
   `content_policy`, …) → next run reuses the DB and retries that
   `(question_id, sample_idx)` cell.
 
+## Harness resilience switches (v5.1)
+
+Two opt-out switches default ON; toggle to `false` in `.env` only for A/B
+controls (`openspec/changes/harness-resilience-v1/`):
+
+- `REACT_FINAL_ANSWER_RETRY` — when the ReAct loop exits cleanly with an
+  empty `final_raw` (model spent all steps on tool_calls and never produced
+  content), make one extra `llm_chat` call with `tools=[]` and a fixed
+  "commit your `\boxed{...}` answer" user nudge. The retry counts as one
+  step in `react_steps` / `step_metrics` but NOT in `nudges_used`. The new
+  per-sample column `final_answer_retry_used` (0/1) records the outcome and
+  rolls up to `final_answer_retry_rate` in `per_model_summary.csv`.
+- `REACT_BUDGET_EXCEEDED_DROP_TOOLS` — once cumulative `web_search` calls
+  reach `REACT_MAX_SEARCH_CALLS`, every subsequent LLM call drops the tool
+  schema (`tools=[]`). The model can no longer request more searches; it
+  must finalise its answer or the bail-out retry above mops up.
+
+Error classification (`forecast_eval/errors.py`) was also widened: HTTP 400
+bodies containing any of `data_inspection_failed`, `inappropriate content`,
+`敏感`, `违规`, `不当内容`, `审核未通过` (in addition to the legacy
+`content_policy` / `content_filter` / `safety` / `content_policy_violation`
+needles, see `errors.CONTENT_POLICY_NEEDLES`) classify as `content_policy`,
+not `bad_request`. The transient-network family now also covers
+`httpx.RemoteProtocolError`, `WriteError`, `WriteTimeout`, `PoolTimeout` —
+both the LLM client and the Tavily search client retry these instead of
+treating them as fatal.
+
 Set `RUN_ID=<existing-run-id>` in `.env` (or CLI env) to resume into the same
 folder; leaving it blank mints a fresh `YYYYMMDD-HHMMSS-xxxx` id.
 
