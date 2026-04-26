@@ -179,12 +179,40 @@ def test_snapshot_settings_redacts_all_keys(tmp_path: Path, monkeypatch: pytest.
     snap = dbmod.snapshot_settings(s)
     blob = json.dumps(snap)
     assert s.LLM_API_KEY not in blob
-    assert s.TAVILY_API_KEY not in blob
+    # TAVILY_API_KEY 升级为 list[str], 每把 key 都不应出现在落盘 blob 或 repr 中.
+    assert isinstance(s.TAVILY_API_KEY, list)
+    for raw in s.TAVILY_API_KEY:
+        assert raw not in blob
+        assert raw not in repr(s)
     assert snap["LLM_API_KEY"]["provider"] == "llm"
-    assert snap["TAVILY_API_KEY"]["provider"] == "tavily"
+    snap_tav = snap["TAVILY_API_KEY"]
+    assert isinstance(snap_tav, list)
+    assert len(snap_tav) == len(s.TAVILY_API_KEY)
+    for entry in snap_tav:
+        assert entry["provider"] == "tavily"
+        assert "sha256_12" in entry and len(entry["sha256_12"]) == 12
     assert snap["MODEL_TRAINING_CUTOFFS"]["openai/gpt-5"] == "2024-10-01"
     assert s.LLM_API_KEY not in repr(s)
-    assert s.TAVILY_API_KEY not in repr(s)
+
+
+def test_snapshot_settings_redacts_multiple_tavily_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_API_KEY", "sk-or-v1-ABCDEFGHIJKLMNOP0123")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-AAA1111111111111,tvly-BBB2222222222222")
+    monkeypatch.setenv("MODELS", "openai/gpt-5")
+    monkeypatch.setenv("RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("SOURCE_DB", str(tmp_path / "forecast_eval_set_example.db"))
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    s = Settings(_env_file=None)
+
+    assert s.TAVILY_API_KEY == ["tvly-AAA1111111111111", "tvly-BBB2222222222222"]
+    snap = dbmod.snapshot_settings(s)
+    snap_tav = snap["TAVILY_API_KEY"]
+    assert isinstance(snap_tav, list) and len(snap_tav) == 2
+    blob = json.dumps(snap)
+    for raw in s.TAVILY_API_KEY:
+        assert raw not in blob
 
 
 def test_register_run_meta_and_load_completed(tmp_path: Path) -> None:
