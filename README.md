@@ -135,8 +135,25 @@ runs/
                                     #   Pr(correct|x) and E[NLL|x]
       confidence_calibration.csv    # subjective confidence vs hit rate
       numeric_confidence_calibration.csv  # max_p binning vs hit rate
+      # ---- grid search (only when manifest.grid is present) ----
+      grid_summary.csv              # per (real_model, R, C) main table:
+                                    #   acc/BI/NLL + 95% CI + cost columns
+      grid_marginal_C.csv           # fixed R = grid.default_r, varying C
+      grid_marginal_R.csv           # fixed C = grid.default_c, varying R
+      grid_pareto.csv               # every cell with `dominated_by` =
+                                    #   "" on the Pareto frontier else the
+                                    #   lex-smallest dominator slug
+      grid_winrate.csv              # pairwise (R, C)-cell win counts +
+                                    #   significant-cell tally
       figs/                         # only after `python scripts/plot_analysis.py`
                                     #   (matplotlib not in core deps)
+                                    # grid family (multi-cell runs only):
+                                    #   grid_pareto_C.png         (Fig 1 main, fix R=default_r)
+                                    #   grid_pareto_C_R{R}.png    (per-R appendix)
+                                    #   grid_heatmap_RC_<rm>.png  (Fig 2 per real_model)
+                                    #   grid_curve_C.png          (Fig 3, BI/NLL/Acc vs C)
+                                    #   grid_curve_R.png          (Fig 3, BI/NLL/Acc vs R)
+                                    #   grid_winrate_matrix.png   (Fig 4 winrate)
     logs/
       {run_id}.log
 ```
@@ -198,6 +215,39 @@ trajectories (5 sample questions), tool-usage PDP per feature, and a
 difficulty grid heatmap. Each plot is best-effort: when the corresponding
 CSV/JSON is missing (e.g. no paired runs → no `reflection_ab.csv`), the
 plot is silently skipped instead of failing the whole pipeline.
+
+## Grid search quickstart
+
+`TAVILY_MAX_RESULTS` (R) and `REACT_MAX_SEARCH_CALLS` (C) accept a comma-
+separated list of positive integers. Setting both to multi-value lists
+produces `|MODELS| · |R| · |C|` independent **virtual model slugs** of
+the form `{real_model}::r{R}::c{C}`. Each cell lives in its own DB file
+(`runs/<id>/db/<real>__r{R}__c{C}.db`) and re-uses every existing
+analysis stage; an extra grid pass writes 5 `grid_*.csv` long-tables
+plus a paper figure family under `analysis/figs/`.
+
+Example `.env` snippet:
+
+```
+MODELS=openai/gpt-5,anthropic/claude-sonnet-4.5
+TAVILY_MAX_RESULTS=5,10
+REACT_MAX_SEARCH_CALLS=1,3,5,8
+GRID_DEFAULT_R=5    # main figure anchor; must be in TAVILY_MAX_RESULTS
+GRID_DEFAULT_C=5    # symmetric, in REACT_MAX_SEARCH_CALLS
+```
+
+Then run a single command:
+
+```bash
+python evaluation.py
+python scripts/plot_analysis.py runs/<run_id>
+```
+
+Single-value `.env` (the legacy default, e.g. `TAVILY_MAX_RESULTS=5`) is
+parsed as a length-1 list, so existing setups stay byte-equivalent
+except for the new `__r{R}__c{C}` suffix on DB filenames. See
+`DESIGN.md` "grid search via virtual slug (C 方案)" for why we encode
+the grid in slug strings rather than introducing a new schema axis.
 
 ## Resume semantics
 

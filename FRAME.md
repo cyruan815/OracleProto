@@ -1205,6 +1205,42 @@ forest / Murphy stacked / belief trajectory / tool PDP / difficulty grid
 run 没有 belief_trace、`belief_evolution.csv` 不写）。这套向后兼容保证
 v3→v4 单向迁移不重跑历史 run。
 
+### 11.6 网格搜索分析（`react-tavily-grid-search`）
+
+`Settings.TAVILY_MAX_RESULTS`（R）与 `REACT_MAX_SEARCH_CALLS`（C）支持
+逗号分隔的多值列表；evaluation 入口对 `MODELS × R_list × C_list` 做
+笛卡尔展开，每个 `(real_model, R, C)` cell 编码为虚拟 slug
+`{real}::r{R}::c{C}`，runner / DB schema / 既有 analysis 主流程**一行
+不动**。`forecast_eval/analysis/grid.py` 负责反解三元组、重聚合、出 paper
+长表。详细决策见 `DESIGN.md` "grid search via virtual slug (C 方案)"。
+
+| 文件 | 内容 |
+| --- | --- |
+| `grid_summary.csv` | per `(real_model, R, C)` 17 列主表：accuracy/BI/NLL + 95% CI + `mean_search_calls / mean_latency_ms` 等 cost 列 |
+| `grid_marginal_C.csv` / `grid_marginal_R.csv` | 固定 `R = default_r` 沿 C 扫 / 固定 `C = default_c` 沿 R 扫 |
+| `grid_pareto.csv` | 每个 cell 一行；frontier cell 的 `dominated_by` 列空，否则记字典序最小的支配者虚拟 slug |
+| `grid_winrate.csv` | 每对 `(real_model_a, real_model_b)`：跨 (R, C) cell 的 wins/ties + paired bootstrap 显著 cell 计数 |
+
+CI 全部走 `inference.paired_bootstrap`（5000 次重抽，seed=42）；BI 域
+CI 通过 "BS 域 paired bootstrap + 单调变换 $\mathrm{BI}=100(1-\sqrt{\mathrm{BS}})$"
+得到，不引入新的统计代码（`DESIGN.md` D8）。
+
+可视化由 `scripts/plot_analysis.py` 在主流程检测到 `manifest.grid` 段
+时按需输出：
+
+| 图 | 内容 |
+| --- | --- |
+| `grid_pareto_C.png` | Fig 1 主图：固定 `R = default_r`，每个 real_model 一条 `BI vs mean_search_calls` 曲线 + 95% CI band，Pareto cell 标星 |
+| `grid_pareto_C_R{R}.png` | 附录：每个非默认 R 的同款图 |
+| `grid_heatmap_RC_<real_model>.png` | Fig 2 per real_model：(R, C) 平面 BI 热力图，与 best cell CI 重叠的格子 hatch |
+| `grid_curve_C.png` / `grid_curve_R.png` | Fig 3：3 行（BI / NLL / Acc）× M 列 panel，CI shading + 饱和点（一阶差分 < 0.01）虚线竖标 |
+| `grid_winrate_matrix.png` | Fig 4：`M × M` 行优于列的占比矩阵，sig\_cells_* ≥ 1 的 cell 加 `*` 标记 |
+
+旧 v4 run（manifest 无 `grid` 段）下 `run_grid_analysis` 早退、不写
+任何 `grid_*.csv`；plot 流程也跳过 grid 图族——单值 .env 在新代码下
+解析为长度 1 列表 → 笛卡尔生成单一虚拟 slug，行为与本变更前字节级
+等价（除 .db 文件名后缀 `__r{R}__c{C}`）。
+
 ---
 
 ## 12. CLI 与运行方式

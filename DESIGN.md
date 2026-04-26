@@ -563,6 +563,37 @@ stderr（人看）+ rotating file（机器看）双通道；rotation 100 MB / re
 * **变更先写 spec、再写代码**：避免"代码 merge 后才发现设计有问题"。
 * **变更档案与代码 diff 并存**：将来回看一次架构演进时，能看到"为什么改"，而不只是"改了什么"。
 
+### 10.1 grid search via virtual slug（C 方案）
+
+`react-tavily-grid-search` 把 *(Q × M × N)* 三轴拓展为
+*(Q × M × R × C × N)*，但**不**升级 schema，**不**动 runner 核心循环。
+方法是在 evaluation 入口把每个 `(real_model, R, C)` 三元组编码成
+**虚拟 model slug** `{real}::r{R}::c{C}`，runner / DB / analysis 主流程把
+它当不透明字符串走完——既有产物自然按虚拟 slug 多行展开，新模块
+`forecast_eval/analysis/grid.py` 反解三元组、重聚合、出 paper 长表与图。
+完整决策档案见 `openspec/changes/react-tavily-grid-search/design.md`，
+关键 10 条摘要：
+
+| ID | 决策 |
+| --- | --- |
+| **D1** | 选 C 方案（虚拟 slug + per-task settings 视图）；拒绝 A（单 run 多 (R, C) DB——schema v5 重写）和 B（每 cell 一个 run_dir——`runs/` 膨胀 + 跨 run 聚合复杂） |
+| **D2** | 虚拟 slug 用 `::r{R}::c{C}` 后缀；`db.model_slug_safe` 把 `::` 替换为 `_` 后落 fs-safe 文件名 `openai__gpt-5__r5__c3.db`；正则 `^(?P<real>.+?)::r(?P<R>\d+)::c(?P<C>\d+)$` non-greedy 抓 real_model |
+| **D3** | `runner.Task` 携带 cell-local `settings: Settings`；dispatcher 用 `model_copy(update={...})` 派生不可变子视图；`react.py` / `search.py` 字节级不动 |
+| **D4** | `REACT_MIN_SEARCH_CALLS > min(C_list)` 才 raise；某 cell `C < MIN` 时 silent clamp `effective_min = min(MIN, C)`，写到 `run_meta.config_snapshot.grid_origin` 留审计 |
+| **D5** | `run_meta.config_snapshot` 写**单值** R/C；新增 `grid_origin = {real_model, R, C, effective_min_search_calls}` 子键；manifest 顶层加 `grid` 段（`r_list / c_list / default_r / default_c / real_models / n_cells`），分析层不必逐 .db 反解三元组 |
+| **D6** | `manifest.models` / `manifest.model_files` 字段语义保持"虚拟 slug 列表"；新增 `grid.real_models` 是去重后的真实 slug 便利字段——v4 analysis 主流程读 `manifest.models` 当 db 文件清单的契约不破 |
+| **D7** | `analysis/__init__.py::run_analysis` 主路径**零侵入**；末尾追加一次 `grid.run_grid_analysis(...)`，用 `try/except` 包裹（与 reflection A/B 同款 best-effort），失败不中断既有流水线 |
+| **D8** | grid CI 全部走 `inference.paired_bootstrap`（5000 次重抽，seed=42）；BI 域 CI 通过"BS 域 paired bootstrap + 单调变换 $\mathrm{BI}=100(1-\sqrt{\mathrm{BS}})$"得到——**不**新增统计代码 |
+| **D9** | Pareto 前沿 cost 维度默认 `mean_search_calls`（实际平均搜索次数，比 C 上限诚实），允许 `mean_latency_ms / C` fallback；y 轴默认 `bi_mean`，可选 `nll_mean`（最小化方向） |
+| **D10** | Fig 1 主图固定 `R = GRID_DEFAULT_R`，每个 real_model 一条曲线；其它 R 值各出一张同款附录图，避免主图叠加 M·\|R\| 条曲线后不可读 |
+
+`Phase 0 / 1 / 2` 三个 PR 顺序 ship——每阶段都通过 `pytest -q` 与
+`openspec validate --strict`，且每阶段删掉自身代码后系统等价于上阶段
+完成态（Rollback Strategy）。单值 .env 在新代码下解析为长度 1 列表
+→ 笛卡尔生成单一虚拟 slug，**唯一**可见差异是 .db 文件名多了
+`__r{R}__c{C}` 后缀；既有 v4 run（manifest 无 `grid` 段）下 grid
+分析与 grid 图族整体早退，零侵入。
+
 ---
 
 ## 11. 设计一致性原则汇总
