@@ -146,8 +146,21 @@ async def test_smoke_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     src.close()
     ids = tuple(r["id"] for r in rows)
 
-    # Filter the source DB down to exactly those 3 questions via a fresh loader
-    model = settings.MODELS[0]
+    # Filter the source DB down to exactly those 3 questions via a fresh loader.
+    # Even single-value .env now goes through the virtual slug pipeline; we
+    # mirror evaluation.py here by composing one virtual slug for the (real,
+    # R[0], C[0]) cell and downcasting Settings to a cell-local sub-view.
+    real_model = settings.MODELS[0]
+    R = int(settings.TAVILY_MAX_RESULTS[0])
+    C = int(settings.REACT_MAX_SEARCH_CALLS[0])
+    model = dbmod.compose_virtual_slug(real_model, R, C)
+    cell_settings = settings.model_copy(
+        update={
+            "MODELS": [model],
+            "TAVILY_MAX_RESULTS": R,
+            "REACT_MAX_SEARCH_CALLS": C,
+        }
+    )
     slug = dbmod.model_slug_safe(model)
     model_db = run_dir / "db" / f"{slug}.db"
     conn = dbmod.connect(model_db)
@@ -192,16 +205,22 @@ async def test_smoke_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         conn,
         run_id=run_id,
         model=model,
-        sampling_n=settings.SAMPLING_N,
+        sampling_n=cell_settings.SAMPLING_N,
         filters_snapshot={"question_types": ["yes_no"], "question_count": len(questions)},
-        config_snapshot=dbmod.snapshot_settings(settings),
+        config_snapshot=dbmod.snapshot_settings(cell_settings),
         source_db_hash=dbmod.compute_source_db_hash(SOURCE_DB),
         metadata_hash=dbmod.compute_metadata_hash(loader.load_raw_features_json(SOURCE_DB)),
         prompt_templates_hash=dbmod.compute_prompt_templates_hash(templates),
+        grid_origin={
+            "real_model": real_model,
+            "R": R,
+            "C": C,
+            "effective_min_search_calls": min(cell_settings.REACT_MIN_SEARCH_CALLS, C),
+        },
     )
 
     stats = await runner.run(
-        settings=settings,
+        settings=cell_settings,
         filters=QFilter(question_types=frozenset({"yes_no"})),
         questions=questions,
         templates=templates,

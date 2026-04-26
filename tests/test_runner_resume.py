@@ -140,3 +140,54 @@ def test_missing_model_in_completed_falls_back_to_empty() -> None:
     )
     assert len(todo) == 3
     assert all(t.model == "m/b" for t in todo)
+
+
+def test_virtual_slug_resume_isolated_per_cell() -> None:
+    """Different (R, C) cells of the same real model live in different .db
+    files (virtual slug = MODELS dict key). build_task_plan must therefore
+    treat them as independent: a fully-done cell does not leak completion
+    into a fresh cell with a different (R, C).
+    """
+    # Simulate two cells of the same real model: cell A is fully done,
+    # cell B is brand new (no .db exists, so completed[cell_B] is empty).
+    cell_a = "m/a::r5::c3"
+    cell_b = "m/a::r5::c5"
+    settings = _StubSettings(MODELS=[cell_a, cell_b])
+    questions = [_q("q1")]
+    completed = {
+        cell_a: {("q1", 0), ("q1", 1), ("q1", 2)},  # fully done
+        cell_b: set(),                                # new cell from scratch
+    }
+    todo, cutoff_rows, stats = build_task_plan(
+        questions=questions,
+        settings=settings,
+        completed=completed,
+        run_id="run-1",
+    )
+    # Cell A contributes 0; cell B contributes 3 (full SAMPLING_N=3 fan-out)
+    assert {t.model for t in todo} == {cell_b}
+    assert len(todo) == 3
+    assert cutoff_rows == {cell_a: [], cell_b: []}
+
+
+def test_virtual_slug_cutoff_uses_real_model_key() -> None:
+    """`MODEL_TRAINING_CUTOFFS` is keyed by the real model slug, not the
+    virtual one. After `parse_virtual_slug` peels off the (R, C) tail,
+    cutoff lookups must hit the real-key entry.
+    """
+    cutoffs = {"m/a": date.fromisoformat("2099-01-01")}  # everything before 2099 is cut off
+    settings = _StubSettings(
+        MODELS=["m/a::r5::c3"],
+        MODEL_TRAINING_CUTOFFS=cutoffs,
+    )
+    questions = [_q("q1", end_time="2026-05-01")]  # end_time < cutoff → cutoff hit
+    completed: dict[str, set[tuple[str, int]]] = {"m/a::r5::c3": set()}
+    todo, cutoff_rows, stats = build_task_plan(
+        questions=questions,
+        settings=settings,
+        completed=completed,
+        run_id="run-1",
+    )
+    assert len(todo) == 0
+    assert stats.skipped_cutoff == 3
+    assert len(cutoff_rows["m/a::r5::c3"]) == 3

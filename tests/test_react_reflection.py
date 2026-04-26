@@ -44,6 +44,7 @@ def _yes_no_question() -> Question:
 
 
 def _make_settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Settings:
+    """Cell-local Settings sub-view (mirrors evaluation._make_settings_factory)."""
     monkeypatch.setenv("LLM_API_KEY", "sk-or-v1-TEST_ABCDEFGH")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-TEST_ABCDEFGH")
     monkeypatch.setenv("MODELS", "openai/gpt-4o-mini")
@@ -56,7 +57,13 @@ def _make_settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Setting
     monkeypatch.setenv("ENABLE_WEB_SEARCH", "true")
     for k, v in overrides.items():
         monkeypatch.setenv(k, v)
-    return Settings(_env_file=None)
+    base = Settings(_env_file=None)
+    return base.model_copy(
+        update={
+            "TAVILY_MAX_RESULTS": int(base.TAVILY_MAX_RESULTS[0]),
+            "REACT_MAX_SEARCH_CALLS": int(base.REACT_MAX_SEARCH_CALLS[0]),
+        }
+    )
 
 
 class _StubLLM:
