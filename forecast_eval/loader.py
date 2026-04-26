@@ -17,7 +17,8 @@ _REQUIRED_TEMPLATE_KEYS = (
     "outcomes_block_rule",
     "yes_no_output_format",
     "binary_named_output_format",
-    "multiple_choice_output_format",
+    "multiple_choice_single_output_format",
+    "multiple_choice_multi_output_format",
 )
 
 

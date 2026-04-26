@@ -186,7 +186,14 @@ def render_user_prompt(
 
     elif q.question_type == "multiple_choice":
         outcomes_block = _build_outcomes_block(options)
-        output_format = templates["multiple_choice_output_format"]
+        if q.choice_type == "single":
+            output_format = templates["multiple_choice_single_output_format"]
+        elif q.choice_type == "multi":
+            output_format = templates["multiple_choice_multi_output_format"]
+        else:
+            raise ValueError(
+                f"multiple_choice question {q.id!r} has unknown choice_type {q.choice_type!r}"
+            )
 
     else:
         raise ValueError(f"unknown question_type: {q.question_type!r}")
