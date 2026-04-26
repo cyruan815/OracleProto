@@ -128,7 +128,9 @@ def test_init_schema_migrates_v3_to_v4(tmp_path: Path) -> None:
         int(r["version"])
         for r in conn.execute("SELECT version FROM schema_version").fetchall()
     }
-    assert versions == {3, 4}, "v3 → v4 migration must keep v3 row and stamp v4"
+    # v5.1 (harness-resilience): init_schema now chains v3→v4→v5; the v3 row
+    # survives and both upgrade markers get stamped.
+    assert versions == {3, 4, 5}, "v3 → v4 → v5 chained migration must keep v3 row"
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()}
     for i in range(3):
@@ -148,40 +150,43 @@ def test_init_schema_migrates_v3_to_v4(tmp_path: Path) -> None:
     assert row["s0_belief_trace"] is None
     assert row["s0_belief_parse_ok"] is None
 
-    # Idempotency: a second init_schema must not re-stamp v4.
+    # Idempotency: a second init_schema must not re-stamp anything.
     dbmod.init_schema(conn, sampling_n=3)
     versions_after = {
         int(r["version"])
         for r in conn.execute("SELECT version FROM schema_version").fetchall()
     }
-    assert versions_after == {3, 4}
+    assert versions_after == {3, 4, 5}
 
 
-def test_init_schema_idempotent_on_fresh_v4(tmp_path: Path) -> None:
-    """A brand-new v4 DB stamped with `version=4` must not re-INSERT or
-    re-ALTER on subsequent `init_schema` calls."""
-    conn = dbmod.connect(tmp_path / "v4.db")
+def test_init_schema_idempotent_on_fresh_v5(tmp_path: Path) -> None:
+    """A brand-new DB created under the current schema (v5) MUST be stamped
+    only with `version=5` and remain idempotent on second open. (Renamed from
+    the v4 era — fresh DBs land at SCHEMA_VERSION, whatever that is.)"""
+    conn = dbmod.connect(tmp_path / "v5.db")
     dbmod.init_schema(conn, sampling_n=2)
 
     versions_first = {
         int(r["version"])
         for r in conn.execute("SELECT version FROM schema_version").fetchall()
     }
-    assert versions_first == {4}
+    assert versions_first == {dbmod.SCHEMA_VERSION}
 
     dbmod.init_schema(conn, sampling_n=2)
     versions_second = {
         int(r["version"])
         for r in conn.execute("SELECT version FROM schema_version").fetchall()
     }
-    assert versions_second == {4}, "second init_schema must not re-INSERT version=4"
+    assert versions_second == {dbmod.SCHEMA_VERSION}, (
+        "second init_schema must not re-INSERT current SCHEMA_VERSION"
+    )
 
 
-def test_init_schema_rejects_n_mismatch_v4(tmp_path: Path) -> None:
-    """Schema-of-N guardrail still triggers on v4 DBs: opening a `sampling_n=3`
-    DB with `sampling_n=5` raises ValueError listing missing columns (e.g. the
-    new s3_belief_* / s4_belief_* slots)."""
-    conn = dbmod.connect(tmp_path / "v4.db")
+def test_init_schema_rejects_n_mismatch_v5(tmp_path: Path) -> None:
+    """Schema-of-N guardrail still triggers on the current schema: opening a
+    `sampling_n=3` DB with `sampling_n=5` raises ValueError listing missing
+    columns (e.g. the new s3_final_answer_retry_used / s4_belief_* slots)."""
+    conn = dbmod.connect(tmp_path / "v5.db")
     dbmod.init_schema(conn, sampling_n=3)
     with pytest.raises(ValueError, match="missing columns"):
         dbmod.init_schema(conn, sampling_n=5)

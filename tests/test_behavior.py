@@ -449,6 +449,11 @@ def _build_minimal_run(
         "s0_final_answer_letters TEXT", "s0_error TEXT",
         "s0_created_at TEXT", "s0_finish_reason TEXT", "s0_nudges_used INTEGER",
         "s0_belief_final TEXT", "s0_belief_trace TEXT", "s0_belief_parse_ok INTEGER",
+        # v5.1 (harness-resilience): flatten reads this column too. Hand-crafted
+        # fixtures need to include it (NULL is fine — analysis treats unobserved
+        # rows as "feature off"). Trailing column so existing positional INSERTs
+        # don't shift.
+        "s0_final_answer_retry_used INTEGER",
     ]
     conn.execute(f"CREATE TABLE run_results ({', '.join(cols)})")
     conn.execute(
@@ -470,7 +475,7 @@ def _build_minimal_run(
         ])
         conn.execute(
             "INSERT INTO run_results VALUES (?, ?, 1, 1, 2, 200, 100, 0, 500, ?, NULL, "
-            "'2026-04-25T12:00:01Z', 'stop', 0, ?, ?, 1)",
+            "'2026-04-25T12:00:01Z', 'stop', 0, ?, ?, 1, NULL)",
             (qid, correct_pattern[i], '["A"]', belief_final, belief_trace),
         )
     conn.commit()

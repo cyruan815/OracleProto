@@ -66,6 +66,8 @@ def _sample_payload(
         "belief_final": None,
         "belief_trace": None,
         "belief_parse_ok": 0,
+        # v5.1 (harness-resilience) — same KeyError contract as v3 / v4.
+        "final_answer_retry_used": 0,
     }
 
 
@@ -439,7 +441,10 @@ def test_init_schema_migrates_v2_to_v3(tmp_path: Path) -> None:
         int(r["version"])
         for r in conn.execute("SELECT version FROM schema_version").fetchall()
     }
-    assert versions == {2, 3, 4}, "chain migration must keep v2 row and stamp v3 + v4"
+    # v5.1 (harness-resilience) chained the v4→v5 migration onto init_schema.
+    assert versions == {2, 3, 4, 5}, (
+        "chain migration must keep v2 row and stamp v3 + v4 + v5"
+    )
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()}
     for i in range(2):
@@ -471,13 +476,13 @@ def test_init_schema_migrates_v2_to_v3(tmp_path: Path) -> None:
     assert row["s0_belief_final"] is None
     assert row["s0_belief_parse_ok"] is None
 
-    # Idempotency: a second init_schema must not re-stamp v3 / v4.
+    # Idempotency: a second init_schema must not re-stamp v3 / v4 / v5.
     dbmod.init_schema(conn, sampling_n=2)
     versions_after = {
         int(r["version"])
         for r in conn.execute("SELECT version FROM schema_version").fetchall()
     }
-    assert versions_after == {2, 3, 4}
+    assert versions_after == {2, 3, 4, 5}
 
 
 def test_register_run_meta_writes_reflection_fields(tmp_path: Path) -> None:

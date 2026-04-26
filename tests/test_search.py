@@ -319,6 +319,44 @@ async def test_tavily_search_network_error_retries() -> None:
     assert result.ok
 
 
+@respx.mock
+async def test_tavily_search_remote_protocol_error_retries() -> None:
+    """v5.1 (harness-resilience): Tavily server hangs up mid-response. Pre-v5.1
+    except clause (ConnectError / ReadTimeout / ConnectTimeout / asyncio.TimeoutError)
+    let RemoteProtocolError bubble out — sample failed without retry. New
+    clause treats it as a normal network blip and retries."""
+    route = respx.post(TAVILY_ENDPOINT).mock(
+        side_effect=[
+            httpx.RemoteProtocolError("Server disconnected without sending a response."),
+            httpx.Response(200, json={"answer": "ok", "results": []}),
+        ]
+    )
+    settings = _StubSettings()
+    result = await tavily_search("q", "2026-01-17", settings)
+    assert route.call_count == 2
+    assert result.ok
+    assert result.answer == "ok"
+
+
+@respx.mock
+async def test_tavily_search_remote_protocol_error_exhausts_to_payload() -> None:
+    """RemoteProtocolError repeating up to SEARCH_RETRY_MAX MUST return an
+    error payload (not raise). The ReAct loop relies on this so the LLM sees
+    a tool_result error and the sample stays alive."""
+    respx.post(TAVILY_ENDPOINT).mock(
+        side_effect=httpx.RemoteProtocolError(
+            "Server disconnected without sending a response."
+        )
+    )
+    settings = _StubSettings(SEARCH_RETRY_MAX=2, SEARCH_BACKOFF_S=[0, 0])
+    result = await tavily_search("q", "2026-01-17", settings)
+    assert not result.ok
+    assert result.error_kind == "tavily_error"
+    payload = result.to_llm_payload()
+    assert payload["error"] == "tavily_error"
+    assert payload["results"] == []
+
+
 # ==================== to_llm_payload conditional emission ====================
 
 def test_payload_emits_score_and_raw_content_when_present() -> None:

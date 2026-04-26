@@ -494,3 +494,260 @@ async def test_belief_protocol_disabled(
         belief_protocol=None,
     )
     assert result.user_prompt == expected
+
+
+# ---- v5.1 harness-resilience: budget-exceeded drop tools + final-answer retry --
+
+
+async def test_budget_exceeded_drops_tools(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once `len(search_calls) >= REACT_MAX_SEARCH_CALLS`, the next LLM call
+    MUST be issued with `tools=[]`. The model receives no `web_search` schema
+    and the loop exits via the existing "no tool_calls → break" branch.
+
+    Script: 4 tool_calls (consume the budget of 4), then on step 5 the loop
+    drops the schema and the scripted LLM returns a `\\boxed{A}` content. We
+    verify both the per-call `tools=` arg and the final SampleResult shape."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="6",
+        REACT_MAX_SEARCH_CALLS="4",
+    )
+    script = [
+        (_tool_msg("call_1", "q1"), "tool_calls", {"response_id": "r1"}),
+        (_tool_msg("call_2", "q2"), "tool_calls", {"response_id": "r2"}),
+        (_tool_msg("call_3", "q3"), "tool_calls", {"response_id": "r3"}),
+        (_tool_msg("call_4", "q4"), "tool_calls", {"response_id": "r4"}),
+        # Step 5: tools=[] — the LLM only sees the no-tool schema, replies
+        # with a final boxed answer. If the harness still passed tools here
+        # we'd assert below.
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r5"}),
+    ]
+    llm = _ScriptedLLM(script)
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    # The 5th `llm_chat` call MUST have received tools=[].
+    # _ScriptedLLM doesn't capture tools directly — but the loop's branching
+    # is the only way step 5 can reach here without an extra round-trip, so
+    # verify behaviorally: 5 LLM calls total, react_steps=5, no retry.
+    assert len(llm.calls) == 5
+    assert result.react_steps == 5
+    assert result.final_answer_retry_used == 0
+    assert result.parse_ok == 1
+    assert result.tool_calls_count == 4
+    assert "\\boxed{Yes}" in result.final_answer_raw
+
+
+async def test_budget_exceeded_disabled_falls_back(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `REACT_BUDGET_EXCEEDED_DROP_TOOLS=False` the loop preserves the
+    legacy behaviour: tool schemas keep being exposed even after the budget
+    runs out, and excess `web_search` calls get echoed `search budget exceeded`
+    tool_result errors."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="6",
+        REACT_MAX_SEARCH_CALLS="4",
+        REACT_BUDGET_EXCEEDED_DROP_TOOLS="false",
+    )
+    script = [
+        (_tool_msg("call_1", "q1"), "tool_calls", {"response_id": "r1"}),
+        (_tool_msg("call_2", "q2"), "tool_calls", {"response_id": "r2"}),
+        (_tool_msg("call_3", "q3"), "tool_calls", {"response_id": "r3"}),
+        (_tool_msg("call_4", "q4"), "tool_calls", {"response_id": "r4"}),
+        # Step 5: tools still exposed → model can request another web_search.
+        (_tool_msg("call_5", "q5"), "tool_calls", {"response_id": "r5"}),
+        # Step 6: model finally gives up and answers (post-budget-exceeded
+        # tool_result is in messages history).
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r6"}),
+    ]
+    llm = _ScriptedLLM(script)
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    # 6 LLM calls because tools were still exposed at step 5; budget was
+    # exceeded so the 5th tool_call got a `search budget exceeded` echo (but
+    # tool_calls_count counts SUCCESSFUL tavily calls, capped at 4).
+    assert len(llm.calls) == 6
+    assert result.tool_calls_count == 4  # one extra request was rejected
+    assert result.final_answer_retry_used == 0  # final_raw was filled in step 6
+
+
+async def test_final_answer_retry_triggered(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All 6 react steps emit tool_calls (loop exhausts before producing a
+    final answer); the bail-out retry MUST fire once with `tools=[]` and
+    populate `final_raw` from its content."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="6",
+        REACT_MAX_SEARCH_CALLS="100",  # not the budget we're testing here
+    )
+    script = [
+        (_tool_msg(f"call_{i}", f"q{i}"), "tool_calls", {"response_id": f"r{i}"})
+        for i in range(1, 7)
+    ]
+    # The 7th call is the bail-out retry.
+    script.append(
+        (_final_msg("\\boxed{No}"), "stop", {"response_id": "retry"})
+    )
+    llm = _ScriptedLLM(
+        script,
+        # Pad sequences out to 7 entries so step 6 (idx 6) doesn't IndexError.
+        prompt_seq=(101, 202, 303, 404, 505, 606, 707),
+        completion_seq=(11, 22, 33, 44, 55, 66, 77),
+        reasoning_seq=(1, 2, 3, 4, 5, 6, 7),
+    )
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    assert result.final_answer_retry_used == 1
+    assert result.react_steps == 7  # 6 loop steps + 1 retry
+    assert result.nudges_used == 0  # retry MUST NOT increment nudges
+    assert result.parse_ok == 1
+    assert "\\boxed{No}" in result.final_answer_raw
+    metrics = json.loads(result.step_metrics)
+    assert len(metrics) == 7
+    # The retry step records belief=None (no belief block parsed on bail-out).
+    assert metrics[-1]["belief"] is None
+
+
+async def test_final_answer_retry_disabled(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the switch off, the loop exits with `final_raw=""` and `parse_ok=0`
+    just like the legacy behavior. The new column reads 0."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="6",
+        REACT_MAX_SEARCH_CALLS="100",
+        REACT_FINAL_ANSWER_RETRY="false",
+    )
+    script = [
+        (_tool_msg(f"call_{i}", f"q{i}"), "tool_calls", {"response_id": f"r{i}"})
+        for i in range(1, 7)
+    ]
+    llm = _ScriptedLLM(
+        script,
+        prompt_seq=(101, 202, 303, 404, 505, 606),
+        completion_seq=(11, 22, 33, 44, 55, 66),
+        reasoning_seq=(1, 2, 3, 4, 5, 6),
+    )
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    assert result.final_answer_retry_used == 0
+    assert result.react_steps == 6
+    assert result.parse_ok == 0
+    assert result.final_answer_raw == ""
+
+
+async def test_final_answer_retry_still_empty(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the retry call also returns empty content, we MUST NOT loop forever
+    — the function returns with `final_answer_retry_used=1` and `parse_ok=0`."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="6",
+        REACT_MAX_SEARCH_CALLS="100",
+    )
+    script = [
+        (_tool_msg(f"call_{i}", f"q{i}"), "tool_calls", {"response_id": f"r{i}"})
+        for i in range(1, 7)
+    ]
+    # Bail-out retry — content is empty too.
+    script.append(({"role": "assistant", "content": ""}, "stop", {"response_id": "retry"}))
+    llm = _ScriptedLLM(
+        script,
+        prompt_seq=(101, 202, 303, 404, 505, 606, 707),
+        completion_seq=(11, 22, 33, 44, 55, 66, 77),
+        reasoning_seq=(1, 2, 3, 4, 5, 6, 7),
+    )
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    assert result.final_answer_retry_used == 1
+    assert result.parse_ok == 0
+    assert result.final_answer_raw == ""
+    # Exactly 7 LLM calls — no second retry.
+    assert len(llm.calls) == 7
+
+
+async def test_final_answer_retry_skipped_when_already_filled(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the loop break path already filled `final_raw` (even with malformed
+    content that fails parse_answer), the bail-out retry MUST NOT fire."""
+    settings = _make_settings(monkeypatch)
+    # Single step: model goes straight to a final answer. Content is set so
+    # final_raw is non-empty even though parse_answer may or may not succeed.
+    script = [
+        (_final_msg("I have decided. \\boxed{Maybe}"), "stop", {"response_id": "r0"})
+    ]
+    llm = _ScriptedLLM(script)
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    assert result.final_answer_retry_used == 0
+    assert result.react_steps == 1
+    # Exactly 1 LLM call — no retry.
+    assert len(llm.calls) == 1

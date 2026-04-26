@@ -84,6 +84,8 @@ def _sample(
         "belief_final": None,
         "belief_trace": None,
         "belief_parse_ok": 0,
+        # v5.1 (harness-resilience): default to 0 (no bail-out retry triggered).
+        "final_answer_retry_used": 0,
     }
 
 
@@ -428,7 +430,9 @@ def test_per_model_summary_csv_v3_columns_unchanged(tmp_path: Path) -> None:
     with (run_dir / "analysis" / "per_model_summary.csv").open(encoding="utf-8") as f:
         first_line = f.readline().rstrip("\r\n")
     columns = first_line.split(",")
-    # The first 23 columns must match the v3 header verbatim.
+    # The first 24 columns must match the v3+v5.1 header verbatim. v5.1
+    # appended `final_answer_retry_rate` adjacent to the avg_* diagnostics
+    # so it lives next to "what did the harness do?" data, not next to FSS.
     expected_v3 = [
         "model", "sampling_n", "eligible_samples", "eligible_questions",
         "resolvable_samples", "cutoff_skip_samples", "cutoff_skip_rate",
@@ -439,6 +443,7 @@ def test_per_model_summary_csv_v3_columns_unchanged(tmp_path: Path) -> None:
         "avg_tool_calls", "avg_react_steps", "avg_latency_ms",
         "avg_prompt_tokens", "avg_completion_tokens", "avg_reasoning_tokens",
         "avg_nudges_used",
+        "final_answer_retry_rate",
     ]
     assert columns[: len(expected_v3)] == expected_v3
     # v5 inserts 8 discrete-native + consistency columns between v3 and v4

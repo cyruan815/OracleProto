@@ -9,6 +9,7 @@ import pytest
 
 from forecast_eval.errors import (
     AuthError,
+    CONTENT_POLICY_NEEDLES,
     ErrorKind,
     backoff_seconds,
     classify,
@@ -44,6 +45,46 @@ def test_network_errors_map_to_network() -> None:
     assert classify(httpx.ReadTimeout("slow", request=req)) is ErrorKind.NETWORK
     assert classify(httpx.ConnectTimeout("slow", request=req)) is ErrorKind.NETWORK
     assert classify(asyncio.TimeoutError()) is ErrorKind.NETWORK
+    # v5.1 (harness-resilience): the new transient-network family. These were
+    # previously dropping into UNKNOWN, which never retries — see the spec
+    # llm-integration §"网络/超时错误分层退避" RemoteProtocolError scenario.
+    assert classify(httpx.WriteTimeout("slow", request=req)) is ErrorKind.NETWORK
+    assert classify(httpx.WriteError("write blew up", request=req)) is ErrorKind.NETWORK
+    assert classify(httpx.PoolTimeout("pool exhausted")) is ErrorKind.NETWORK
+    assert (
+        classify(httpx.RemoteProtocolError("Server disconnected without sending a response."))
+        is ErrorKind.NETWORK
+    )
+
+
+def test_content_policy_aliyun_data_inspection_failed() -> None:
+    """Aliyun DashScope returns 400 with `data_inspection_failed` for content
+    moderation rejections. v5.0 mis-classified these as BAD_REQUEST."""
+    body = (
+        '{"error":{"message":"Input data may contain inappropriate content",'
+        '"type":"invalid_request_error","code":"data_inspection_failed"}}'
+    )
+    assert classify(_http_error(400, body)) is ErrorKind.CONTENT_POLICY
+
+
+def test_content_policy_chinese_audit_token() -> None:
+    body = '{"error":{"message":"该请求审核未通过, 含敏感内容"}}'
+    assert classify(_http_error(400, body)) is ErrorKind.CONTENT_POLICY
+
+
+def test_bad_request_invalid_request_still_falls_through() -> None:
+    """Plain `invalid_request` body without any content-policy needle stays
+    BAD_REQUEST (priority is content-policy first, bad-request as fallback)."""
+    body = '{"error":{"message":"invalid request: missing field model"}}'
+    assert classify(_http_error(400, body)) is ErrorKind.BAD_REQUEST
+
+
+def test_content_policy_needles_constant_includes_aliyun_and_chinese() -> None:
+    """The constant is the single source of truth — readers grep this list to
+    add new providers, so guard that the new entries actually landed."""
+    assert "data_inspection_failed" in CONTENT_POLICY_NEEDLES
+    assert "审核未通过" in CONTENT_POLICY_NEEDLES
+    assert "敏感" in CONTENT_POLICY_NEEDLES
 
 
 def test_status_codes_classification() -> None:

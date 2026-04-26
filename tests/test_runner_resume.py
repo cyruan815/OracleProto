@@ -73,6 +73,9 @@ def _sample_payload(sample_idx: int, error: str | None) -> dict:
         "belief_final": None,
         "belief_trace": None,
         "belief_parse_ok": 0,
+        # v5.1 (harness-resilience): default 0 (no retry on error / cutoff
+        # rows; runner._error_row also writes 0).
+        "final_answer_retry_used": 0,
     }
 
 
