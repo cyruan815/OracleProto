@@ -99,7 +99,14 @@ class Settings(BaseSettings):
     ENABLE_WEB_SEARCH: bool = True
 
     # Tavily — 详见 .env.example 中各字段注释
-    TAVILY_API_KEY: str = ""
+    # 支持单 key 或 CSV 多 key (`TAVILY_API_KEY=tvly-aaa,tvly-bbb`). 多 key 时
+    # 由 forecast_eval.tavily_keys.TavilyKeyPool 做 least-used 调度 + 失败熔断,
+    # 同一 process 内所有 grid cell 通过模块级 cache 共享同一个池实例 (cache
+    # key = tuple(TAVILY_API_KEY)), 因此用量计数跨 cell 累加而非按 cell 分开.
+    TAVILY_API_KEY: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # 单个 key 命中 429 / 配额超限时, 临时拉黑的秒数. 0 = 不拉黑 (仅靠 acquire
+    # 顺序避开). 401/403 走永久拉黑, 不受此参数影响.
+    TAVILY_KEY_COOLDOWN_S: float = 60.0
     # Grid-scannable: list of cell-local R values, parsed from CSV in .env.
     # Single-value envs (`TAVILY_MAX_RESULTS=5`) parse to `[5]`; multi-value
     # (`TAVILY_MAX_RESULTS=5,10`) drives the (R, C) cartesian dispatcher in
@@ -175,6 +182,13 @@ class Settings(BaseSettings):
     @field_validator("MODELS", mode="before")
     @classmethod
     def _parse_models(cls, v: Any) -> list[str]:
+        return _parse_csv(v)
+
+    @field_validator("TAVILY_API_KEY", mode="before")
+    @classmethod
+    def _parse_tavily_keys(cls, v: Any) -> list[str]:
+        # 单值 (`tvly-xxx`) 解析为 length-1 list, CSV 多值展开. 空值返回 []
+        # 让 _post_validate 统一根据 ENABLE_WEB_SEARCH 决定是否要求非空.
         return _parse_csv(v)
 
     @field_validator(
@@ -317,17 +331,32 @@ class Settings(BaseSettings):
                     f"MODELS entry {slug!r} must not contain '::' — that delimiter is "
                     "reserved for grid-search virtual slugs (compose_virtual_slug)"
                 )
-        required_keys = ["LLM_API_KEY"]
+        # LLM_API_KEY 是普通字符串; TAVILY_API_KEY 现已升级为 list[str]
+        # (CSV 多 key 支持), 需要逐个 placeholder 校验.
+        if not self.LLM_API_KEY:
+            raise ValueError("LLM_API_KEY must not be empty")
+        if any(tok in self.LLM_API_KEY for tok in _PLACEHOLDER_TOKENS):
+            raise ValueError(
+                "LLM_API_KEY still holds a placeholder token; fill your real key in .env"
+            )
         if self.ENABLE_WEB_SEARCH:
-            required_keys.append("TAVILY_API_KEY")
-        for key_name in required_keys:
-            value = getattr(self, key_name)
-            if not value:
-                raise ValueError(f"{key_name} must not be empty")
-            if any(tok in value for tok in _PLACEHOLDER_TOKENS):
+            if not self.TAVILY_API_KEY:
                 raise ValueError(
-                    f"{key_name} still holds a placeholder token; fill your real key in .env"
+                    "TAVILY_API_KEY must not be empty when ENABLE_WEB_SEARCH=true "
+                    "(provide one or more comma-separated keys)"
                 )
+            for idx, key in enumerate(self.TAVILY_API_KEY):
+                if not key:
+                    raise ValueError(f"TAVILY_API_KEY[{idx}] is empty")
+                if any(tok in key for tok in _PLACEHOLDER_TOKENS):
+                    raise ValueError(
+                        f"TAVILY_API_KEY[{idx}] still holds a placeholder token; "
+                        "fill real keys in .env"
+                    )
+        if self.TAVILY_KEY_COOLDOWN_S < 0:
+            raise ValueError(
+                f"TAVILY_KEY_COOLDOWN_S must be >= 0; got {self.TAVILY_KEY_COOLDOWN_S}"
+            )
         if self.SAMPLING_N < 1:
             raise ValueError("SAMPLING_N must be >= 1")
         if self.LLM_MAX_CONCURRENCY < 1 or self.SEARCH_MAX_CONCURRENCY < 1:

@@ -367,8 +367,13 @@ def redact_api_key(raw: str | None, provider: str) -> dict[str, Any]:
     }
 
 
-_API_KEY_FIELDS = {
+# 单 key 字段 (str) → 直接 redact_api_key.
+# list 字段 (TAVILY_API_KEY 升级后): 逐个 redact, 落盘形如 [{prefix, sha256_12, ...}, ...]
+# 让事后审计能看到 "本 run 用了哪几把 key" 而不泄露明文.
+_API_KEY_FIELDS_STR = {
     "LLM_API_KEY": "llm",
+}
+_API_KEY_FIELDS_LIST = {
     "TAVILY_API_KEY": "tavily",
 }
 
@@ -378,8 +383,12 @@ def snapshot_settings(settings: Settings) -> dict[str, Any]:
     raw = settings.model_dump()
     redacted: dict[str, Any] = {}
     for key, value in raw.items():
-        if key in _API_KEY_FIELDS:
-            redacted[key] = redact_api_key(getattr(settings, key), _API_KEY_FIELDS[key])
+        if key in _API_KEY_FIELDS_STR:
+            redacted[key] = redact_api_key(getattr(settings, key), _API_KEY_FIELDS_STR[key])
+        elif key in _API_KEY_FIELDS_LIST:
+            provider = _API_KEY_FIELDS_LIST[key]
+            keys: list[str] = list(getattr(settings, key) or [])
+            redacted[key] = [redact_api_key(k, provider) for k in keys]
         elif key == "MODEL_TRAINING_CUTOFFS":
             redacted[key] = {m: d.isoformat() for m, d in settings.MODEL_TRAINING_CUTOFFS.items()}
         else:
