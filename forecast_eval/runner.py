@@ -217,11 +217,17 @@ async def _run_task_with_retry(
     typed channel for future global-only signals (semaphore sizes are already
     materialised by the caller).
     """
+    # task.model carries the virtual slug `{real}::r{R}::c{C}` for grid runs;
+    # the upstream LLM provider only knows the real model name, so we strip
+    # the (R, C) suffix here before dispatching the API call. Non-virtual slugs
+    # (legacy single-cell callers / tests) pass through unchanged.
+    parsed_slug = dbmod.parse_virtual_slug(task.model)
+    real_model = parsed_slug[0] if parsed_slug is not None else task.model
     try:
         async with llm_semaphore:
             result = await run_react(
                 task.question,
-                model=task.model,
+                model=real_model,
                 sample_idx=task.sample_idx,
                 settings=task.settings,
                 templates=templates,
