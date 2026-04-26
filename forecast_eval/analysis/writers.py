@@ -23,14 +23,8 @@ from .behavior import (
     PDPRow,
     ReflectionABRow,
 )
-from .calibration import (
-    CalibrationBin,
-    ModelCalibrationReport,
-    MurphyDecomposition,
-    PlattParams,
-    TemperatureParams,
-)
-from .inference import ModelPairResult, PairedBootstrapResult
+from .consistency import ConsistencyReport
+from .inference import MetricBootstrapResult, ModelPairResult, PairedBootstrapResult
 from .proper_score import ModelProbabilisticAggregate
 
 if TYPE_CHECKING:
@@ -69,8 +63,28 @@ _SUMMARY_FIELDS_V3: tuple[str, ...] = (
     "avg_nudges_used",
 )
 
-# v4 probabilistic columns appended at the end. `bi_dec` only meaningful for
-# single-choice subsets; on a global sheet it averages BI_dec over single
+# v5 discrete-native primary columns. Inserted between v3 accuracy and v4
+# probabilistic so the published main metric (FSS) sits next to pass@1 — the
+# two of them together drive the "model X vs Y" comparison.
+_DISCRETE_FSS_FIELDS: tuple[str, ...] = (
+    "fss",
+    "fss_pe_mean",
+    "cohen_kappa",
+    "hamming_score",
+)
+
+# v5 K-trial consistency family. Appended right after the FSS family — these
+# are the metrics that exist *because* the project does parallel sampling.
+_CONSISTENCY_FIELDS: tuple[str, ...] = (
+    "fleiss_kappa",
+    "mean_entropy",
+    "vci",
+    "mvg",
+)
+
+# v4 probabilistic columns. v5 keeps these as companion columns with a
+# K=5 disclaimer in the markdown caption (Decision 3). `bi_dec` only meaningful
+# for single-choice subsets; on a global sheet it averages BI_dec over single
 # questions only and skips multi rows (same NULL-on-multi convention as MBS).
 _PROB_FIELDS_V4: tuple[str, ...] = (
     "bi",
@@ -82,7 +96,12 @@ _PROB_FIELDS_V4: tuple[str, ...] = (
     "fallback_share",
 )
 
-_SUMMARY_FIELDS: tuple[str, ...] = _SUMMARY_FIELDS_V3 + _PROB_FIELDS_V4
+_SUMMARY_FIELDS: tuple[str, ...] = (
+    _SUMMARY_FIELDS_V3
+    + _DISCRETE_FSS_FIELDS
+    + _CONSISTENCY_FIELDS
+    + _PROB_FIELDS_V4
+)
 
 
 def _round(value: float | None, digits: int = 4) -> float | None:
@@ -111,6 +130,48 @@ def _prob_dict(agg: ModelProbabilisticAggregate | None) -> dict[str, Any]:
     }
 
 
+def _fss_dict(fss_result: dict[str, Any] | None) -> dict[str, Any]:
+    """Project a single model's `accuracy.fss(...)` output onto two columns:
+    `fss` and `fss_pe_mean`. None when no scoreable questions."""
+    if fss_result is None:
+        return {"fss": None, "fss_pe_mean": None}
+    return {
+        "fss": _round(fss_result.get("fss")),
+        "fss_pe_mean": _round(fss_result.get("mean_pe")),
+    }
+
+
+def _consistency_dict(rep: ConsistencyReport | None) -> dict[str, Any]:
+    """Project a `ConsistencyReport` onto its 4 CSV column values."""
+    if rep is None:
+        return {k: None for k in _CONSISTENCY_FIELDS}
+    return {
+        "fleiss_kappa": _round(rep.fleiss_kappa),
+        "mean_entropy": _round(rep.mean_entropy),
+        "vci": _round(rep.vci),
+        "mvg": _round(rep.mvg),
+    }
+
+
+def _v5_extras_dict(
+    fss_result: dict[str, Any] | None,
+    cohen_kappa_value: float | None,
+    hamming_score_value: float | None,
+    consistency: ConsistencyReport | None,
+) -> dict[str, Any]:
+    """Bundle the 8 v5 columns (FSS family + Consistency family) for one row.
+
+    Splits stay aligned with `_DISCRETE_FSS_FIELDS + _CONSISTENCY_FIELDS` so
+    the CSV writer doesn't need to remember per-field alignment.
+    """
+    out = {}
+    out.update(_fss_dict(fss_result))
+    out["cohen_kappa"] = _round(cohen_kappa_value)
+    out["hamming_score"] = _round(hamming_score_value)
+    out.update(_consistency_dict(consistency))
+    return out
+
+
 def _write_csv(path: Path, header: list[str], rows: list[list[Any]]) -> Path:
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -124,15 +185,31 @@ def _write_per_model_summary_csv(
     path: Path,
     per_model: dict[str, tuple[int, Aggregate]],
     prob: dict[str, ModelProbabilisticAggregate] | None = None,
+    fss_per_model: dict[str, dict[str, Any]] | None = None,
+    cohen_kappa_per_model: dict[str, float | None] | None = None,
+    hamming_per_model: dict[str, float | None] | None = None,
+    consistency_per_model: dict[str, ConsistencyReport] | None = None,
 ) -> Path:
+    """Per-model headline CSV with v3 + v5 + v4 columns in that order.
+
+    v5 dict args are keyed by model name. Missing keys land as None
+    (column present, value blank) — keeps CSV width constant across rows.
+    """
     header = list(_SUMMARY_FIELDS)
     rows: list[list[Any]] = []
     for model, (sampling_n, agg) in per_model.items():
         prob_agg = prob.get(model) if prob else None
+        fss_result = fss_per_model.get(model) if fss_per_model else None
+        cohen_v = cohen_kappa_per_model.get(model) if cohen_kappa_per_model else None
+        hamming_v = hamming_per_model.get(model) if hamming_per_model else None
+        consistency = (
+            consistency_per_model.get(model) if consistency_per_model else None
+        )
         row_dict = {
             "model": model,
             "sampling_n": sampling_n,
             **agg.as_ordered_dict(),
+            **_v5_extras_dict(fss_result, cohen_v, hamming_v, consistency),
             **_prob_dict(prob_agg),
         }
         rows.append([row_dict.get(k) for k in header])
@@ -145,6 +222,11 @@ def _write_slice_csv(
     per_model: dict[str, tuple[int, dict[str, Aggregate]]],
     prob: dict[str, dict[str, ModelProbabilisticAggregate]] | None = None,
 ) -> Path:
+    """Per-(model, slice_key) CSV. v5 columns are absent on slice CSVs because
+    FSS / Fleiss κ / etc. would need per-slice recompute; the slice tables
+    keep v3 + v4 columns and add NULL placeholders for v5 columns to maintain
+    a single header schema across `per_model_summary.csv` and slice tables.
+    """
     header = ["model", slice_header_field, "sampling_n", *[
         f for f in _SUMMARY_FIELDS if f not in ("model", "sampling_n")
     ]]
@@ -158,6 +240,9 @@ def _write_slice_csv(
                 slice_header_field: key,
                 "sampling_n": sampling_n,
                 **agg.as_ordered_dict(),
+                # v5 columns NULL on slice rows (per-slice recompute deferred).
+                **{k: None for k in _DISCRETE_FSS_FIELDS},
+                **{k: None for k in _CONSISTENCY_FIELDS},
                 **_prob_dict(prob_agg),
             }
             rows.append([row_dict.get(k) for k in header])
@@ -206,36 +291,48 @@ def _write_per_model_summary_md(
     path: Path,
     per_model: dict[str, tuple[int, Aggregate]],
     prob: dict[str, ModelProbabilisticAggregate] | None = None,
-    cal: dict[str, ModelCalibrationReport] | None = None,
+    fss_per_model: dict[str, dict[str, Any]] | None = None,
+    cohen_kappa_per_model: dict[str, float | None] | None = None,
+    consistency_per_model: dict[str, ConsistencyReport] | None = None,
     confidence_conflict_models: set[str] | None = None,
 ) -> Path:
-    """Markdown table covering accuracy, probabilistic, and (Phase 2) calibration.
+    """Markdown summary: v3 accuracy + v5 discrete-native + v4 companion probabilistic.
 
-    `cal` overlays uncal/cal BI / NLL / ECE columns and the `cal*` warning
-    marker per spec 20.8. When `cal` is None (no Phase 2 outputs available),
-    the table degrades gracefully to v3+Phase-1 columns. Phase 3 spec 28.3
-    additionally appends a `conflict*` marker when the model's linguistic and
-    numeric confidence diverge on the same data slice.
+    v5 layout:
+    * FSS sits next to pass@1 — the published main comparison metric;
+    * Cohen κ / Fleiss κ / mean entropy / VCI / MVG follow as discrete
+      diagnostics;
+    * BI / NLL / MBS / ABI columns are kept as **companion** metrics with
+      a footnote disclaimer about K=5 limiting probability resolution to
+      6 discrete levels (Decision 3).
+    * Phase 3 `conflict*` marker is preserved (linguistic vs numeric
+      confidence divergence — orthogonal to v5).
+    * The `cal*` marker and BI_cal/NLL_cal/ECE_* columns are gone (v5
+      Decision 2: calibration deprecated under K=5 resolution).
     """
-    lines = ["# Per-model summary", ""]
+    lines = ["# Per-model summary (v5: discrete-native primary, probabilistic as companion)", ""]
     header = [
         "model", "N",
         "eligible_Q", "eligible_S", "cutoff_S",
-        "pass@1", "pass_any@N", "≥majority", "≥all",
+        "pass@1", "FSS", "Cohen_κ",
+        "Fleiss_κ", "H̄", "VCI", "MVG",
+        "pass_any@N", "≥majority", "≥all",
         "majority_acc", "parse_fail", "error_rate",
-        "BI", "NLL", "MBS", "ABI_crowd", "ABI_unif", "fallback%",
-    ]
-    if cal is not None:
-        header.extend(["BI_cal", "NLL_cal", "ECE_uncal", "ECE_cal"])
-    header.extend([
+        "BI†", "NLL†", "MBS†", "ABI_crowd†", "ABI_unif†", "fallback%",
         "avg_tool", "avg_steps", "avg_nudges", "avg_latency_ms",
         "avg_p/c/r_tokens",
-    ])
+    ]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("| " + " | ".join(["---"] * len(header)) + " |")
     for model, (sampling_n, agg) in per_model.items():
         row_dict = agg.as_ordered_dict()
         prob_dict = _prob_dict(prob.get(model) if prob else None)
+        v5_extras = _v5_extras_dict(
+            fss_per_model.get(model) if fss_per_model else None,
+            cohen_kappa_per_model.get(model) if cohen_kappa_per_model else None,
+            None,  # hamming not in markdown (CSV-only)
+            consistency_per_model.get(model) if consistency_per_model else None,
+        )
         # Surface fallback share as a percentage so reviewers can spot
         # "this model never produced a parsed belief, take the metrics with
         # a grain of salt" without doing arithmetic in their head.
@@ -244,14 +341,8 @@ def _write_per_model_summary_md(
             if prob_dict.get("fallback_share") is not None
             else "—"
         )
-        # Spec 20.8 哨兵: append `cal*` to the model cell when cal BI exceeds
-        # uncal BI by 5 — that's the threshold for "calibration probably
-        # overfit" per the design.
-        # Spec 28.3 哨兵: append `conflict*` when language and numeric
-        # confidence diverge on the same model slice.
+        # `conflict*` marker (Phase 3) survives — orthogonal to v5.
         markers: list[str] = []
-        if cal is not None and model in cal and cal[model].overfit_warning:
-            markers.append("cal*")
         if confidence_conflict_models and model in confidence_conflict_models:
             markers.append("conflict*")
         model_cell = f"{model} {' '.join(markers)}".rstrip() if markers else model
@@ -263,6 +354,12 @@ def _write_per_model_summary_md(
             _fmt(row_dict["eligible_samples"]),
             _fmt(row_dict["cutoff_skip_samples"]),
             _fmt(row_dict["pass_at_1_avg"]),
+            _fmt(v5_extras["fss"]),
+            _fmt(v5_extras["cohen_kappa"]),
+            _fmt(v5_extras["fleiss_kappa"]),
+            _fmt(v5_extras["mean_entropy"]),
+            _fmt(v5_extras["vci"]),
+            _fmt(v5_extras["mvg"]),
             _fmt(row_dict["pass_any_at_n"]),
             _fmt(row_dict["at_least_majority_at_n"]),
             _fmt(row_dict["at_least_all_at_n"]),
@@ -275,27 +372,21 @@ def _write_per_model_summary_md(
             _fmt(prob_dict["abi_crowd"]),
             _fmt(prob_dict["abi_uniform"]),
             fallback_pct,
-        ]
-        if cal is not None:
-            rep = cal.get(model)
-            if rep is None:
-                cells.extend(["—", "—", "—", "—"])
-            else:
-                cells.extend([
-                    _fmt(_round(rep.cal_aggregate.bi)),
-                    _fmt(_round(rep.cal_aggregate.nll)),
-                    _fmt(_round(rep.ece_uncal)),
-                    _fmt(_round(rep.ece_cal)),
-                ])
-        cells.extend([
             _fmt(row_dict["avg_tool_calls"]),
             _fmt(row_dict["avg_react_steps"]),
             _fmt(row_dict["avg_nudges_used"]),
             _fmt(row_dict["avg_latency_ms"]),
             tok_cell,
-        ])
+        ]
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
+    lines.append(
+        "† Probabilistic metrics are computed from empirical vote frequencies "
+        "over K=5 parallel trials, yielding only 6 discrete probability levels "
+        "per label. These values serve as ordinal companions to the primary "
+        "discrete metrics and should not be interpreted as continuous "
+        "calibration diagnostics."
+    )
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
 
@@ -369,209 +460,6 @@ def _write_shrinkage_alpha_curve_csv(
                 [model, round(alpha, 4), round(mean_bs, 6),
                  round(bi, 4), res.n_questions, res.choice_type]
             )
-    return _write_csv(path, header, rows)
-
-
-def _serialize_cell_params(params: Any) -> dict[str, Any]:
-    """JSON-serializable form for a Platt or Temperature param bundle."""
-    if isinstance(params, PlattParams):
-        return {"method": "platt", "a": params.a, "b": params.b}
-    if isinstance(params, TemperatureParams):
-        return {"method": "temperature", "T": params.T}
-    return {}
-
-
-def _write_calibration_params_json(
-    path: Path,
-    reports: dict[str, ModelCalibrationReport],
-) -> Path:
-    """Phase 2 task 20.7: per-model per-cell calibration parameters (all-data fit).
-
-    Layout matches design.md:
-      `{model: {cell_name: {method, a/b/T, n_questions}}}`.
-    """
-    payload: dict[str, Any] = {}
-    for model, rep in reports.items():
-        cells_payload: dict[str, Any] = {}
-        for name, cell in rep.cells.items():
-            entry = _serialize_cell_params(cell.params)
-            entry["n_questions"] = cell.n_questions
-            entry["question_type"] = cell.cell.question_type
-            entry["choice_type"] = cell.cell.choice_type
-            cells_payload[name] = entry
-        payload[model] = cells_payload
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    return path
-
-
-_CALIBRATED_SUMMARY_FIELDS: tuple[str, ...] = (
-    "model",
-    "n_questions",
-    "fallback_share",
-    "bi_uncal",
-    "bi_cal",
-    "nll_uncal",
-    "nll_cal",
-    "ece_uncal",
-    "ece_cal",
-    "abi_crowd_uncal",
-    "abi_crowd_cal",
-    "abi_uniform_uncal",
-    "abi_uniform_cal",
-    "overfit_warning",
-)
-
-
-def _write_per_model_summary_calibrated_csv(
-    path: Path,
-    reports: dict[str, ModelCalibrationReport],
-) -> Path:
-    """Phase 2 task 20.7: post-calibration headline metrics + uncal sanity."""
-    header = list(_CALIBRATED_SUMMARY_FIELDS)
-    rows: list[list[Any]] = []
-    for model, rep in reports.items():
-        rows.append([
-            model,
-            rep.uncal_aggregate.n_questions,
-            _round(rep.uncal_aggregate.fallback_share),
-            _round(rep.uncal_aggregate.bi),
-            _round(rep.cal_aggregate.bi),
-            _round(rep.uncal_aggregate.nll),
-            _round(rep.cal_aggregate.nll),
-            _round(rep.ece_uncal),
-            _round(rep.ece_cal),
-            _round(rep.uncal_aggregate.abi_crowd),
-            _round(rep.cal_aggregate.abi_crowd),
-            _round(rep.uncal_aggregate.abi_uniform),
-            _round(rep.cal_aggregate.abi_uniform),
-            int(rep.overfit_warning),
-        ])
-    return _write_csv(path, header, rows)
-
-
-def _flat_pairs_for_reliability(
-    rep: ModelCalibrationReport, *, calibrated: bool
-) -> tuple[list[float], list[int]]:
-    """Same flatten convention as `calibration._flat_pairs_for_ece`.
-
-    For single-choice: top-1 confidence vs top-1 hit. For multi: per-(q, l)
-    pairs. Imported into writers.py rather than `from calibration import`
-    private helper so a future refactor of the helper doesn't break the
-    JSON layout consumed by `scripts/plot_analysis.py`.
-    """
-    probs: list[float] = []
-    obs: list[int] = []
-    for cr in rep.calibrated_rows:
-        r = cr.row
-        p_vec = cr.cal_probs if calibrated else r.probs
-        if r.choice_type == "single":
-            best_i = 0
-            best_p = p_vec[0]
-            for i, p in enumerate(p_vec):
-                if p > best_p:
-                    best_p = p
-                    best_i = i
-            probs.append(best_p)
-            obs.append(int(r.obs[best_i]))
-        else:
-            for p, o in zip(p_vec, r.obs):
-                probs.append(p)
-                obs.append(int(o))
-    return probs, obs
-
-
-def _bins_for_model_qtype(
-    rep: ModelCalibrationReport, qtype: str, *, calibrated: bool, n_bins: int = 15
-) -> list[CalibrationBin]:
-    """Reliability bins restricted to a single question_type."""
-    from .calibration import reliability_bins
-
-    probs: list[float] = []
-    obs: list[int] = []
-    for cr in rep.calibrated_rows:
-        r = cr.row
-        if r.question_type != qtype:
-            continue
-        p_vec = cr.cal_probs if calibrated else r.probs
-        if r.choice_type == "single":
-            best_i = 0
-            best_p = p_vec[0]
-            for i, p in enumerate(p_vec):
-                if p > best_p:
-                    best_p = p
-                    best_i = i
-            probs.append(best_p)
-            obs.append(int(r.obs[best_i]))
-        else:
-            for p, o in zip(p_vec, r.obs):
-                probs.append(p)
-                obs.append(int(o))
-    return reliability_bins(probs, obs, n_bins)
-
-
-def _write_reliability_data_json(
-    path: Path,
-    reports: dict[str, ModelCalibrationReport],
-    *,
-    calibrated: bool,
-    n_bins: int = 15,
-) -> Path:
-    """Phase 2 task 20.7: per-(model, qtype) bins for reliability diagrams.
-
-    Layout: `{model: {qtype: [{n, mean_p, mean_o, bin_lo, bin_hi}, ...]}}`.
-    Empty bins are skipped (consistent with `reliability_bins`).
-    """
-    payload: dict[str, Any] = {}
-    for model, rep in reports.items():
-        per_qtype: dict[str, list[dict[str, Any]]] = {}
-        qtypes = sorted({cr.row.question_type for cr in rep.calibrated_rows})
-        for qt in qtypes:
-            bins = _bins_for_model_qtype(rep, qt, calibrated=calibrated, n_bins=n_bins)
-            per_qtype[qt] = [
-                {
-                    "bin_lo": round(b.bin_lo, 4),
-                    "bin_hi": round(b.bin_hi, 4),
-                    "n": b.n,
-                    "mean_p": round(b.mean_p, 6),
-                    "mean_o": round(b.mean_o, 6),
-                }
-                for b in bins
-            ]
-        payload[model] = per_qtype
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    return path
-
-
-def _write_brier_decomposition_csv(
-    path: Path,
-    reports: dict[str, ModelCalibrationReport],
-) -> Path:
-    """Phase 2 task 20.7: Murphy three-decomposition, uncal + cal."""
-    header = [
-        "model", "kind",
-        "rel", "res", "unc", "total",
-    ]
-    rows: list[list[Any]] = []
-    for model, rep in reports.items():
-        for kind, decomp in (
-            ("uncalibrated", rep.murphy_uncal),
-            ("calibrated", rep.murphy_cal),
-        ):
-            if decomp is None:
-                continue
-            rows.append([
-                model, kind,
-                round(decomp.rel, 6),
-                round(decomp.res, 6),
-                round(decomp.unc, 6),
-                round(decomp.total, 6),
-            ])
     return _write_csv(path, header, rows)
 
 
@@ -705,6 +593,113 @@ def _write_paired_delta_bi_by_difficulty_csv(
                 round(-res.delta_mean * 100.0, 4),
                 round(res.p_two_sided, 6),
             ])
+    return _write_csv(path, header, rows)
+
+
+# --------------------------------------------------------------------------- #
+# v5 writers
+# --------------------------------------------------------------------------- #
+
+
+def _write_inter_trial_consistency_csv(
+    path: Path,
+    per_model: dict[str, ConsistencyReport],
+) -> Path:
+    """v5: per-model Fleiss κ / mean entropy / VCI / MVG (one row per model)."""
+    header = [
+        "model",
+        "fleiss_kappa",
+        "mean_entropy",
+        "vci",
+        "mvg",
+        "n_questions_used",
+    ]
+    rows: list[list[Any]] = []
+    for model in sorted(per_model.keys()):
+        rep = per_model[model]
+        rows.append([
+            model,
+            _round(rep.fleiss_kappa, 6),
+            _round(rep.mean_entropy, 6),
+            _round(rep.vci, 6),
+            _round(rep.mvg, 6),
+            rep.n_questions_used,
+        ])
+    return _write_csv(path, header, rows)
+
+
+def _write_entropy_accuracy_bins_csv(
+    path: Path,
+    per_model: dict[str, list[dict[str, Any]]],
+) -> Path:
+    """v5: per-model × bucket row.
+
+    Bucket order is fixed `low / mid / high` (with arbitrary "qN" labels for
+    `n_buckets != 3`). Per-model bucket boundaries differ — `h_lo` / `h_hi`
+    are model-specific, NOT a shared scale (Decision 5).
+    """
+    header = [
+        "model", "bucket", "n_questions",
+        "h_lo", "h_hi",
+        "acc", "mv_acc", "fleiss_kappa",
+    ]
+    rows: list[list[Any]] = []
+    bucket_order = {"low": 0, "mid": 1, "high": 2}
+    for model in sorted(per_model.keys()):
+        bins = per_model[model]
+        sorted_bins = sorted(
+            bins,
+            key=lambda b: bucket_order.get(b.get("bucket_label", ""), 99),
+        )
+        for b in sorted_bins:
+            rows.append([
+                model,
+                b.get("bucket_label"),
+                b.get("n_questions"),
+                _round(b.get("h_lo"), 6),
+                _round(b.get("h_hi"), 6),
+                _round(b.get("acc"), 6),
+                _round(b.get("mv_acc"), 6),
+                _round(b.get("fleiss_kappa"), 6),
+            ])
+    return _write_csv(path, header, rows)
+
+
+def _write_metric_pairwise_bootstrap_csv(
+    path: Path,
+    results: list[MetricBootstrapResult],
+    *,
+    alpha: float = 0.05,
+) -> Path:
+    """v5: long-table for `pairwise_bootstrap.csv`.
+
+    One row per (metric × ordered model pair). `sig_at_05` flags whether the
+    95% CI excludes 0 (equivalently, p < α). Cohen's d gives the effect
+    size — reviewers comparing 'p < 0.05 with d=0.05' (trivial effect, large
+    sample) vs 'p < 0.05 with d=0.8' (large effect) read d, not p.
+    """
+    header = [
+        "metric", "model_a", "model_b", "n_questions",
+        "delta_mean", "ci_low", "ci_high",
+        "p_value", "cohens_d", "sig_at_05",
+    ]
+    rows: list[list[Any]] = []
+    for r in sorted(
+        results, key=lambda x: (x.metric_name, x.model_a, x.model_b)
+    ):
+        sig = int(r.p_two_sided < alpha)
+        rows.append([
+            r.metric_name,
+            r.model_a,
+            r.model_b,
+            r.n_questions,
+            _round(r.delta_mean, 6),
+            _round(r.ci_low, 6),
+            _round(r.ci_high, 6),
+            _round(r.p_two_sided, 6),
+            _round(r.cohens_d, 4),
+            sig,
+        ])
     return _write_csv(path, header, rows)
 
 
@@ -1031,7 +1026,8 @@ def _write_grid_winrate_csv(
 
 __all__ = [
     "_SUMMARY_FIELDS",
-    "_CALIBRATED_SUMMARY_FIELDS",
+    "_DISCRETE_FSS_FIELDS",
+    "_CONSISTENCY_FIELDS",
     "_write_csv",
     "_write_per_model_summary_csv",
     "_write_slice_csv",
@@ -1040,10 +1036,6 @@ __all__ = [
     "_write_per_model_summary_md",
     "_write_overall_json",
     "_write_shrinkage_alpha_curve_csv",
-    "_write_calibration_params_json",
-    "_write_per_model_summary_calibrated_csv",
-    "_write_reliability_data_json",
-    "_write_brier_decomposition_csv",
     "_write_paired_delta_bi_csv",
     "_write_pairwise_significance_csv",
     "_write_posterior_pairwise_csv",
@@ -1060,4 +1052,8 @@ __all__ = [
     "_write_grid_pareto_csv",
     "_write_grid_winrate_csv",
     "_fmt",
+    # v5 writers
+    "_write_inter_trial_consistency_csv",
+    "_write_entropy_accuracy_bins_csv",
+    "_write_metric_pairwise_bootstrap_csv",
 ]
