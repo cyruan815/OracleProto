@@ -43,6 +43,11 @@ _ANALYSIS_FIELDS: tuple[str, ...] = (
     "belief_final",
     "belief_trace",
     "belief_parse_ok",
+    # v5.1 (harness-resilience): 0/1 indicator for the no-tool bail-out retry.
+    # NULL on legacy v4 rows (analysis treats NULL as "feature not enabled" =
+    # 0 for arithmetic but distinguishes for `final_answer_retry_rate=None`
+    # when no eligible row carries the column at all).
+    "final_answer_retry_used",
 )
 
 
@@ -90,6 +95,11 @@ class SampleRow:
     # belief). Used by `per_model_summary.md` to surface fallback_share so a
     # reviewer can judge the calibration signal.
     is_fallback: bool
+
+    # v5.1 harness-resilience indicator. None on legacy v4 DBs (no column),
+    # 0/1 on v5+. Default keeps the dataclass backwards-compatible with
+    # positional constructors used in test fixtures.
+    final_answer_retry_used: int | None = None
 
     @property
     def is_cutoff(self) -> bool:
@@ -175,7 +185,18 @@ def _parse_belief_probabilities(
 def _flatten_db(
     conn: sqlite3.Connection, sampling_n: int, model: str
 ) -> list[SampleRow]:
-    """Pivot the wide run_results table into per-sample rows joined with question metadata."""
+    """Pivot the wide run_results table into per-sample rows joined with question metadata.
+
+    v5.1 (harness-resilience) added `s{i}_final_answer_retry_used` to
+    `_ANALYSIS_FIELDS`. Legacy v4 DBs that haven't been re-opened under the
+    v5 code path don't have that column yet, so we resolve each field name
+    against `PRAGMA table_info(run_results)` and substitute a literal NULL
+    placeholder for any missing column. Analysis stays read-only — we never
+    ALTER a v4 DB just because we're computing summary metrics on it.
+    """
+    existing_cols = {
+        r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()
+    }
     cols: list[str] = [
         "q.id",
         "q.question_type",
@@ -184,7 +205,11 @@ def _flatten_db(
     ]
     for i in range(sampling_n):
         for name in _ANALYSIS_FIELDS:
-            cols.append(f"r.{dbmod.sample_col(i, name)}")
+            col = dbmod.sample_col(i, name)
+            if col in existing_cols:
+                cols.append(f"r.{col}")
+            else:
+                cols.append("NULL")
     sql = (
         "SELECT " + ", ".join(cols) + " "
         "FROM questions q LEFT JOIN run_results r ON q.id = r.question_id"
@@ -256,6 +281,7 @@ def _flatten_db(
                     belief_final=belief_final_raw,
                     belief_trace=belief_trace_raw,
                     belief_parse_ok=belief_parse_ok_val,
+                    final_answer_retry_used=row[base + field_idx["final_answer_retry_used"]],
                     probabilities=probs,
                     is_fallback=is_fallback,
                 )

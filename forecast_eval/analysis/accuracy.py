@@ -63,6 +63,14 @@ class Aggregate:
     avg_reasoning_tokens: float | None
     avg_nudges_used: float | None
 
+    # v5.1 (harness-resilience): share of eligible samples whose ReAct loop
+    # exited with empty `final_raw` and triggered the no-tool bail-out retry.
+    # `None` when no eligible sample populates the column (legacy v4 DB —
+    # all-NULL → division denominator is 0). Note: the v4 column is NULL on
+    # legacy rows; we count `final_answer_retry_used == 1` exactly so legacy
+    # NULLs contribute 0 to the numerator and the rate stays meaningful.
+    final_answer_retry_rate: float | None
+
     def as_ordered_dict(self) -> dict[str, Any]:
         return {
             "eligible_samples": self.eligible_samples,
@@ -86,6 +94,7 @@ class Aggregate:
             "avg_completion_tokens": _round(self.avg_completion_tokens, 1),
             "avg_reasoning_tokens": _round(self.avg_reasoning_tokens, 1),
             "avg_nudges_used": _round(self.avg_nudges_used, 2),
+            "final_answer_retry_rate": _round(self.final_answer_retry_rate),
         }
 
 
@@ -177,6 +186,21 @@ def _aggregate(
     # Pre-v3 rows have nudges_used=NULL — _mean already filters those, so a
     # mid-run schema upgrade silently averages over the v3 rows only.
     avg_nudges = _mean(s.nudges_used for s in eligible_samples)
+    # v5.1 (harness-resilience) `final_answer_retry_rate`: share of eligible
+    # samples that triggered the bail-out retry. Denominator counts only rows
+    # where the column is populated (NOT NULL); legacy v4 DBs have all NULLs
+    # → denominator 0 → None (we do not pretend the feature was off; we mark
+    # the column as unobserved). New v5+ rows always carry 0 or 1.
+    retry_observed = [
+        s.final_answer_retry_used for s in eligible_samples
+        if s.final_answer_retry_used is not None
+    ]
+    if retry_observed:
+        final_answer_retry_rate: float | None = (
+            sum(1 for v in retry_observed if v == 1) / len(retry_observed)
+        )
+    else:
+        final_answer_retry_rate = None
 
     return Aggregate(
         eligible_samples=len(eligible_samples),
@@ -200,6 +224,7 @@ def _aggregate(
         avg_completion_tokens=avg_ctok,
         avg_reasoning_tokens=avg_rtok,
         avg_nudges_used=avg_nudges,
+        final_answer_retry_rate=final_answer_retry_rate,
     )
 
 

@@ -37,6 +37,9 @@ if TYPE_CHECKING:
 
 
 # v3 accuracy columns — DO NOT reorder. Phase 1 only appends.
+# v5.1 (harness-resilience) appends `final_answer_retry_rate` at the tail of
+# the v3 group: keep it adjacent to the other "what did the harness do?"
+# diagnostics rather than mixed in with FSS / probabilistic columns.
 _SUMMARY_FIELDS_V3: tuple[str, ...] = (
     "model",
     "sampling_n",
@@ -61,6 +64,7 @@ _SUMMARY_FIELDS_V3: tuple[str, ...] = (
     "avg_completion_tokens",
     "avg_reasoning_tokens",
     "avg_nudges_used",
+    "final_answer_retry_rate",
 )
 
 # v5 discrete-native primary columns. Inserted between v3 accuracy and v4
@@ -318,6 +322,9 @@ def _write_per_model_summary_md(
         "Fleiss_κ", "H̄", "VCI", "MVG",
         "pass_any@N", "≥majority", "≥all",
         "majority_acc", "parse_fail", "error_rate",
+        # v5.1 (harness-resilience) bail-out retry frequency. NULL on legacy
+        # v4 DBs renders as "—".
+        "retry_rate",
         "BI†", "NLL†", "MBS†", "ABI_crowd†", "ABI_unif†", "fallback%",
         "avg_tool", "avg_steps", "avg_nudges", "avg_latency_ms",
         "avg_p/c/r_tokens",
@@ -366,6 +373,7 @@ def _write_per_model_summary_md(
             _fmt(row_dict["majority_vote_accuracy"]),
             _fmt(row_dict["parse_failure_rate"]),
             _fmt(row_dict["error_rate"]),
+            _fmt(row_dict["final_answer_retry_rate"]),
             _fmt(prob_dict["bi"]),
             _fmt(prob_dict["nll"]),
             _fmt(prob_dict["mbs"]),
