@@ -80,6 +80,60 @@ def _to_int(s: str | None) -> int | None:
 
 
 # --------------------------------------------------------------------------- #
+# Grid-search loaders (Phase 2 of `react-tavily-grid-search`)
+# --------------------------------------------------------------------------- #
+
+
+def _read_grid_artifacts(analysis_dir: Path) -> dict[str, list[dict[str, str]]]:
+    """Bundle every grid_*.csv into one dict for the render loop.
+
+    Missing CSVs degrade to empty lists — multi-cell runs always have
+    `grid_summary.csv`; single-cell runs only have `grid_summary.csv` (no
+    pareto / winrate when there's nothing to dominate or compare).
+    """
+    return {
+        "summary": _read_csv(analysis_dir / "grid_summary.csv"),
+        "pareto": _read_csv(analysis_dir / "grid_pareto.csv"),
+        "winrate": _read_csv(analysis_dir / "grid_winrate.csv"),
+        "marginal_C": _read_csv(analysis_dir / "grid_marginal_C.csv"),
+        "marginal_R": _read_csv(analysis_dir / "grid_marginal_R.csv"),
+    }
+
+
+def _grid_pareto_keys(pareto_rows: list[dict[str, str]]) -> set[tuple[str, int, int]]:
+    """Return the `(real_model, R, C)` triplets on the Pareto frontier.
+
+    `_write_grid_pareto_csv` puts every cell in the file and uses the empty
+    `dominated_by` column to mark frontier membership."""
+    keys: set[tuple[str, int, int]] = set()
+    for row in pareto_rows:
+        if (row.get("dominated_by") or "").strip():
+            continue
+        rm = row.get("real_model")
+        R = _to_int(row.get("R"))
+        C = _to_int(row.get("C"))
+        if rm is None or R is None or C is None:
+            continue
+        keys.add((rm, R, C))
+    return keys
+
+
+def _real_models_in_grid(grid_rows: list[dict[str, str]]) -> list[str]:
+    """Sorted, de-duplicated real_model list straight from grid_summary.csv."""
+    return sorted({r["real_model"] for r in grid_rows if r.get("real_model")})
+
+
+def _r_values_in_grid(grid_rows: list[dict[str, str]]) -> list[int]:
+    """Sorted unique R values; skips rows with malformed R."""
+    rs: set[int] = set()
+    for r in grid_rows:
+        v = _to_int(r.get("R"))
+        if v is not None:
+            rs.add(v)
+    return sorted(rs)
+
+
+# --------------------------------------------------------------------------- #
 # Plots
 # --------------------------------------------------------------------------- #
 
@@ -440,8 +494,464 @@ def plot_difficulty_grid(
 
 
 # --------------------------------------------------------------------------- #
+# Grid-search plots (Phase 2 of `react-tavily-grid-search`)
+# --------------------------------------------------------------------------- #
+
+
+def plot_pareto_frontier(
+    plt,
+    grid_rows: list[dict[str, str]],
+    pareto_keys: set[tuple[str, int, int]],
+    *,
+    fix_R: int,
+    out_path: Path,
+    default_r: int | None = None,
+) -> None:
+    """Cost-quality Pareto figure for one fixed R.
+
+    For each `real_model` we draw a polyline of `(mean_search_calls, bi_mean)`
+    sorted by `mean_search_calls`, plus a `fill_between` 95% CI band derived
+    from `grid_summary.csv` (`bi_ci_lo` / `bi_ci_hi`). Cells whose
+    `(real_model, R, C)` triplet is in `pareto_keys` get a star marker on
+    top of the line so the frontier is visually distinct from the per-model
+    curve. The legend is anchored outside the right edge so long real_model
+    slugs (e.g. `anthropic/claude-sonnet-4.5::r5::c3`) don't squash the
+    plotting area. The figure renders even when only one cell exists for
+    a real_model — it just shows a single marker without a CI band.
+    """
+    cells = [r for r in grid_rows if _to_int(r.get("R")) == fix_R]
+    if not cells:
+        return
+    real_models = sorted({r["real_model"] for r in cells if r.get("real_model")})
+    if not real_models:
+        return
+    fig, ax = plt.subplots(figsize=(6, 6))
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for i, rm in enumerate(real_models):
+        sub = sorted(
+            [r for r in cells if r["real_model"] == rm],
+            key=lambda r: _to_float(r.get("mean_search_calls")) or 0.0,
+        )
+        xs: list[float] = []
+        ys: list[float] = []
+        ci_lo: list[float] = []
+        ci_hi: list[float] = []
+        keys: list[tuple[str, int, int]] = []
+        for row in sub:
+            x = _to_float(row.get("mean_search_calls"))
+            y = _to_float(row.get("bi_mean"))
+            if x is None or y is None:
+                continue
+            R_val = _to_int(row.get("R"))
+            C_val = _to_int(row.get("C"))
+            if R_val is None or C_val is None:
+                continue
+            xs.append(x)
+            ys.append(y)
+            lo = _to_float(row.get("bi_ci_lo"))
+            hi = _to_float(row.get("bi_ci_hi"))
+            ci_lo.append(lo if lo is not None else y)
+            ci_hi.append(hi if hi is not None else y)
+            keys.append((rm, R_val, C_val))
+        if not xs:
+            continue
+        color = color_cycle[i % len(color_cycle)]
+        ax.plot(xs, ys, marker="o", color=color, linewidth=1.5, label=rm)
+        if len(xs) >= 2:
+            ax.fill_between(xs, ci_lo, ci_hi, alpha=0.15, color=color, linewidth=0)
+        for x, y, key in zip(xs, ys, keys):
+            if key in pareto_keys:
+                ax.plot(
+                    x, y, marker="*", color=color, markersize=14,
+                    markeredgecolor="black", markeredgewidth=0.5, zorder=5,
+                )
+    ax.set_xlabel("average search calls per sample")
+    ax.set_ylabel("Brier Index (higher is better)")
+    title = f"Cost-quality Pareto (R={fix_R}"
+    if default_r is not None and fix_R == default_r:
+        title += ", default"
+    title += ")"
+    ax.set_title(title)
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_grid_heatmap(
+    plt,
+    grid_rows: list[dict[str, str]],
+    *,
+    real_model: str,
+    out_path: Path,
+    bi_vmin: float | None = None,
+    bi_vmax: float | None = None,
+) -> None:
+    """(R × C) BI heatmap for a single real_model.
+
+    Each cell shows `bi_mean` rounded to 3 decimals in the upper-right
+    corner. Cells whose 95% BI CI overlaps the best cell's CI (a CI-overlap
+    proxy for "paired bootstrap p > 0.05" — strict pairwise paired bs at
+    plot time would re-open every .db, which violates the CSV-only
+    contract of this script) are overlaid with a hatched `x` patch. The
+    color range is shared across real_models via `bi_vmin` / `bi_vmax` so
+    multi-model heatmaps stay comparable.
+    """
+    sub = [r for r in grid_rows if r.get("real_model") == real_model]
+    if not sub:
+        return
+    rs = sorted({_to_int(r["R"]) for r in sub if _to_int(r.get("R")) is not None})
+    cs = sorted({_to_int(r["C"]) for r in sub if _to_int(r.get("C")) is not None})
+    if not rs or not cs:
+        return
+    bi_lookup: dict[tuple[int, int], dict[str, float | None]] = {}
+    for row in sub:
+        R = _to_int(row.get("R"))
+        C = _to_int(row.get("C"))
+        if R is None or C is None:
+            continue
+        bi_lookup[(R, C)] = {
+            "bi": _to_float(row.get("bi_mean")),
+            "ci_lo": _to_float(row.get("bi_ci_lo")),
+            "ci_hi": _to_float(row.get("bi_ci_hi")),
+        }
+    matrix: list[list[float]] = []
+    for R in rs:
+        row_vals: list[float] = []
+        for C in cs:
+            cell = bi_lookup.get((R, C))
+            row_vals.append(float("nan") if cell is None or cell["bi"] is None else cell["bi"])
+        matrix.append(row_vals)
+    flat = [v for row in matrix for v in row if v == v]
+    if not flat:
+        return
+    vmin = bi_vmin if bi_vmin is not None else 0.0
+    vmax = bi_vmax if bi_vmax is not None else max(50.0, max(flat) + 1.0)
+    fig, ax = plt.subplots(figsize=(5, 4))
+    im = ax.imshow(matrix, cmap="viridis", aspect="auto", vmin=vmin, vmax=vmax)
+    ax.set_xticks(list(range(len(cs))))
+    ax.set_xticklabels([str(c) for c in cs])
+    ax.set_yticks(list(range(len(rs))))
+    ax.set_yticklabels([str(r) for r in rs])
+    ax.set_xlabel("C (REACT_MAX_SEARCH_CALLS)")
+    ax.set_ylabel("R (TAVILY_MAX_RESULTS)")
+    ax.set_title(f"BI heatmap: {real_model}")
+    # Best cell = highest BI for this real_model (BI higher-is-better).
+    best_key: tuple[int, int] | None = None
+    best_bi = -float("inf")
+    for (R, C), cell in bi_lookup.items():
+        bi = cell["bi"]
+        if bi is None:
+            continue
+        if bi > best_bi:
+            best_bi = bi
+            best_key = (R, C)
+    best_cell = bi_lookup.get(best_key) if best_key is not None else None
+    for i, R in enumerate(rs):
+        for j, C in enumerate(cs):
+            cell = bi_lookup.get((R, C))
+            if cell is None or cell["bi"] is None:
+                continue
+            ax.text(
+                j + 0.32, i - 0.32, f"{cell['bi']:.3f}",
+                ha="left", va="top", fontsize=7,
+                color="white" if cell["bi"] < (vmin + vmax) / 2 else "black",
+            )
+            if best_cell is None or (R, C) == best_key:
+                continue
+            cell_lo, cell_hi = cell["ci_lo"], cell["ci_hi"]
+            best_lo, best_hi = best_cell["ci_lo"], best_cell["ci_hi"]
+            if cell_lo is None or cell_hi is None or best_lo is None or best_hi is None:
+                continue
+            overlaps = max(cell_lo, best_lo) <= min(cell_hi, best_hi)
+            if overlaps:
+                from matplotlib.patches import Rectangle
+
+                rect = Rectangle(
+                    (j - 0.5, i - 0.5), 1.0, 1.0,
+                    fill=False, hatch="xx", edgecolor="white",
+                    linewidth=0.0,
+                )
+                ax.add_patch(rect)
+    fig.colorbar(im, ax=ax, label="BI")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_marginal_curves(
+    plt,
+    grid_rows: list[dict[str, str]],
+    *,
+    axis: str,
+    real_models: list[str],
+    fixed_other: dict[str, int],
+    out_path: Path,
+) -> None:
+    """3-row (BI / NLL / Acc) × |real_models|-col panel of marginal curves.
+
+    `axis` ∈ {"C", "R"} — the varying axis on each subplot's x-axis.
+    `fixed_other` is the orthogonal pin (`{"R": 5}` when axis="C",
+    `{"C": 3}` when axis="R"). Each curve gets a 95% CI shading where
+    available; the saturation marker is a vertical dashed line at the
+    smallest x where consecutive y values differ by < 0.01 in the BI
+    domain.
+    """
+    if axis not in {"C", "R"}:
+        return
+    if not real_models:
+        return
+    fix_axis = "R" if axis == "C" else "C"
+    fix_value = fixed_other.get(fix_axis)
+    if fix_value is None:
+        return
+    cells = [r for r in grid_rows if _to_int(r.get(fix_axis)) == fix_value]
+    if not cells:
+        return
+    n_cols = len(real_models)
+    fig, axes = plt.subplots(
+        3, n_cols, figsize=(4 * n_cols, 9), squeeze=False, sharex="col",
+    )
+    metrics = (
+        ("bi_mean", "BI", "bi_ci_lo", "bi_ci_hi"),
+        ("nll_mean", "NLL", None, None),
+        ("acc_mean", "Accuracy", "acc_ci_lo", "acc_ci_hi"),
+    )
+    for col_idx, rm in enumerate(real_models):
+        sub = sorted(
+            [r for r in cells if r.get("real_model") == rm],
+            key=lambda r: _to_int(r.get(axis)) or 0,
+        )
+        if not sub:
+            continue
+        xs = [_to_int(r.get(axis)) for r in sub]
+        for row_idx, (key, label, lo_key, hi_key) in enumerate(metrics):
+            ax = axes[row_idx][col_idx]
+            ys = [_to_float(r.get(key)) for r in sub]
+            xs_clean = [x for x, y in zip(xs, ys) if x is not None and y is not None]
+            ys_clean = [y for y in ys if y is not None]
+            if not xs_clean:
+                ax.set_visible(False)
+                continue
+            ax.plot(xs_clean, ys_clean, marker="o", linewidth=1.5)
+            if lo_key and hi_key:
+                lo_vals = [_to_float(r.get(lo_key)) for r in sub]
+                hi_vals = [_to_float(r.get(hi_key)) for r in sub]
+                xs_ci, lo_ci, hi_ci = [], [], []
+                for x, lo, hi, y in zip(xs, lo_vals, hi_vals, ys):
+                    if x is None or y is None:
+                        continue
+                    xs_ci.append(x)
+                    lo_ci.append(lo if lo is not None else y)
+                    hi_ci.append(hi if hi is not None else y)
+                if len(xs_ci) >= 2:
+                    ax.fill_between(xs_ci, lo_ci, hi_ci, alpha=0.18, linewidth=0)
+            if row_idx == 0 and len(ys_clean) >= 2:
+                for x_prev, x_now, y_prev, y_now in zip(
+                    xs_clean[:-1], xs_clean[1:], ys_clean[:-1], ys_clean[1:],
+                ):
+                    if abs(y_now - y_prev) < 0.01:
+                        ax.axvline(x_now, color="gray", linestyle="--", linewidth=1)
+                        break
+            if row_idx == 0:
+                ax.set_title(rm, fontsize=9)
+            if col_idx == 0:
+                ax.set_ylabel(label)
+            if row_idx == 2:
+                ax.set_xlabel(axis)
+    fig.suptitle(
+        f"Marginal curves along {axis} (fixed {fix_axis}={fix_value})",
+        fontsize=11,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_winrate_matrix(
+    plt,
+    winrate_rows: list[dict[str, str]],
+    *,
+    out_path: Path,
+    sig_threshold: int = 1,
+) -> None:
+    """`M × M` heatmap of "row beats column" cell-win share.
+
+    `grid_winrate.csv` contains one ordered pair (`a < b` lex) per row, so
+    we mirror each row to populate `matrix[a][b]` (= wins_a / total_cells)
+    and `matrix[b][a]` (= wins_b / total_cells). The diagonal is NaN
+    (self-comparison is meaningless). Cells whose `sig_cells_*` count is
+    `>= sig_threshold` get a `*` annotation appended to the proportion
+    text.
+    """
+    if not winrate_rows:
+        return
+    models: set[str] = set()
+    for r in winrate_rows:
+        ma = r.get("model_a")
+        mb = r.get("model_b")
+        if ma:
+            models.add(ma)
+        if mb:
+            models.add(mb)
+    sorted_models = sorted(models)
+    if len(sorted_models) < 2:
+        return
+    n = len(sorted_models)
+    idx = {m: i for i, m in enumerate(sorted_models)}
+    matrix: list[list[float]] = [
+        [float("nan")] * n for _ in range(n)
+    ]
+    sig_mask: list[list[bool]] = [
+        [False] * n for _ in range(n)
+    ]
+    for r in winrate_rows:
+        ma = r.get("model_a") or ""
+        mb = r.get("model_b") or ""
+        if ma not in idx or mb not in idx:
+            continue
+        total = _to_int(r.get("total_cells")) or 0
+        if total <= 0:
+            continue
+        wins_a = _to_int(r.get("wins_a")) or 0
+        wins_b = _to_int(r.get("wins_b")) or 0
+        sig_a = _to_int(r.get("sig_cells_a")) or 0
+        sig_b = _to_int(r.get("sig_cells_b")) or 0
+        i, j = idx[ma], idx[mb]
+        matrix[i][j] = wins_a / total
+        matrix[j][i] = wins_b / total
+        sig_mask[i][j] = sig_a >= sig_threshold
+        sig_mask[j][i] = sig_b >= sig_threshold
+    fig, ax = plt.subplots(figsize=(5, 5))
+    im = ax.imshow(matrix, cmap="RdYlGn", vmin=0.0, vmax=1.0, aspect="auto")
+    ax.set_xticks(list(range(n)))
+    ax.set_xticklabels(sorted_models, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(list(range(n)))
+    ax.set_yticklabels(sorted_models, fontsize=8)
+    ax.set_title("Pairwise winrate (row beats column across (R, C) cells)")
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            v = matrix[i][j]
+            if v != v:  # NaN
+                continue
+            label = f"{v:.2f}"
+            if sig_mask[i][j]:
+                label += "*"
+            ax.text(
+                j, i, label, ha="center", va="center",
+                fontsize=8,
+                color="white" if v < 0.4 or v > 0.6 else "black",
+            )
+    fig.colorbar(im, ax=ax, label="row-wins share")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+# --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
+
+
+def _render_grid_figures(
+    plt,
+    *,
+    run_dir: Path,
+    analysis_dir: Path,
+    figs_dir: Path,
+) -> list[Path]:
+    """Phase 2 entry: emit `figs/grid_*.png` when manifest carries a grid block.
+
+    Best-effort like the rest of `render_all` — a missing CSV or manifest
+    block silently skips its plot. Returns the list of PNG paths actually
+    written.
+    """
+    manifest_path = run_dir / "manifest.json"
+    manifest = _read_json(manifest_path)
+    grid_meta = manifest.get("grid") if isinstance(manifest, dict) else None
+    if not grid_meta:
+        return []
+    artifacts = _read_grid_artifacts(analysis_dir)
+    summary = artifacts["summary"]
+    if not summary:
+        return []
+    written: list[Path] = []
+    pareto_keys = _grid_pareto_keys(artifacts["pareto"])
+    real_models_meta = list(grid_meta.get("real_models") or [])
+    real_models = real_models_meta or _real_models_in_grid(summary)
+    r_list = [int(r) for r in (grid_meta.get("r_list") or _r_values_in_grid(summary))]
+    default_r = grid_meta.get("default_r")
+    if default_r is None and r_list:
+        default_r = r_list[0]
+    default_c = grid_meta.get("default_c")
+    c_list_meta = list(grid_meta.get("c_list") or [])
+    if default_c is None and c_list_meta:
+        default_c = int(c_list_meta[0])
+
+    if default_r is not None:
+        out = figs_dir / "grid_pareto_C.png"
+        plot_pareto_frontier(
+            plt, summary, pareto_keys,
+            fix_R=int(default_r), out_path=out, default_r=int(default_r),
+        )
+        if out.exists():
+            written.append(out)
+    for r_value in r_list:
+        if default_r is not None and r_value == int(default_r):
+            continue
+        out = figs_dir / f"grid_pareto_C_R{r_value}.png"
+        plot_pareto_frontier(
+            plt, summary, pareto_keys,
+            fix_R=r_value, out_path=out,
+            default_r=int(default_r) if default_r is not None else None,
+        )
+        if out.exists():
+            written.append(out)
+
+    bi_values = [v for r in summary if (v := _to_float(r.get("bi_mean"))) is not None]
+    bi_vmax: float | None = None
+    if bi_values:
+        bi_vmax = max(50.0, max(bi_values) + 1.0)
+    for rm in real_models:
+        safe_rm = rm.replace("/", "__")
+        out = figs_dir / f"grid_heatmap_RC_{safe_rm}.png"
+        plot_grid_heatmap(
+            plt, summary, real_model=rm, out_path=out,
+            bi_vmin=0.0, bi_vmax=bi_vmax,
+        )
+        if out.exists():
+            written.append(out)
+
+    if default_r is not None:
+        out = figs_dir / "grid_curve_C.png"
+        plot_marginal_curves(
+            plt, summary,
+            axis="C",
+            real_models=real_models,
+            fixed_other={"R": int(default_r)},
+            out_path=out,
+        )
+        if out.exists():
+            written.append(out)
+    if default_c is not None:
+        out = figs_dir / "grid_curve_R.png"
+        plot_marginal_curves(
+            plt, summary,
+            axis="R",
+            real_models=real_models,
+            fixed_other={"C": int(default_c)},
+            out_path=out,
+        )
+        if out.exists():
+            written.append(out)
+
+    if artifacts["winrate"]:
+        out = figs_dir / "grid_winrate_matrix.png"
+        plot_winrate_matrix(plt, artifacts["winrate"], out_path=out)
+        if out.exists():
+            written.append(out)
+    return written
 
 
 def render_all(run_dir: Path) -> list[Path]:
@@ -511,6 +1021,10 @@ def render_all(run_dir: Path) -> list[Path]:
     for png in figs_dir.glob("belief_trajectory_*.png"):
         if png not in written:
             written.append(png)
+
+    written.extend(_render_grid_figures(
+        plt, run_dir=run_dir, analysis_dir=analysis_dir, figs_dir=figs_dir,
+    ))
 
     return sorted(set(written))
 
