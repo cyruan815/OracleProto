@@ -491,6 +491,32 @@ def run_analysis(run_dir: Path) -> list[Path]:
 
     conflict_models = confidence_conflict_models(confidence_rows)
 
+    # ------------------------------------------------------------------ #
+    # Phase 1 of `react-tavily-grid-search` — grid CSVs over (R, C) cells.
+    # Skipped (returns []) when manifest has no `grid` segment so legacy
+    # v4 single-cell runs stay byte-identical. Wrapped best-effort to
+    # mirror the reflection A/B pattern: a Phase-1 failure here MUST NOT
+    # mask the v4 main flow's outputs.
+    # ------------------------------------------------------------------ #
+    try:
+        from .grid import run_grid_analysis
+
+        grid_artifacts = run_grid_analysis(
+            run_dir=run_dir,
+            manifest=manifest,
+            samples_by_model=samples_by_model,
+            gt_map_global=gt_map_global,
+            rows_by_model=rows_by_model,
+            analysis_dir=analysis_dir,
+        )
+        written.extend(grid_artifacts)
+    except Exception:  # pragma: no cover — grid analysis is best-effort
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "grid analysis failed; continuing without grid_*.csv outputs"
+        )
+
     # `per_model_summary.md` is written last so it can include calibration
     # columns + the `cal*` overfit warning AND the Phase 3 `conflict*`
     # marker. When neither Phase 2 nor Phase 3 outputs are available, the

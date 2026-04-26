@@ -12,7 +12,7 @@ import csv
 import json
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .accuracy import Aggregate
 from .aggregation import ShrinkageResult
@@ -32,6 +32,14 @@ from .calibration import (
 )
 from .inference import ModelPairResult, PairedBootstrapResult
 from .proper_score import ModelProbabilisticAggregate
+
+if TYPE_CHECKING:
+    # `grid` module imports writers at module scope; importing it back here
+    # would create a top-level cycle. Annotations are deferred via
+    # `from __future__ import annotations`, so the string-form forward
+    # references in the signatures below resolve only when type checkers
+    # introspect them.
+    from .grid import GridCell, WinrateRow
 
 
 # v3 accuracy columns — DO NOT reorder. Phase 1 only appends.
@@ -841,6 +849,186 @@ def _write_numeric_confidence_calibration_csv(
     return _write_csv(path, header, out_rows)
 
 
+# --------------------------------------------------------------------------- #
+# Grid-search writers (Phase 1 of `react-tavily-grid-search`)
+# --------------------------------------------------------------------------- #
+
+
+def _write_grid_summary_csv(
+    path: Path,
+    grid: "dict[tuple[str, int, int], GridCell]",
+) -> Path:
+    """`grid_summary.csv` — main triplet table.
+
+    17-column header is locked by the `search-budget-grid` spec; rows are
+    sorted by `(real_model, R, C)` so paired diffs across runs stay stable.
+    `ece` is currently None on every row — Phase 1 skips per-cell calibration
+    (Platt / temperature) to keep the dependency surface small. Phase 2 plot
+    code reads `bi_mean` etc. and ignores `ece`; the column is reserved so a
+    future calibration pass can fill it without breaking schema.
+    """
+    from .grid import _GRID_SUMMARY_HEADER
+
+    header = list(_GRID_SUMMARY_HEADER)
+    rows: list[list[Any]] = []
+    for (real, R, C) in sorted(grid.keys()):
+        cell = grid[(real, R, C)]
+        acc = cell.accuracy_aggregate
+        prob = cell.probabilistic_aggregate
+        rows.append([
+            real,
+            R,
+            C,
+            cell.n_eligible,
+            cell.n_total,
+            _round(acc.pass_at_1_avg),
+            _round(cell.acc_ci_lo),
+            _round(cell.acc_ci_hi),
+            _round(prob.bi),
+            _round(cell.bi_ci_lo),
+            _round(cell.bi_ci_hi),
+            _round(prob.nll),
+            None,
+            _round(cell.mean_search_calls, 2),
+            _round(cell.mean_latency_ms, 1),
+            _round(cell.parse_ok_rate),
+            _round(cell.belief_parse_ok_rate),
+        ])
+    return _write_csv(path, header, rows)
+
+
+def _write_grid_marginal_C_csv(
+    path: Path,
+    cells: "list[GridCell]",
+    fix_R: int,
+) -> Path:
+    """Per-(real_model, R fixed, C) row. Rows are pre-sorted by the caller."""
+    header = [
+        "real_model", "R_fixed", "C",
+        "bi_mean", "bi_ci_lo", "bi_ci_hi",
+        "mean_search_calls", "mean_latency_ms",
+        "n_eligible",
+    ]
+    rows: list[list[Any]] = []
+    for c in cells:
+        rows.append([
+            c.real_model,
+            int(fix_R),
+            c.C,
+            _round(c.probabilistic_aggregate.bi),
+            _round(c.bi_ci_lo),
+            _round(c.bi_ci_hi),
+            _round(c.mean_search_calls, 2),
+            _round(c.mean_latency_ms, 1),
+            c.n_eligible,
+        ])
+    return _write_csv(path, header, rows)
+
+
+def _write_grid_marginal_R_csv(
+    path: Path,
+    cells: "list[GridCell]",
+    fix_C: int,
+) -> Path:
+    """Symmetric to `_write_grid_marginal_C_csv` — fixes C and varies R."""
+    header = [
+        "real_model", "C_fixed", "R",
+        "bi_mean", "bi_ci_lo", "bi_ci_hi",
+        "mean_search_calls", "mean_latency_ms",
+        "n_eligible",
+    ]
+    rows: list[list[Any]] = []
+    for c in cells:
+        rows.append([
+            c.real_model,
+            int(fix_C),
+            c.R,
+            _round(c.probabilistic_aggregate.bi),
+            _round(c.bi_ci_lo),
+            _round(c.bi_ci_hi),
+            _round(c.mean_search_calls, 2),
+            _round(c.mean_latency_ms, 1),
+            c.n_eligible,
+        ])
+    return _write_csv(path, header, rows)
+
+
+def _write_grid_pareto_csv(
+    path: Path,
+    pareto: "list[GridCell]",
+    grid: "dict[tuple[str, int, int], GridCell]",
+) -> Path:
+    """Pareto front + `dominated_by` annotation for non-frontier cells.
+
+    Layout: every cell appears exactly once; `dominated_by` is empty
+    string when the cell is on the frontier (so `pareto` membership is
+    self-evident from the column being blank). Otherwise it points at
+    one specific dominator (the lex-smallest dominator) so a reviewer
+    can eyeball "why was this cell dropped?"
+    """
+    header = [
+        "real_model", "R", "C",
+        "mean_search_calls", "bi_mean",
+        "dominated_by",
+    ]
+    pareto_keys = {(c.real_model, c.R, c.C) for c in pareto}
+    rows: list[list[Any]] = []
+    for key in sorted(grid.keys()):
+        cell = grid[key]
+        is_pareto = key in pareto_keys
+        bi = cell.probabilistic_aggregate.bi
+        x = cell.mean_search_calls
+        dominator = ""
+        if not is_pareto and bi is not None and x is not None:
+            for okey in sorted(grid.keys()):
+                if okey == key:
+                    continue
+                o = grid[okey]
+                ox = o.mean_search_calls
+                obi = o.probabilistic_aggregate.bi
+                if ox is None or obi is None:
+                    continue
+                x_weak = ox <= x
+                y_weak = obi >= bi
+                x_strict = ox < x
+                y_strict = obi > bi
+                if x_weak and y_weak and (x_strict or y_strict):
+                    dominator = (
+                        f"{o.real_model}::r{o.R}::c{o.C}"
+                    )
+                    break
+        rows.append([
+            cell.real_model, cell.R, cell.C,
+            _round(x, 2),
+            _round(bi),
+            dominator,
+        ])
+    return _write_csv(path, header, rows)
+
+
+def _write_grid_winrate_csv(
+    path: Path,
+    rows_in: "list[WinrateRow]",
+) -> Path:
+    """Pairwise win-count matrix in long form (one row per ordered pair).
+
+    Columns mirror the `WinrateRow` dataclass field order — keeps the
+    Phase 2 plot reader simple."""
+    header = [
+        "model_a", "model_b",
+        "total_cells", "wins_a", "wins_b", "ties",
+        "sig_cells_a", "sig_cells_b",
+    ]
+    out_rows: list[list[Any]] = []
+    for r in rows_in:
+        out_rows.append([
+            r.model_a, r.model_b,
+            r.total_cells, r.wins_a, r.wins_b, r.ties,
+            r.sig_cells_a, r.sig_cells_b,
+        ])
+    return _write_csv(path, header, out_rows)
+
+
 __all__ = [
     "_SUMMARY_FIELDS",
     "_CALIBRATED_SUMMARY_FIELDS",
@@ -866,5 +1054,10 @@ __all__ = [
     "_write_tool_usage_pdp_csv",
     "_write_confidence_calibration_csv",
     "_write_numeric_confidence_calibration_csv",
+    "_write_grid_summary_csv",
+    "_write_grid_marginal_C_csv",
+    "_write_grid_marginal_R_csv",
+    "_write_grid_pareto_csv",
+    "_write_grid_winrate_csv",
     "_fmt",
 ]
