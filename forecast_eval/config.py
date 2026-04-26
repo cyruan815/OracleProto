@@ -224,6 +224,16 @@ class Settings(BaseSettings):
     def _parse_reasoning_patterns(cls, v: Any) -> list[str]:
         return _parse_csv(v)
 
+    @field_validator("GRID_DEFAULT_R", "GRID_DEFAULT_C", mode="before")
+    @classmethod
+    def _parse_grid_default(cls, v: Any) -> Any:
+        # `.env.example` documents that leaving these blank means "take the
+        # first list element". A literal empty string from the env file would
+        # otherwise fail pydantic's int parser, so coerce "" → None here.
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
     @field_validator("MODEL_TRAINING_CUTOFFS", mode="before")
     @classmethod
     def _parse_training_cutoffs(cls, v: Any) -> dict[str, date]:

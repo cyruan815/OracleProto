@@ -89,6 +89,23 @@ def test_grid_default_unset_passes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.GRID_DEFAULT_C is None
 
 
+def test_grid_default_blank_string_treated_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `.env.example` ships GRID_DEFAULT_R= / GRID_DEFAULT_C= with empty values
+    # to document the "use list[0]" default. Pydantic would otherwise reject
+    # the empty string under int|None. The before-validator must coerce
+    # ""/whitespace to None so a freshly-copied .env.example still loads.
+    _required_env(monkeypatch)
+    monkeypatch.setenv("TAVILY_MAX_RESULTS", "5")
+    monkeypatch.setenv("REACT_MAX_SEARCH_CALLS", "8")
+    monkeypatch.setenv("GRID_DEFAULT_R", "")
+    monkeypatch.setenv("GRID_DEFAULT_C", "   ")
+    s = Settings(_env_file=None)
+    assert s.GRID_DEFAULT_R is None
+    assert s.GRID_DEFAULT_C is None
+
+
 def test_min_above_all_c_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _required_env(monkeypatch)
     monkeypatch.setenv("TAVILY_MAX_RESULTS", "5")
