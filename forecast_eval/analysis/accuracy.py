@@ -3,6 +3,11 @@
 These metrics are byte-identical to v3 — the v4 refactor only relocated them
 from the monolithic `analysis.py`. The probabilistic family lives next door
 in `proper_score.py`.
+
+v5 appends the discrete-native family: Tversky per-sample score, FSS three-step
+aggregate, Cohen's κ, and Hamming partial-credit. These do NOT modify the v3
+`Aggregate` dataclass — they're separate functions consumed by the v5 writer
+columns. Existing v3/v4 behavior is unchanged.
 """
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
+from ..prompts import index_to_letter
 from .flatten import SampleRow
 
 
@@ -235,6 +241,311 @@ def _finish_reason_breakdown(samples: list[SampleRow]) -> Counter:
     return counter
 
 
+# --------------------------------------------------------------------------- #
+# v5 discrete-native family: Tversky / FSS / Cohen κ / Hamming
+# --------------------------------------------------------------------------- #
+
+
+def tversky_score(
+    pred: frozenset[str],
+    gt: frozenset[str],
+    *,
+    alpha: float = 2.0,
+    beta: float = 0.5,
+) -> float:
+    """Tversky 1977 set similarity: $|TP|/(|TP| + α \\cdot |FP| + β \\cdot |FN|)$.
+
+    Default $(α, β) = (2, 0.5)$ makes a multi-selection error 4× as costly
+    as a missed selection — consistent with the prediction-domain intuition
+    that "asserting an event will happen" is more harmful than "missing one".
+
+    `TP=0` returns 0.0, including the "model output empty set" boundary
+    (anti-conservative — conservative no-selection is NOT rewarded).
+
+    `gt` empty (degenerate, should not occur in this dataset) returns 1.0
+    iff `pred` is also empty, else 0.0 (defensive).
+    """
+    if not gt:
+        return 1.0 if not pred else 0.0
+    tp = len(pred & gt)
+    if tp == 0:
+        return 0.0
+    fp = len(pred - gt)
+    fn = len(gt - pred)
+    denom = tp + alpha * fp + beta * fn
+    return tp / denom
+
+
+def tversky_baseline(
+    k: int,
+    m: int,
+    *,
+    alpha: float = 2.0,
+    beta: float = 0.5,
+) -> float:
+    """Expected Tversky for a uniform random predictor on a $k$-option, $m$-positive question.
+
+    Each label is included in $\\hat{S}$ independently with probability 0.5.
+    $|TP| \\sim \\mathrm{Binom}(m, 0.5)$ and $|FP| \\sim \\mathrm{Binom}(k-m, 0.5)$
+    are independent, so the expectation factorises:
+
+    $$\\mathbb{E}[\\mathrm{Tversky}] = \\sum_{tp=1}^{m} \\sum_{fp=0}^{k-m}
+        \\binom{m}{tp} 2^{-m} \\binom{k-m}{fp} 2^{-(k-m)}
+        \\cdot \\frac{tp}{tp + α fp + β (m - tp)}$$
+
+    The $tp=0$ stratum contributes 0 (Tversky returns 0 when $TP=0$). Total
+    work is $O(m \\times (k - m))$; $k=35, m=10$ runs in well under 1ms.
+
+    Returns 0.0 for degenerate $k \\le 0$, $m \\le 0$, $m > k$ inputs (the
+    caller should guard, but defensive zeroing keeps FSS finite).
+    """
+    if k <= 0 or m <= 0 or m > k:
+        return 0.0
+    expectation = 0.0
+    p_m = 0.5 ** m
+    p_km = 0.5 ** (k - m) if k > m else 1.0
+    for tp in range(1, m + 1):
+        p_tp = math.comb(m, tp) * p_m
+        for fp in range(k - m + 1):
+            p_fp = math.comb(k - m, fp) * p_km
+            denom = tp + alpha * fp + beta * (m - tp)
+            expectation += p_tp * p_fp * (tp / denom)
+    return expectation
+
+
+def _per_question_tversky(
+    samples_by_q: dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+    *,
+    alpha: float = 2.0,
+    beta: float = 0.5,
+) -> dict[str, tuple[float, int]]:
+    """Per-question $c_q$ = mean Tversky over parse_ok trials, plus $K_{\\text{eff}}$.
+
+    Returns `{qid: (c_q, K_eff)}`. Questions with $K_{\\text{eff}} = 0$ (no
+    sample produced a parsed letter set) are silently dropped — they
+    contribute no signal to FSS and the chance correction would be undefined.
+    """
+    out: dict[str, tuple[float, int]] = {}
+    for qid, samples in samples_by_q.items():
+        gt = gt_map.get(qid)
+        if gt is None:
+            continue
+        scores: list[float] = []
+        for s in samples:
+            if not s.is_eligible:
+                continue
+            pred = s.parsed_letters
+            if pred is None:
+                continue
+            scores.append(tversky_score(pred, gt, alpha=alpha, beta=beta))
+        if not scores:
+            continue
+        c_q = sum(scores) / len(scores)
+        out[qid] = (c_q, len(scores))
+    return out
+
+
+def fss(
+    samples: list[SampleRow] | dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+    *,
+    alpha: float = 2.0,
+    beta: float = 0.5,
+) -> dict[str, Any]:
+    """Forecast Skill Score (Tversky-based, chance-corrected).
+
+    Three-step aggregate (plan §1.7):
+
+    1. per-sample Tversky $\\text{score}_{q,k}$;
+    2. per-question $c_q = \\frac{1}{K_{\\text{eff}}} \\sum_k \\text{score}_{q,k}$
+       (parse-ok trials only; $K_{\\text{eff}} = 0$ → question dropped);
+    3. chance correction $s_q = (c_q - p_{e,q}) / (1 - p_{e,q})$ where
+       $p_{e,q}$ = $1/k_q$ for single-choice questions and
+       `tversky_baseline(k_q, m_q)` for multi-label questions;
+    4. FSS = global mean over $q$ of $s_q$.
+
+    Returns `{"fss", "n_valid", "mean_pe", "per_question": {qid: {c_q, p_e, s_q, K_eff}}}`.
+    Empty input returns FSS=None, n_valid=0; that's the "no scoreable
+    questions" sentinel for the writer (CSV cell becomes blank).
+
+    Accepts either a flat `list[SampleRow]` (the natural shape from
+    `_flatten_db`, which we group by `question_id` here) or an already-grouped
+    `dict[str, list[SampleRow]]`. The dict form lets `inference.metric_paired_bootstrap`
+    pass bootstrap-resampled subsets keyed by a unique resample-index without
+    sample-level question_id collisions.
+    """
+    if isinstance(samples, dict):
+        by_q = samples
+    else:
+        by_q = {}
+        for s in samples:
+            by_q.setdefault(s.question_id, []).append(s)
+
+    per_q_dict = _per_question_tversky(by_q, gt_map, alpha=alpha, beta=beta)
+
+    per_question: dict[str, dict[str, Any]] = {}
+    s_q_values: list[float] = []
+    p_e_values: list[float] = []
+
+    for qid, (c_q, k_eff) in per_q_dict.items():
+        sample = by_q[qid][0]
+        ctype = sample.choice_type
+        options = sample.options
+        if not options:
+            continue
+        k = len(options)
+        gt = gt_map.get(qid)
+        if gt is None:
+            continue
+        m = len(gt)
+
+        if ctype == "single":
+            # Single-choice: random guess hit rate is 1/k (plan §1.6).
+            p_e = 1.0 / k
+        else:
+            # Multi-label: closed-form expected Tversky for a uniform
+            # 0.5-per-label random predictor.
+            p_e = tversky_baseline(k, m, alpha=alpha, beta=beta)
+
+        if 1.0 - p_e > 1e-12:
+            s_q = (c_q - p_e) / (1.0 - p_e)
+        else:
+            # Degenerate p_e ≥ 1 (shouldn't happen for legitimate k/m); treat
+            # as no skill possible.
+            s_q = 0.0
+
+        per_question[qid] = {
+            "c_q": c_q,
+            "p_e": p_e,
+            "s_q": s_q,
+            "K_eff": k_eff,
+        }
+        s_q_values.append(s_q)
+        p_e_values.append(p_e)
+
+    if not s_q_values:
+        return {
+            "fss": None,
+            "n_valid": 0,
+            "mean_pe": None,
+            "per_question": {},
+        }
+
+    fss_value = sum(s_q_values) / len(s_q_values)
+    mean_pe = sum(p_e_values) / len(p_e_values)
+    return {
+        "fss": fss_value,
+        "n_valid": len(s_q_values),
+        "mean_pe": mean_pe,
+        "per_question": per_question,
+    }
+
+
+def cohen_kappa_for_aggregate(acc: float, p_e: float) -> float | None:
+    """Plain Cohen's κ on a binary outcome: $(\\mathrm{acc} - p_e) / (1 - p_e)$.
+
+    `p_e = 1.0` returns None (degenerate, no skill is measurable). Negative
+    return values are allowed (acc < p_e → worse than chance).
+    """
+    if abs(1.0 - p_e) < 1e-12:
+        return None
+    return (acc - p_e) / (1.0 - p_e)
+
+
+def cohen_kappa(
+    samples_by_q: dict[str, list[SampleRow]],
+    gt_map: dict[str, frozenset[str]],
+) -> float | None:
+    """Cohen's κ on strict per-sample correct/wrong outcomes.
+
+    Per-question $p_{e,q}$ rule:
+    * `single`: $1/k_q$ (random guess hit rate);
+    * `multi`: $0.5$ (per-label coin-flip simplification — a strict $0.5^{k_q}$
+      chance baseline becomes vanishingly small for large $k_q$ and produces
+      κ values nearly identical to raw acc, defeating the purpose of chance
+      correction; per-label 0.5 keeps κ on the same order as the single-choice
+      version).
+
+    Sample-weighted (so a question with all 5 trials counts 5×). Returns None
+    if no resolvable samples exist.
+    """
+    n_correct = 0
+    n_total = 0
+    p_e_sum = 0.0
+    for qid, samples in samples_by_q.items():
+        gt = gt_map.get(qid)
+        if gt is None or not samples or not samples[0].options:
+            continue
+        k = len(samples[0].options)
+        if k == 0:
+            continue
+        ctype = samples[0].choice_type
+        p_e_q = 1.0 / k if ctype == "single" else 0.5
+        for s in samples:
+            if s.correct is None:
+                continue
+            n_correct += 1 if s.correct == 1 else 0
+            n_total += 1
+            p_e_sum += p_e_q
+    if n_total == 0:
+        return None
+    acc = n_correct / n_total
+    p_e = p_e_sum / n_total
+    return cohen_kappa_for_aggregate(acc, p_e)
+
+
+def hamming_score_per_question(
+    pred: frozenset[str],
+    gt: frozenset[str],
+    options: list[str],
+) -> float:
+    """Hamming partial-credit: $1 - \\frac{1}{k}\\sum_l |\\hat{y}_l - o_l|$.
+
+    Per-label 0/1 mismatch rate, then complement. Bounded $[0, 1]$. Empty
+    options returns 0.0 (degenerate; caller should guard).
+    """
+    if not options:
+        return 0.0
+    k = len(options)
+    mismatches = 0
+    for i in range(k):
+        letter = index_to_letter(i)
+        in_pred = letter in pred
+        in_gt = letter in gt
+        if in_pred != in_gt:
+            mismatches += 1
+    return 1.0 - mismatches / k
+
+
+def hamming_score(
+    samples: list[SampleRow],
+    gt_map: dict[str, frozenset[str]],
+) -> float | None:
+    """Mean Hamming partial-credit across multi-label samples (single-only run → None).
+
+    Skips: ineligible samples, parse_ok=0, missing GT. A run with zero
+    multi-label questions returns None — single-choice partial-credit
+    degenerates to strict 0/1 (which already lives in `pass_at_1_avg`).
+    """
+    scores: list[float] = []
+    for s in samples:
+        if s.choice_type != "multi":
+            continue
+        if not s.is_eligible or s.parse_ok != 1:
+            continue
+        pred = s.parsed_letters
+        if pred is None:
+            continue
+        gt = gt_map.get(s.question_id)
+        if gt is None:
+            continue
+        scores.append(hamming_score_per_question(pred, gt, s.options))
+    if not scores:
+        return None
+    return sum(scores) / len(scores)
+
+
 __all__ = [
     "Aggregate",
     "_aggregate",
@@ -243,4 +554,12 @@ __all__ = [
     "_finish_reason_breakdown",
     "_mean",
     "_round",
+    # v5 discrete-native family
+    "tversky_score",
+    "tversky_baseline",
+    "fss",
+    "cohen_kappa",
+    "cohen_kappa_for_aggregate",
+    "hamming_score",
+    "hamming_score_per_question",
 ]
