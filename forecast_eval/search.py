@@ -39,6 +39,11 @@ class SearchResult:
     results: list[SearchResultItem] = field(default_factory=list)
     error_kind: str | None = None
     error_message: str | None = None
+    # search-leak-filter-v1: detector audit metadata (None when leak filter is
+    # disabled or when Tavily failed). MUST appear after every other default
+    # field so dataclass field-ordering rules stay satisfied. NOT exposed via
+    # to_llm_payload() — the audit dict is for search_calls JSON only.
+    audit: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -259,12 +264,23 @@ async def tavily_search(
                         network_class_error = True
                     else:
                         await pool.report_ok(api_key)
-                        return _parse_tavily_response(
+                        result = _parse_tavily_response(
                             data,
                             query=query,
                             end_date=end_date,
                             raw_content_max_chars=raw_content_max_chars,
                         )
+                        # search-leak-filter-v1: Stage-2 detector pass. Local
+                        # import to avoid an import cycle (leak_filter imports
+                        # SearchResult / SearchResultItem from this module).
+                        if settings.ENABLE_SEARCH_LEAK_FILTER:
+                            from . import leak_filter  # noqa: PLC0415 — break import cycle
+                            result = await leak_filter.filter_search_result(
+                                result,
+                                end_date=end_date,
+                                settings=settings,
+                            )
+                        return result
                 elif status in _AUTH_STATUS:
                     await pool.report_failure(api_key, "auth")
                     last_error_kind = "auth"

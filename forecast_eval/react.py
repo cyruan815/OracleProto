@@ -117,6 +117,32 @@ def _record_search_call(
             }
         )
         return
+    # search-leak-filter-v1: when the leak filter ran, surface its audit on the
+    # search_calls entry. `n_results` keeps its v5 meaning ("results the main
+    # LLM actually saw") so old analysis scripts reading entry["n_results"]
+    # still get a sensible single number — they just now see the post-detector
+    # count when the filter was active.
+    audit = result.audit
+    if audit is not None:
+        # `published_dates` keeps *raw* ordering (length == n_results_raw) so
+        # detector_verdicts[i] aligns with published_dates[i] for forensic use.
+        # `n_results` reports kept count (matches result.results length) so old
+        # analysis scripts reading entry["n_results"] still get the post-filter
+        # number the main LLM actually saw.
+        search_calls.append(
+            {
+                "query": query,
+                "end_date": end_date,
+                "n_results": int(audit["n_results_kept"]),
+                "published_dates": list(audit.get("published_dates_raw", [])),
+                "n_results_raw": int(audit["n_results_raw"]),
+                "n_results_kept": int(audit["n_results_kept"]),
+                "detector_verdicts": list(audit["detector_verdicts"]),
+                "detector_latency_ms": int(audit["detector_latency_ms"]),
+                "detector_error_kind": audit["detector_error_kind"],
+            }
+        )
+        return
     search_calls.append(
         {
             "query": query,

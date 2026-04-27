@@ -418,6 +418,7 @@ def redact_api_key(raw: str | None, provider: str) -> dict[str, Any]:
 # 让事后审计能看到 "本 run 用了哪几把 key" 而不泄露明文.
 _API_KEY_FIELDS_STR = {
     "LLM_API_KEY": "llm",
+    "LEAK_DETECTOR_API_KEY": "leak_detector",
 }
 _API_KEY_FIELDS_LIST = {
     "TAVILY_API_KEY": "tavily",

@@ -202,6 +202,30 @@ class Settings(BaseSettings):
     # 默认关闭以保 v3 行为字节级一致; 启用前先在候选模型上 pilot 解析率.
     BELIEF_PROTOCOL: bool = False
 
+    # -------- Search leak filter (Stage 2 detector, search-leak-filter-v1) --------
+    # 总开关: True 时 tavily_search 返回前每条 result 经独立 LLM (detector) 审核,
+    # verdict=drop 整条剔除; False 时字节级回退到本提案前. 默认开启 (默认严苛).
+    # 启用要求 LEAK_DETECTOR_API_KEY / LEAK_DETECTOR_MODEL 必须配齐, 且
+    # ENABLE_WEB_SEARCH 必须同时为 True (否则 detector 路径死代码).
+    ENABLE_SEARCH_LEAK_FILTER: bool = True
+    # detector 自有 OpenAI-compatible endpoint 配置, 与 LLM_* 完全解耦, 允许
+    # detector 选用比被评测模型更高级的模型做严苛判断.
+    LEAK_DETECTOR_API_KEY: str = ""
+    # 留空时由 leak_filter 在 client 初始化阶段回填 LLM_BASE_URL.
+    LEAK_DETECTOR_BASE_URL: str = ""
+    # detector 模型 slug. 不允许 :online 后缀 (provider-native browsing 防护).
+    LEAK_DETECTOR_MODEL: str = ""
+    LEAK_DETECTOR_TIMEOUT_S: int = 60
+    LEAK_DETECTOR_TEMPERATURE: float = 0.0
+    LEAK_DETECTOR_MAX_TOKENS: int = 512
+    LEAK_DETECTOR_RETRY_MAX: int = 3
+    LEAK_DETECTOR_BACKOFF_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [2, 5, 15])
+    # drop = 失败条目剔除 (默认, fail-closed); keep = 失败条目透传 (escape hatch).
+    LEAK_DETECTOR_FAIL_ACTION: str = "drop"
+    LEAK_DETECTOR_CONCURRENCY: int = 5
+    # 人工版本号; sha256(prompt_template) 自动算 hash, 这个是给人读的标签.
+    LEAK_DETECTOR_PROMPT_VERSION: str = "v1"
+
     # Sampling / Run
     SAMPLING_N: int = 5
     RUN_ID: str = ""
@@ -241,6 +265,7 @@ class Settings(BaseSettings):
         "LLM_BACKOFF_RATE_LIMIT_S",
         "LLM_BACKOFF_SERVER_5XX_S",
         "SEARCH_BACKOFF_S",
+        "LEAK_DETECTOR_BACKOFF_S",
         mode="before",
     )
     @classmethod
@@ -464,6 +489,63 @@ class Settings(BaseSettings):
                 f"GRID_DEFAULT_C={self.GRID_DEFAULT_C} not in REACT_MAX_SEARCH_CALLS "
                 f"={self.REACT_MAX_SEARCH_CALLS}; pick one of the configured cells"
             )
+        # search-leak-filter-v1 启动校验
+        if self.LEAK_DETECTOR_FAIL_ACTION not in ("drop", "keep"):
+            raise ValueError(
+                f"LEAK_DETECTOR_FAIL_ACTION must be one of {{drop, keep}}; "
+                f"got {self.LEAK_DETECTOR_FAIL_ACTION!r}"
+            )
+        if self.LEAK_DETECTOR_CONCURRENCY < 1:
+            raise ValueError(
+                f"LEAK_DETECTOR_CONCURRENCY must be >= 1; got {self.LEAK_DETECTOR_CONCURRENCY}"
+            )
+        if self.LEAK_DETECTOR_RETRY_MAX < 0:
+            raise ValueError(
+                f"LEAK_DETECTOR_RETRY_MAX must be >= 0; got {self.LEAK_DETECTOR_RETRY_MAX}"
+            )
+        if self.LEAK_DETECTOR_TIMEOUT_S <= 0:
+            raise ValueError(
+                f"LEAK_DETECTOR_TIMEOUT_S must be > 0; got {self.LEAK_DETECTOR_TIMEOUT_S}"
+            )
+        if self.LEAK_DETECTOR_TEMPERATURE < 0:
+            raise ValueError(
+                f"LEAK_DETECTOR_TEMPERATURE must be >= 0; got {self.LEAK_DETECTOR_TEMPERATURE}"
+            )
+        if self.LEAK_DETECTOR_MAX_TOKENS < 1:
+            raise ValueError(
+                f"LEAK_DETECTOR_MAX_TOKENS must be >= 1; got {self.LEAK_DETECTOR_MAX_TOKENS}"
+            )
+        if self.LEAK_DETECTOR_MODEL.endswith(":online"):
+            raise ValueError(
+                f"LEAK_DETECTOR_MODEL {self.LEAK_DETECTOR_MODEL!r} must not end with "
+                "':online' — provider-native browsing is not allowed"
+            )
+        if self.ENABLE_SEARCH_LEAK_FILTER:
+            if not self.ENABLE_WEB_SEARCH:
+                raise ValueError(
+                    "ENABLE_SEARCH_LEAK_FILTER requires ENABLE_WEB_SEARCH=true; "
+                    "the leak filter only runs against tavily_search results"
+                )
+            if not self.LEAK_DETECTOR_API_KEY:
+                raise ValueError(
+                    "LEAK_DETECTOR_API_KEY must not be empty when "
+                    "ENABLE_SEARCH_LEAK_FILTER=true"
+                )
+            if any(tok in self.LEAK_DETECTOR_API_KEY for tok in _PLACEHOLDER_TOKENS):
+                raise ValueError(
+                    "LEAK_DETECTOR_API_KEY still holds a placeholder token; "
+                    "fill your real detector key in .env"
+                )
+            if not self.LEAK_DETECTOR_MODEL:
+                raise ValueError(
+                    "LEAK_DETECTOR_MODEL must not be empty when "
+                    "ENABLE_SEARCH_LEAK_FILTER=true"
+                )
+            if any(tok in self.LEAK_DETECTOR_MODEL for tok in _PLACEHOLDER_TOKENS):
+                raise ValueError(
+                    "LEAK_DETECTOR_MODEL still holds a placeholder token; "
+                    "fill a real model slug in .env"
+                )
         return self
 
     def __repr__(self) -> str:
