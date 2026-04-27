@@ -438,6 +438,7 @@ def test_per_model_summary_csv_v3_columns_unchanged(tmp_path: Path) -> None:
         "resolvable_samples", "cutoff_skip_samples", "cutoff_skip_rate",
         "pass_at_1_avg", "resolvable_rate", "pass_any_at_n",
         "at_least_majority_at_n", "at_least_all_at_n",
+        "exam_score_at_n_avg",  # exam-score-metric: column order assertion
         "majority_vote_accuracy", "majority_vote_resolvable_rate",
         "parse_failure_rate", "error_rate",
         "avg_tool_calls", "avg_react_steps", "avg_latency_ms",
