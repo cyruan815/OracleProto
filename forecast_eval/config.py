@@ -13,6 +13,14 @@ _PLACEHOLDER_TOKENS = {"REPLACE_ME", "CHANGEME", "PUT_YOUR_KEY_HERE"}
 _RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{4}$")
 _SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# composite-score-by-subtype: 子题型分桶常量。`question_type` 来自 questions
+# 表 CHECK 约束 (`yes_no` / `binary_named` / `multiple_choice`); `choice_type`
+# 同表 (`single` / `multi`)。校验使用 frozenset 即可，不需要枚举类。
+COMPOSITE_QTYPE_BUCKETS: frozenset[str] = frozenset(
+    {"yes_no", "binary_named", "multiple_choice"}
+)
+COMPOSITE_CTYPE_BUCKETS: frozenset[str] = frozenset({"single", "multi"})
+
 
 def _parse_csv(raw: str | list[Any] | None) -> list[str]:
     if raw is None or raw == "":
@@ -24,6 +32,105 @@ def _parse_csv(raw: str | list[Any] | None) -> list[str]:
 
 def _parse_csv_int(raw: str | list[Any] | None) -> list[int]:
     return [int(x) for x in _parse_csv(raw)]
+
+
+def _parse_weights_dict(
+    raw: str | dict[str, Any] | None, *, allowed_buckets: frozenset[str], field_name: str
+) -> dict[str, float]:
+    """解析 ``"yes_no=0.15,binary_named=0.15,multiple_choice=0.70"`` 形式的权重映射。
+
+    校验：桶名必须 ∈ ``allowed_buckets``、权重必须可解析为 float、权重 ≥ 0。
+    缺失的桶视为 0（即"该桶不参与合成"），但要求至少一个桶权重 > 0。
+    """
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        items = [(str(k).strip(), v) for k, v in raw.items()]
+    else:
+        items = []
+        for pair in str(raw).split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if "=" not in pair:
+                raise ValueError(
+                    f"{field_name} entry must be 'bucket=weight', got: {pair!r}"
+                )
+            bucket, value = pair.split("=", 1)
+            items.append((bucket.strip(), value.strip()))
+    out: dict[str, float] = {}
+    for bucket, value in items:
+        if not bucket:
+            raise ValueError(f"{field_name} has an empty bucket name")
+        if bucket not in allowed_buckets:
+            raise ValueError(
+                f"{field_name} bucket {bucket!r} not in {sorted(allowed_buckets)}"
+            )
+        try:
+            w = float(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"{field_name}[{bucket}] is not a valid float: {value!r}"
+            ) from e
+        if w < 0:
+            raise ValueError(
+                f"{field_name}[{bucket}] must be >= 0; got {w}"
+            )
+        out[bucket] = w
+    if out and not any(w > 0 for w in out.values()):
+        raise ValueError(
+            f"{field_name} requires at least one weight > 0 (otherwise composite "
+            "score has no defined denominator)"
+        )
+    return out
+
+
+def _parse_overrides_dict(
+    raw: str | dict[str, Any] | None,
+    *,
+    allowed_buckets: frozenset[str],
+    field_name: str,
+) -> dict[str, dict[str, float]]:
+    """解析 ``"fss=yes_no=0.05,binary_named=0.05,multiple_choice=0.90;cohen_kappa=..."``
+    形式的按指标权重覆盖。
+
+    分号分隔不同指标，逗号分隔同指标内的桶；每段沿用
+    :func:`_parse_weights_dict` 的语义（含至少一个 > 0 校验）。指标名拼写错误
+    （不在已知指标白名单内）由 ``forecast_eval.analysis.composite`` 在运行时
+    raise，本函数不做该层校验，避免 config 模块反向 import analysis。
+    """
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        # 直接传入 dict：值可以是 "k=v,k=v" 字符串或已解析的 dict
+        out: dict[str, dict[str, float]] = {}
+        for metric, sub in raw.items():
+            metric_name = str(metric).strip()
+            if not metric_name:
+                raise ValueError(f"{field_name} has an empty metric name")
+            sub_field = f"{field_name}[{metric_name}]"
+            out[metric_name] = _parse_weights_dict(
+                sub, allowed_buckets=allowed_buckets, field_name=sub_field
+            )
+        return out
+    out = {}
+    for segment in str(raw).split(";"):
+        segment = segment.strip()
+        if not segment:
+            continue
+        if "=" not in segment:
+            raise ValueError(
+                f"{field_name} segment must be 'metric=bucket=w,bucket=w'; got: {segment!r}"
+            )
+        metric_name, rest = segment.split("=", 1)
+        metric_name = metric_name.strip()
+        if not metric_name:
+            raise ValueError(f"{field_name} has an empty metric name in segment: {segment!r}")
+        sub_field = f"{field_name}[{metric_name}]"
+        out[metric_name] = _parse_weights_dict(
+            rest, allowed_buckets=allowed_buckets, field_name=sub_field
+        )
+    return out
 
 
 _MAX_TOKENS_PARAM_ALLOWED = {"max_tokens", "max_completion_tokens"}
@@ -240,6 +347,35 @@ class Settings(BaseSettings):
     # 人工版本号; sha256(prompt_template) 自动算 hash, 这个是给人读的标签.
     LEAK_DETECTOR_PROMPT_VERSION: str = "v1"
 
+    # -------- Composite score weights (composite-score-by-subtype) --------
+    # 综合得分按子题型加权: 对所有指标 (per_model_summary 全部列) 在两个维度
+    # 上独立做"先按桶分别算 → 再按权重合成 → 缺失桶剔除并归一化"的合成。
+    # 写出 runs/{run_id}/analysis/per_model_composite_by_question_type.csv
+    # 与 .../per_model_composite_by_choice_type.csv. 旧 per_model_summary.csv
+    # 与 per_model_by_question_type.csv 保持原"全部题混算"语义不变。
+    #
+    # 默认权重按"难题区分度高"原则: yes_no/binary_named 各 0.15、
+    # multiple_choice 0.70; single 0.40、multi 0.60.
+    COMPOSITE_WEIGHTS_QTYPE: Annotated[dict[str, float], NoDecode] = Field(
+        default_factory=lambda: {
+            "yes_no": 0.15,
+            "binary_named": 0.15,
+            "multiple_choice": 0.70,
+        }
+    )
+    COMPOSITE_WEIGHTS_CTYPE: Annotated[dict[str, float], NoDecode] = Field(
+        default_factory=lambda: {"single": 0.40, "multi": 0.60}
+    )
+    # 按指标覆盖: 形如 ``"fss=yes_no=0.05,binary_named=0.05,multiple_choice=0.90;
+    # cohen_kappa=..."``. 缺省走全局默认; 指标名拼写错误 (不在 _SUMMARY_FIELDS
+    # + 概率族白名单内) 由 analysis.composite 运行时 raise.
+    COMPOSITE_WEIGHT_OVERRIDES_QTYPE: Annotated[
+        dict[str, dict[str, float]], NoDecode
+    ] = Field(default_factory=dict)
+    COMPOSITE_WEIGHT_OVERRIDES_CTYPE: Annotated[
+        dict[str, dict[str, float]], NoDecode
+    ] = Field(default_factory=dict)
+
     # Sampling / Run
     SAMPLING_N: int = 5
     RUN_ID: str = ""
@@ -341,6 +477,56 @@ class Settings(BaseSettings):
     @classmethod
     def _parse_max_tokens_param_field(cls, v: Any) -> dict[str, str]:
         return _parse_max_tokens_param(v)
+
+    @field_validator("COMPOSITE_WEIGHTS_QTYPE", mode="before")
+    @classmethod
+    def _parse_composite_weights_qtype(cls, v: Any) -> dict[str, float]:
+        # 空字符串视为 "走默认 dict" — pydantic field default_factory 已经
+        # 提供了完整的默认权重，这里只在用户显式设置时解析。
+        if v is None or v == "":
+            return {
+                "yes_no": 0.15,
+                "binary_named": 0.15,
+                "multiple_choice": 0.70,
+            }
+        return _parse_weights_dict(
+            v,
+            allowed_buckets=COMPOSITE_QTYPE_BUCKETS,
+            field_name="COMPOSITE_WEIGHTS_QTYPE",
+        )
+
+    @field_validator("COMPOSITE_WEIGHTS_CTYPE", mode="before")
+    @classmethod
+    def _parse_composite_weights_ctype(cls, v: Any) -> dict[str, float]:
+        if v is None or v == "":
+            return {"single": 0.40, "multi": 0.60}
+        return _parse_weights_dict(
+            v,
+            allowed_buckets=COMPOSITE_CTYPE_BUCKETS,
+            field_name="COMPOSITE_WEIGHTS_CTYPE",
+        )
+
+    @field_validator("COMPOSITE_WEIGHT_OVERRIDES_QTYPE", mode="before")
+    @classmethod
+    def _parse_composite_overrides_qtype(
+        cls, v: Any
+    ) -> dict[str, dict[str, float]]:
+        return _parse_overrides_dict(
+            v,
+            allowed_buckets=COMPOSITE_QTYPE_BUCKETS,
+            field_name="COMPOSITE_WEIGHT_OVERRIDES_QTYPE",
+        )
+
+    @field_validator("COMPOSITE_WEIGHT_OVERRIDES_CTYPE", mode="before")
+    @classmethod
+    def _parse_composite_overrides_ctype(
+        cls, v: Any
+    ) -> dict[str, dict[str, float]]:
+        return _parse_overrides_dict(
+            v,
+            allowed_buckets=COMPOSITE_CTYPE_BUCKETS,
+            field_name="COMPOSITE_WEIGHT_OVERRIDES_CTYPE",
+        )
 
     @field_validator("TAVILY_INCLUDE_RAW_CONTENT", mode="before")
     @classmethod
@@ -582,6 +768,80 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "LEAK_DETECTOR_MODEL still holds a placeholder token; "
                     "fill a real model slug in .env"
+                )
+        # composite-score-by-subtype 后置校验: field_validator (mode=before) 不会
+        # 处理 default_factory 直接产生的 dict, 也不会处理 model_copy(update=...)
+        # 注入的值, 这里再走一遍以挡住代码内构造的 Settings.
+        for bucket, weight in self.COMPOSITE_WEIGHTS_QTYPE.items():
+            if bucket not in COMPOSITE_QTYPE_BUCKETS:
+                raise ValueError(
+                    f"COMPOSITE_WEIGHTS_QTYPE bucket {bucket!r} not in "
+                    f"{sorted(COMPOSITE_QTYPE_BUCKETS)}"
+                )
+            if weight < 0:
+                raise ValueError(
+                    f"COMPOSITE_WEIGHTS_QTYPE[{bucket}] must be >= 0; got {weight}"
+                )
+        if not any(w > 0 for w in self.COMPOSITE_WEIGHTS_QTYPE.values()):
+            raise ValueError(
+                "COMPOSITE_WEIGHTS_QTYPE requires at least one weight > 0 "
+                "(otherwise composite score has no defined denominator)"
+            )
+        for bucket, weight in self.COMPOSITE_WEIGHTS_CTYPE.items():
+            if bucket not in COMPOSITE_CTYPE_BUCKETS:
+                raise ValueError(
+                    f"COMPOSITE_WEIGHTS_CTYPE bucket {bucket!r} not in "
+                    f"{sorted(COMPOSITE_CTYPE_BUCKETS)}"
+                )
+            if weight < 0:
+                raise ValueError(
+                    f"COMPOSITE_WEIGHTS_CTYPE[{bucket}] must be >= 0; got {weight}"
+                )
+        if not any(w > 0 for w in self.COMPOSITE_WEIGHTS_CTYPE.values()):
+            raise ValueError(
+                "COMPOSITE_WEIGHTS_CTYPE requires at least one weight > 0"
+            )
+        for metric, sub in self.COMPOSITE_WEIGHT_OVERRIDES_QTYPE.items():
+            if not metric:
+                raise ValueError(
+                    "COMPOSITE_WEIGHT_OVERRIDES_QTYPE has an empty metric name"
+                )
+            for bucket, weight in sub.items():
+                if bucket not in COMPOSITE_QTYPE_BUCKETS:
+                    raise ValueError(
+                        f"COMPOSITE_WEIGHT_OVERRIDES_QTYPE[{metric}] bucket "
+                        f"{bucket!r} not in {sorted(COMPOSITE_QTYPE_BUCKETS)}"
+                    )
+                if weight < 0:
+                    raise ValueError(
+                        f"COMPOSITE_WEIGHT_OVERRIDES_QTYPE[{metric}][{bucket}] "
+                        f"must be >= 0; got {weight}"
+                    )
+            if sub and not any(w > 0 for w in sub.values()):
+                raise ValueError(
+                    f"COMPOSITE_WEIGHT_OVERRIDES_QTYPE[{metric}] requires at "
+                    "least one weight > 0"
+                )
+        for metric, sub in self.COMPOSITE_WEIGHT_OVERRIDES_CTYPE.items():
+            if not metric:
+                raise ValueError(
+                    "COMPOSITE_WEIGHT_OVERRIDES_CTYPE has an empty metric name"
+                )
+            for bucket, weight in sub.items():
+                if bucket not in COMPOSITE_CTYPE_BUCKETS:
+                    raise ValueError(
+                        f"COMPOSITE_WEIGHT_OVERRIDES_CTYPE[{metric}] bucket "
+                        f"{bucket!r} not in {sorted(COMPOSITE_CTYPE_BUCKETS)}"
+                    )
+                if weight < 0:
+                    raise ValueError(
+                        f"COMPOSITE_WEIGHT_OVERRIDES_CTYPE[{metric}][{bucket}] "
+                        f"must be >= 0; got {weight}"
+                    )
+            if sub and not any(w > 0 for w in sub.values()):
+                raise ValueError(
+                    f"COMPOSITE_WEIGHT_OVERRIDES_CTYPE[{metric}] requires at "
+                    "least one weight > 0"
                 )
         return self
 
