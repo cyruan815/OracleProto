@@ -43,6 +43,8 @@ class _StubSettings:
     SEARCH_RETRY_MAX: int = 3
     SEARCH_BACKOFF_S: list[int] = None  # type: ignore[assignment]
     LLM_TIMEOUT_S: int = 30
+    # search-leak-filter-v1: 默认关闭, 走非-detector 路径; 单测里需要时显式开启.
+    ENABLE_SEARCH_LEAK_FILTER: bool = False
 
     def __post_init__(self) -> None:
         if self.SEARCH_BACKOFF_S is None:
@@ -637,3 +639,183 @@ async def test_tavily_search_5xx_uses_network_retry_does_not_blacklist() -> None
     assert route.call_count == 2
     assert result.ok
     assert _key_state(pool, "tvly-only").blacklisted is False
+
+
+# ==================== search-leak-filter-v1: detector wiring ====================
+
+
+@dataclass
+class _DetectorStubSettings(_StubSettings):
+    """Extend the search _StubSettings with detector knobs the leak_filter reads."""
+
+    ENABLE_SEARCH_LEAK_FILTER: bool = True
+    LEAK_DETECTOR_API_KEY: str = "sk-detector-test-1234"
+    LEAK_DETECTOR_BASE_URL: str = "https://api.detector.test/v1"
+    LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
+    LEAK_DETECTOR_MODEL: str = "anthropic/claude-sonnet-4.6"
+    LEAK_DETECTOR_TIMEOUT_S: int = 60
+    LEAK_DETECTOR_TEMPERATURE: float = 0.0
+    LEAK_DETECTOR_MAX_TOKENS: int = 512
+    LEAK_DETECTOR_RETRY_MAX: int = 0
+    LEAK_DETECTOR_BACKOFF_S: list[int] = field(default_factory=lambda: [0, 0, 0])
+    LEAK_DETECTOR_FAIL_ACTION: str = "drop"
+    LEAK_DETECTOR_CONCURRENCY: int = 5
+
+
+def _patch_detector(monkeypatch: pytest.MonkeyPatch, verdicts: list[str]) -> dict:
+    """Install a fake detector by monkey-patching ``leak_filter._detect_one``.
+
+    Returns a dict containing ``calls`` (list of (item.title, cutoff_date)) so
+    tests can inspect ordering / count.
+    """
+    from forecast_eval import leak_filter
+
+    state = {"calls": [], "verdicts": list(verdicts), "i": 0}
+
+    async def fake_detect_one(item, cutoff_date, settings, client):  # noqa: ANN001
+        state["calls"].append((item.title, cutoff_date))
+        v = state["verdicts"][state["i"]]
+        state["i"] += 1
+        return v, "stub"
+
+    monkeypatch.setattr(leak_filter, "_detect_one", fake_detect_one)
+    return state
+
+
+def _five_results_payload() -> dict:
+    return {
+        "answer": "synthesised answer",
+        "results": [
+            {
+                "title": f"t{i}",
+                "url": f"https://example.com/{i}",
+                "content": f"snippet {i}",
+                "published_date": "2026-01-16",
+            }
+            for i in range(5)
+        ],
+    }
+
+
+@respx.mock
+async def test_tavily_search_with_leak_filter_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启用 leak filter: 5 条 + verdicts [keep,drop,keep,keep,drop] → 返回 3 条;
+    result.audit 含 5 字段."""
+    respx.post(TAVILY_ENDPOINT).mock(
+        return_value=httpx.Response(200, json=_five_results_payload())
+    )
+    state = _patch_detector(monkeypatch, ["keep", "drop", "keep", "keep", "drop"])
+    settings = _DetectorStubSettings()
+    result = await tavily_search("q", "2026-01-17", settings)
+    assert result.ok
+    assert len(result.results) == 3
+    assert [r.title for r in result.results] == ["t0", "t2", "t3"]
+    # audit 字段齐全: 五个 spec 字段 + published_dates_raw (供 react 写入
+    # search_calls.published_dates 用, 长度 == n_results_raw).
+    assert result.audit is not None
+    assert {
+        "n_results_raw",
+        "n_results_kept",
+        "detector_verdicts",
+        "detector_latency_ms",
+        "detector_error_kind",
+    } <= set(result.audit.keys())
+    assert "published_dates_raw" in result.audit
+    assert len(result.audit["published_dates_raw"]) == 5
+    assert result.audit["n_results_raw"] == 5
+    assert result.audit["n_results_kept"] == 3
+    # detector 收到的 cutoff_date 与 Tavily end_date 同源.
+    assert all(c[1] == "2026-01-17" for c in state["calls"])
+
+
+@respx.mock
+async def test_tavily_search_with_leak_filter_disabled() -> None:
+    """开关关闭: 字节级与本提案前一致, audit is None, detector 不被调用."""
+    respx.post(TAVILY_ENDPOINT).mock(
+        return_value=httpx.Response(200, json=_five_results_payload())
+    )
+    settings = _DetectorStubSettings(ENABLE_SEARCH_LEAK_FILTER=False)
+    result = await tavily_search("q", "2026-01-17", settings)
+    assert result.ok
+    assert len(result.results) == 5  # 原始数量, 未经 detector 裁剪
+    assert result.audit is None  # 开关关闭则 audit 缺省
+
+
+@respx.mock
+async def test_tavily_search_failed_skips_detector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tavily 重试耗尽 → leak_filter 不被调用, error_kind=tavily_error."""
+    from forecast_eval import leak_filter
+
+    respx.post(TAVILY_ENDPOINT).mock(return_value=httpx.Response(503, text="down"))
+    detector_called = {"n": 0}
+
+    async def fake_filter(*args, **kwargs):  # noqa: ANN001
+        detector_called["n"] += 1
+        raise AssertionError("filter_search_result MUST NOT be called on Tavily failure")
+
+    monkeypatch.setattr(leak_filter, "filter_search_result", fake_filter)
+    settings = _DetectorStubSettings(SEARCH_RETRY_MAX=1, SEARCH_BACKOFF_S=[0])
+    result = await tavily_search("q", "2026-01-17", settings)
+    assert not result.ok
+    assert result.error_kind == "tavily_error"
+    assert result.audit is None
+    assert detector_called["n"] == 0
+
+
+@respx.mock
+async def test_tavily_search_all_dropped_no_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5 条全 drop → ok=True, results=[], answer=None (answer 由 drop 内容合成)."""
+    respx.post(TAVILY_ENDPOINT).mock(
+        return_value=httpx.Response(200, json=_five_results_payload())
+    )
+    _patch_detector(monkeypatch, ["drop"] * 5)
+    settings = _DetectorStubSettings()
+    result = await tavily_search("q", "2026-01-17", settings)
+    assert result.ok
+    assert result.error_kind is None
+    assert result.results == []
+    assert result.answer is None
+    assert result.audit["n_results_kept"] == 0
+
+
+@respx.mock
+async def test_tavily_search_partial_drop_keeps_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """部分 drop → answer 保留 (已知折中, 见 spec)."""
+    respx.post(TAVILY_ENDPOINT).mock(
+        return_value=httpx.Response(200, json=_five_results_payload())
+    )
+    _patch_detector(monkeypatch, ["keep", "drop", "keep", "drop", "keep"])
+    settings = _DetectorStubSettings()
+    result = await tavily_search("q", "2026-01-17", settings)
+    assert len(result.results) == 3
+    assert result.answer == "synthesised answer"
+
+
+def test_to_llm_payload_excludes_audit() -> None:
+    """to_llm_payload() MUST 不输出 audit 字段, 防止它进入主 LLM 可见路径."""
+    r = SearchResult(
+        query="q",
+        end_date="2026-01-17",
+        answer="ok",
+        results=[SearchResultItem(title="t", url="u", content="c")],
+        audit={
+            "n_results_raw": 1,
+            "n_results_kept": 1,
+            "detector_verdicts": ["keep"],
+            "detector_latency_ms": 12,
+            "detector_error_kind": None,
+        },
+    )
+    payload = r.to_llm_payload()
+    assert "audit" not in payload
+    # 同时检查 results 内的每一项也不含 audit (defensive).
+    for item in payload["results"]:
+        assert "audit" not in item

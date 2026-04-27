@@ -564,3 +564,67 @@ def test_register_run_meta_preserves_started_at_on_resume(tmp_path: Path) -> Non
     assert row["started_at"] == "2026-04-24T12:00:00+00:00"
     assert row["finished_at"] == "2026-04-24T13:00:00+00:00"
     assert json.loads(row["filters_snapshot"]) == {"new": 1}
+
+
+# ---- search-leak-filter-v1: detector key redaction ------------------------------
+
+
+def test_snapshot_settings_redacts_leak_detector_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """启用 leak filter 时 LEAK_DETECTOR_API_KEY 必须以 redact_api_key dict
+    形态出现在 snapshot 中, 明文 MUST NOT 出现."""
+    monkeypatch.setenv("LLM_API_KEY", "sk-or-v1-ABCDEFGHIJKLMNOP0123")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-ABCDEFGHIJK0123")
+    monkeypatch.setenv("MODELS", "openai/gpt-5")
+    monkeypatch.setenv("RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("SOURCE_DB", str(tmp_path / "forecast_eval_set_example.db"))
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("ENABLE_SEARCH_LEAK_FILTER", "true")
+    monkeypatch.setenv("LEAK_DETECTOR_API_KEY", "sk-detector-supersecret-7890")
+    monkeypatch.setenv("LEAK_DETECTOR_MODEL", "anthropic/claude-sonnet-4.6")
+    s = Settings(_env_file=None)
+
+    snap = dbmod.snapshot_settings(s)
+    blob = json.dumps(snap)
+    assert "sk-detector-supersecret-7890" not in blob
+
+    detector_entry = snap["LEAK_DETECTOR_API_KEY"]
+    assert isinstance(detector_entry, dict)
+    assert detector_entry["provider"] == "leak_detector"
+    assert detector_entry["prefix"] == "sk-d"
+    assert detector_entry["length"] == len("sk-detector-supersecret-7890")
+    assert len(detector_entry["sha256_12"]) == 12
+
+
+def test_register_run_meta_round_trips_detector_fingerprint(tmp_path: Path) -> None:
+    """detector 三键经 register_run_meta 持久化进 runs.config_snapshot 后 round-trip 完整."""
+    conn = dbmod.connect(tmp_path / "r.db")
+    dbmod.init_schema(conn, sampling_n=1)
+    config_snapshot = {
+        "MODELS": ["openai/gpt-5"],
+        "leak_detector_enabled": True,
+        "leak_detector_model": "anthropic/claude-sonnet-4.6",
+        "leak_detector_prompt_hash": "abcdef0123456789",
+    }
+    dbmod.register_run_meta(
+        conn,
+        run_id="20260424-120000-abcd",
+        model="openai/gpt-5",
+        sampling_n=1,
+        filters_snapshot={},
+        config_snapshot=config_snapshot,
+        source_db_hash="a" * 64,
+        metadata_hash="b" * 64,
+        prompt_templates_hash="c" * 64,
+    )
+    row = conn.execute(
+        "SELECT config_snapshot FROM run_meta WHERE run_id=?",
+        ("20260424-120000-abcd",),
+    ).fetchone()
+    cs = json.loads(row["config_snapshot"])
+    assert cs["leak_detector_enabled"] is True
+    assert cs["leak_detector_model"] == "anthropic/claude-sonnet-4.6"
+    assert cs["leak_detector_prompt_hash"] == "abcdef0123456789"
+    # SCHEMA_VERSION 不动 (本提案承诺).
+    assert dbmod.SCHEMA_VERSION == 5

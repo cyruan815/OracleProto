@@ -723,6 +723,146 @@ async def test_final_answer_retry_still_empty(
     assert len(llm.calls) == 7
 
 
+async def test_search_calls_includes_detector_audit(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """启用 leak filter 时 search_calls entry MUST 含 detector_* 5 字段;
+    n_results = audit.n_results_kept (向后兼容旧分析脚本)."""
+    settings = _make_settings(monkeypatch)
+
+    async def stub_tavily_with_audit(query: str, end_date: str, *args, **kwargs):
+        from forecast_eval.search import SearchResult, SearchResultItem
+
+        # 模拟 leak_filter 已经裁剪后返回的 SearchResult: 5 raw → 3 kept.
+        kept_items = [
+            SearchResultItem(
+                title=f"t{i}",
+                url=f"https://x/{i}",
+                content="c",
+                published_date=f"2026-01-{10+i:02d}",
+            )
+            for i in (0, 2, 4)
+        ]
+        return SearchResult(
+            query=query,
+            end_date=end_date,
+            answer=None,
+            results=kept_items,
+            audit={
+                "n_results_raw": 5,
+                "n_results_kept": 3,
+                "detector_verdicts": ["keep", "drop", "keep", "drop", "keep"],
+                "detector_latency_ms": 123,
+                "detector_error_kind": None,
+                "published_dates_raw": [
+                    "2026-01-10",
+                    "2026-01-11",
+                    "2026-01-12",
+                    "2026-01-13",
+                    "2026-01-14",
+                ],
+            },
+        )
+
+    script = [
+        (_tool_msg("call_1", "evidence"), "tool_calls", {"response_id": "r0"}),
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r1"}),
+    ]
+    llm = _ScriptedLLM(script)
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", stub_tavily_with_audit)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+    calls = json.loads(result.search_calls)
+    assert len(calls) == 1
+    entry = calls[0]
+    assert entry["n_results"] == 3  # = n_results_kept (向后兼容)
+    assert entry["n_results_raw"] == 5
+    assert entry["n_results_kept"] == 3
+    assert entry["detector_verdicts"] == ["keep", "drop", "keep", "drop", "keep"]
+    assert entry["detector_latency_ms"] == 123
+    assert entry["detector_error_kind"] is None
+    # published_dates 长度 == n_results_raw, 与 detector_verdicts 一一对应.
+    assert len(entry["published_dates"]) == 5
+
+
+async def test_search_calls_no_audit_when_disabled(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """关闭开关 (audit=None) → search_calls entry 仅含旧 4 字段."""
+    settings = _make_settings(monkeypatch)
+    # _stub_tavily 返回的 SearchResult.audit 默认为 None — 这就是关闭开关时的形态.
+    script = [
+        (_tool_msg("call_1", "evidence"), "tool_calls", {"response_id": "r0"}),
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r1"}),
+    ]
+    llm = _ScriptedLLM(script)
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+    calls = json.loads(result.search_calls)
+    assert len(calls) == 1
+    entry = calls[0]
+    assert set(entry.keys()) == {"query", "end_date", "n_results", "published_dates"}
+    assert "detector_verdicts" not in entry
+
+
+async def test_search_calls_tavily_error_no_detector_fields(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tavily 失败 → entry 仅含 5 个旧字段 + error_kind, 不含 detector 字段."""
+    settings = _make_settings(monkeypatch)
+
+    async def failing_tavily(query: str, end_date: str, *args, **kwargs):
+        from forecast_eval.search import SearchResult
+
+        return SearchResult(
+            query=query,
+            end_date=end_date,
+            error_kind="tavily_error",
+            error_message="all keys exhausted",
+        )
+
+    script = [
+        (_tool_msg("call_1", "evidence"), "tool_calls", {"response_id": "r0"}),
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r1"}),
+    ]
+    llm = _ScriptedLLM(script)
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", failing_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+    calls = json.loads(result.search_calls)
+    entry = calls[0]
+    assert entry["error_kind"] == "tavily_error"
+    assert entry["n_results"] == 0
+    assert entry["published_dates"] == []
+    assert "detector_verdicts" not in entry
+    assert "detector_latency_ms" not in entry
+
+
 async def test_final_answer_retry_skipped_when_already_filled(
     templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
