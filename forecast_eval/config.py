@@ -180,13 +180,27 @@ class Settings(BaseSettings):
     REACT_MIN_SEARCH_CALLS: int = 0
     # nudge 最多注入几次, 防止 LLM 与系统互相 nudge 死循环. REACT_MAX_STEPS 仍是硬天花板.
     REACT_MAX_NUDGES: int = 2
-    # v5.1 harness-resilience 开关: 默认开, 允许关闭做对照实验.
-    # 见 openspec/changes/harness-resilience-v1.
+    # v5.1 harness-resilience 开关. 见 openspec/changes/harness-resilience-v1.
     # REACT_FINAL_ANSWER_RETRY=True: 循环正常结束但 final_raw=="" 时, 用 tools=[] 再调一次 LLM.
-    # REACT_BUDGET_EXCEEDED_DROP_TOOLS=True: 一旦累计 web_search >= REACT_MAX_SEARCH_CALLS, 之后
-    #   每轮都以 tools=[] 调用 LLM, 让模型只能输出 content (而非反复撞 budget exceeded).
-    REACT_FINAL_ANSWER_RETRY: bool = True
+    #   默认 False — 已被 force-final-answer-near-limit-v1 (循环内最后一步硬切 tools=[]) 覆盖,
+    #   保留为可选的循环外应急兜底. 启用会多花一步 LLM 预算 (react_steps + 1).
+    # REACT_BUDGET_EXCEEDED_DROP_TOOLS=True (默认): 一旦累计 web_search >= REACT_MAX_SEARCH_CALLS,
+    #   之后每轮都以 tools=[] 调用 LLM, 让模型只能输出 content (而非反复撞 budget exceeded).
+    REACT_FINAL_ANSWER_RETRY: bool = False
     REACT_BUDGET_EXCEEDED_DROP_TOOLS: bool = True
+
+    # force-final-answer-near-limit-v1: prompt 层面把"步数即将耗尽"的事实前置, 与
+    # REACT_FINAL_ANSWER_RETRY (事后兜底) 互补.
+    # REACT_BUDGET_AWARENESS_PROTOCOL=True: 在 user prompt 末尾追加预算意识段, 告知模型
+    #   总步数 + 总搜索次数, 引导其留最后一步给 \boxed{...} 答案.
+    # REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=True: 在循环临近上限时主动注入 user message:
+    #   - 倒数第 (REACT_FORCE_FINAL_ANSWER_LOOKAHEAD) 步至倒数第二步: 注入软提醒, 仍允许 tool_calls.
+    #   - 最后一步: 注入硬收尾文案 + tools=[], 强制 content-only 输出 \boxed{...}.
+    # REACT_FORCE_FINAL_ANSWER_LOOKAHEAD: int = 多少步开始干预 (>= 1, <= REACT_MAX_STEPS).
+    #   = 1: 只在最后一步硬切, 无软提醒. = 2 (默认): 倒数第二步软提醒 + 最后一步硬切.
+    REACT_BUDGET_AWARENESS_PROTOCOL: bool = True
+    REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT: bool = True
+    REACT_FORCE_FINAL_ANSWER_LOOKAHEAD: int = 2
 
     # 网格搜索锚点 (可选): 当 .env 配置多值 R / C 时, paper 主图固定 R = GRID_DEFAULT_R
     # 画 BI vs C 曲线; 类似地 GRID_DEFAULT_C 控制 BI vs R 曲线的 C 锚点. 未设置时
@@ -475,6 +489,29 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"REACT_BUDGET_EXCEEDED_DROP_TOOLS must be bool; got "
                 f"{type(self.REACT_BUDGET_EXCEEDED_DROP_TOOLS).__name__}"
+            )
+        # force-final-answer-near-limit-v1 三件套校验.
+        if not isinstance(self.REACT_BUDGET_AWARENESS_PROTOCOL, bool):
+            raise ValueError(
+                f"REACT_BUDGET_AWARENESS_PROTOCOL must be bool; got "
+                f"{type(self.REACT_BUDGET_AWARENESS_PROTOCOL).__name__}"
+            )
+        if not isinstance(self.REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT, bool):
+            raise ValueError(
+                f"REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT must be bool; got "
+                f"{type(self.REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT).__name__}"
+            )
+        if self.REACT_FORCE_FINAL_ANSWER_LOOKAHEAD < 1:
+            raise ValueError(
+                "REACT_FORCE_FINAL_ANSWER_LOOKAHEAD must be >= 1 "
+                f"(0 = no near-limit window; disable via REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=false instead); "
+                f"got {self.REACT_FORCE_FINAL_ANSWER_LOOKAHEAD}"
+            )
+        if self.REACT_FORCE_FINAL_ANSWER_LOOKAHEAD > self.REACT_MAX_STEPS:
+            raise ValueError(
+                f"REACT_FORCE_FINAL_ANSWER_LOOKAHEAD={self.REACT_FORCE_FINAL_ANSWER_LOOKAHEAD} "
+                f"must not exceed REACT_MAX_STEPS={self.REACT_MAX_STEPS} "
+                "(otherwise every step would be treated as near-limit, defeating the purpose)"
             )
         if self.TAVILY_RAW_CONTENT_MAX_CHARS < 0:
             raise ValueError("TAVILY_RAW_CONTENT_MAX_CHARS must be >= 0 (0 = no truncation)")

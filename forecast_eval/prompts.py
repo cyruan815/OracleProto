@@ -117,6 +117,94 @@ def _build_nudge_message(*, searches_done: int, min_required: int) -> str:
     )
 
 
+# Budget-awareness protocol (force-final-answer-near-limit-v1).
+# Tail-attached to the user message in the SAME slot as REFLECTION / BELIEF
+# protocols (NOT part of `prompt_templates`, so `prompt_templates_hash` stays
+# stable; the text is recorded per-sample in `user_prompt` and run-wide in
+# `run_meta.config_snapshot`). Pairs with the dynamic last-step injectors
+# (`build_penultimate_step_warning` / `build_last_step_force_finalisation`)
+# in react.py — this protocol gives the model upfront budget awareness so
+# it can plan to leave the final step for the boxed answer; the dynamic
+# injectors are the runtime safety net when the plan slips.
+def build_budget_awareness_protocol(*, max_steps: int, max_search_calls: int) -> str:
+    """Render the budget-awareness tail.
+
+    `max_steps` is `REACT_MAX_STEPS` and `max_search_calls` is the cell-local
+    `REACT_MAX_SEARCH_CALLS` int (the dispatcher has already downcast the
+    grid list to a single int by the time this is called). When
+    `max_search_calls == 0`, web_search is unavailable; we still emit the
+    step-budget guidance because the boxed-answer pacing matters either way.
+    """
+    if max_steps < 1:
+        raise ValueError(f"max_steps must be >= 1, got {max_steps}")
+    if max_search_calls < 0:
+        raise ValueError(f"max_search_calls must be >= 0, got {max_search_calls}")
+    search_clause = (
+        f"and at most **{max_search_calls}** `web_search` call(s)"
+        if max_search_calls > 0
+        else "(web_search is disabled in this run)"
+    )
+    return (
+        "\n\n---\n"
+        "**Budget Awareness — your harness has hard limits.**\n\n"
+        f"You may take at most **{max_steps}** reasoning/tool steps {search_clause}. "
+        "Each assistant turn counts as one step regardless of whether it issues `tool_calls` "
+        "or content. Plan ahead so your LAST step is the one that emits the final "
+        "`\\boxed{...}` answer — if step "
+        f"{max_steps} still contains `tool_calls`, the answer is forfeit and the "
+        "sample is scored as a parse failure.\n\n"
+        "**Recommended pacing.**\n"
+        "- Use the early-to-middle steps to investigate, search, and reflect across distinct angles.\n"
+        "- Reserve at least the FINAL step for committing your answer with no `tool_calls`.\n"
+        "- The harness will inject a reminder when you near the step limit, and will strip the "
+        "`web_search` schema entirely on the very last step to force a content-only reply. Do not "
+        "rely on these safety nets — plan to commit on your own initiative.\n"
+        "- If decisive evidence is already in hand mid-budget, commit early; do not consume the "
+        "budget for its own sake.\n"
+    )
+
+
+def build_penultimate_step_warning(
+    *, current_step: int, max_steps: int, searches_done: int, max_search_calls: int
+) -> str:
+    """Soft reminder injected as a user message at the second-to-last step.
+
+    Goal: give the model one last opportunity to issue a decisive `web_search`
+    while making it explicit that the very next step will be content-only.
+    `current_step` and `max_steps` are 1-indexed in the message text (matches
+    how the budget-awareness protocol talks about "step N") even though
+    react.py iterates from 0.
+    """
+    return (
+        f"Harness reminder: this is step {current_step} of {max_steps} (the "
+        "second-to-last). On the NEXT step the harness will strip the "
+        "`web_search` tool schema and require a content-only reply with your "
+        f"final `\\boxed{{...}}` answer. You have used {searches_done}/"
+        f"{max_search_calls} search call(s). If a single decisive search is "
+        "still missing, issue it now; otherwise begin consolidating your "
+        "reasoning so the next turn can commit."
+    )
+
+
+def build_last_step_force_finalisation(
+    *, current_step: int, max_steps: int
+) -> str:
+    """Hard cutoff message paired with `tools=[]` on the final step.
+
+    Same tone as the legacy `REACT_FINAL_ANSWER_RETRY` bail-out
+    ("Time to commit") — kept consistent on purpose so traces remain
+    comparable across runs that use either mechanism.
+    """
+    return (
+        f"Harness cutoff: this is the final step ({current_step} of "
+        f"{max_steps}) and the `web_search` tool schema has been removed. "
+        "Stop investigating and output your final `\\boxed{...}` answer "
+        "now. If your evidence is incomplete, give your best calibrated "
+        "guess from base rates rather than producing no answer — an empty "
+        "reply scores zero."
+    )
+
+
 def index_to_letter(i: int) -> str:
     if i < 0:
         raise ValueError(f"index must be >= 0, got {i}")
@@ -148,6 +236,7 @@ def render_user_prompt(
     q: Question,
     templates: dict[str, str],
     *,
+    budget_awareness_protocol: str | None = None,
     reflection_protocol: str | None = None,
     belief_protocol: str | None = None,
 ) -> str:
@@ -157,14 +246,14 @@ def render_user_prompt(
     function only branches on `q.question_type` and handles the three
     rendering rules from the prompt-rendering spec.
 
-    `reflection_protocol` and `belief_protocol`, if provided, are appended
-    verbatim after the canonical template body — reflection first, belief
-    last. Neither is part of `prompt_templates`, so the run's
-    `prompt_templates_hash` stays bit-identical to runs without either
-    protocol; their presence is recorded via `Settings.config_snapshot` in
-    `run_meta` (plus the dedicated `..._protocol_text` / `..._protocol_hash`
-    columns) and per-sample via the `user_prompt` field. Passing neither
-    yields the v3 byte-identical rendering.
+    `budget_awareness_protocol` (if provided) is appended FIRST so the model
+    has end-to-end budget awareness before reading the methodology layers.
+    `reflection_protocol` and `belief_protocol` follow in that order. None of
+    these are part of `prompt_templates`, so the run's `prompt_templates_hash`
+    stays bit-identical to runs without any of them; their presence is
+    recorded via `Settings.config_snapshot` in `run_meta` and per-sample via
+    the `user_prompt` field. Passing nothing extra yields the v3 byte-
+    identical rendering.
     """
     options = json.loads(q.options)
 
@@ -206,6 +295,8 @@ def render_user_prompt(
         output_format=output_format,
         guidance=templates["guidance"],
     )
+    if budget_awareness_protocol:
+        rendered = rendered + budget_awareness_protocol
     if reflection_protocol:
         rendered = rendered + reflection_protocol
     if belief_protocol:

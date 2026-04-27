@@ -17,6 +17,9 @@ from .prompts import (
     BELIEF_PROTOCOL,
     REFLECTION_PROTOCOL,
     _build_nudge_message,
+    build_budget_awareness_protocol,
+    build_last_step_force_finalisation,
+    build_penultimate_step_warning,
     render_user_prompt,
 )
 from .search import SearchResult, tavily_search
@@ -175,9 +178,22 @@ async def run_react(
     """
     end_date = _compute_end_date(q.end_time, settings.TAVILY_END_DATE_OFFSET_DAYS)
     belief_enabled = settings.BELIEF_PROTOCOL
+    # force-final-answer-near-limit-v1 (A): static budget-awareness tail. The
+    # cell-local int form of REACT_MAX_SEARCH_CALLS is what react sees here
+    # (the dispatcher already downcast the grid list).
+    if settings.REACT_BUDGET_AWARENESS_PROTOCOL:
+        budget_awareness = build_budget_awareness_protocol(
+            max_steps=settings.REACT_MAX_STEPS,
+            max_search_calls=int(settings.REACT_MAX_SEARCH_CALLS)
+            if settings.ENABLE_WEB_SEARCH
+            else 0,
+        )
+    else:
+        budget_awareness = None
     user_prompt = render_user_prompt(
         q,
         templates,
+        budget_awareness_protocol=budget_awareness,
         reflection_protocol=REFLECTION_PROTOCOL if settings.REACT_REFLECTION_PROTOCOL else None,
         belief_protocol=BELIEF_PROTOCOL if belief_enabled else None,
     )
@@ -207,6 +223,57 @@ async def run_react(
 
     for step in range(settings.REACT_MAX_STEPS):
         steps_executed = step + 1
+        # force-final-answer-near-limit-v1 (B): inject a user-side reminder
+        # (and possibly strip tools) when the loop is approaching the step
+        # ceiling. `remaining` counts the step ABOUT to be issued — so when
+        # `remaining == 1` this is the LAST step, when `remaining == 2` this
+        # is the second-to-last. Two-stage ladder driven by LOOKAHEAD:
+        #   - LOOKAHEAD = 1: only hard-cutoff on the last step.
+        #   - LOOKAHEAD = 2 (default): soft warning at remaining==2, then
+        #     hard cutoff at remaining==1.
+        # The injected user messages do NOT increment `nudges_used` (semantic
+        # parity with the legacy REACT_FINAL_ANSWER_RETRY bail-out — both are
+        # harness-side resilience, not search-floor enforcement).
+        force_final_active = (
+            settings.REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT
+            and (settings.REACT_MAX_STEPS - step) <= settings.REACT_FORCE_FINAL_ANSWER_LOOKAHEAD
+        )
+        force_final_hard_cutoff = False
+        if force_final_active:
+            remaining = settings.REACT_MAX_STEPS - step
+            if remaining == 1:
+                # Last step — hard cutoff: append the force-finalise message
+                # and strip tools so the model can ONLY emit content. This
+                # supersedes the budget-exceeded drop-tools branch below
+                # (whichever fires first wins; the resulting tools list is
+                # the same).
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": build_last_step_force_finalisation(
+                            current_step=steps_executed,
+                            max_steps=settings.REACT_MAX_STEPS,
+                        ),
+                    }
+                )
+                force_final_hard_cutoff = True
+            else:
+                # Remaining ∈ [2, LOOKAHEAD] — soft warning. Tools schema is
+                # still available so the model can issue ONE last decisive
+                # search before the cutoff lands on the next turn.
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": build_penultimate_step_warning(
+                            current_step=steps_executed,
+                            max_steps=settings.REACT_MAX_STEPS,
+                            searches_done=len(search_calls),
+                            max_search_calls=int(settings.REACT_MAX_SEARCH_CALLS)
+                            if settings.ENABLE_WEB_SEARCH
+                            else 0,
+                        ),
+                    }
+                )
         # v5.1 (harness-resilience) D1: once the cumulative web_search budget
         # is spent, drop the tool schema for subsequent LLM calls so the model
         # is forced down the no-tool path (assistant_msg.tool_calls becomes
@@ -214,11 +281,13 @@ async def run_react(
         # opt-out via REACT_BUDGET_EXCEEDED_DROP_TOOLS=False restores legacy
         # behaviour (model keeps requesting web_search and gets `search budget
         # exceeded` tool_result echoes).
-        if (
+        if force_final_hard_cutoff:
+            tools_for_this_step: list[dict[str, Any]] = []
+        elif (
             settings.REACT_BUDGET_EXCEEDED_DROP_TOOLS
             and len(search_calls) >= settings.REACT_MAX_SEARCH_CALLS
         ):
-            tools_for_this_step: list[dict[str, Any]] = []
+            tools_for_this_step = []
         else:
             tools_for_this_step = tool_schemas
         t_step_start = time.monotonic()
