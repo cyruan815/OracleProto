@@ -591,10 +591,13 @@ Forecast/
 │       │   └── {model_slug}.db    # 每个模型一个 sqlite; 自带 questions + prompt_templates 副本
 │       ├── analysis/              # 跑完后生成的统计产物
 │       │   ├── per_model_summary.csv / .md
-│       │   ├── per_model_by_question_type.csv
-│       │   ├── per_model_by_choice_type.csv
+│       │   ├── per_model_by_question_type.csv         # 含 v5 列 (composite-score-by-subtype)
+│       │   ├── per_model_by_choice_type.csv           # 含 v5 列 (composite-score-by-subtype)
+│       │   ├── per_model_composite_by_question_type.csv  # 综合得分总表 (composite-score-by-subtype)
+│       │   ├── per_model_composite_by_choice_type.csv    # 综合得分总表 (composite-score-by-subtype)
+│       │   ├── composite_meta.json                    # 综合得分审计跟踪
 │       │   ├── error_breakdown.csv
-│       │   └── overall.json
+│       │   └── overall.json                            # 内嵌 composite 段
 │       └── logs/{run_id}.log
 ├── forecast_eval/
 │   ├── __init__.py
@@ -1272,6 +1275,69 @@ v3→v4 单向迁移不重跑历史 run。
 SAMPLING_N 在该指标视角下重新解读为"独立测验次数"（每次得分独立 [0,1]、最终算术均值），与 best-of-N 的"取最高"框架（pass_any_at_n / majority_vote_accuracy）并存。
 
 约束：本指标**整体可摘除** —— 删 `exam_score.py` + `tests/test_exam_score.py` + 代码 / 文档中标记的挂接点（marker 字面与清单见 spec：`openspec/changes/add-exam-score-metric/specs/exam-score-metric/spec.md` §"摘除等价性"），仓库回到字节级一致状态。
+
+### 11.5.5 综合得分按子题型加权（composite-score-by-subtype）
+
+模块：`forecast_eval/analysis/composite.py`；写出：
+`per_model_composite_by_question_type.csv` /
+`per_model_composite_by_choice_type.csv` / `composite_meta.json`，
+并在 `overall.json` 嵌入 `composite` 段。
+
+**输入收集**：
+
+| 来源 | 数据形状 | 列覆盖 |
+| --- | --- | --- |
+| `analysis._slice_by(samples, key_fn=question_type/choice_type, ...)` | `{model: {bucket: Aggregate}}` | v3 accuracy + final_answer_retry_rate（共 23 列） |
+| `composite.slice_v5_metrics_by_bucket(...)` | `{model: {bucket: V5SliceResult}}` | v5 离散家族 8 列（FSS / Cohen κ / Hamming / Fleiss κ / mean entropy / VCI / MVG / fss_pe_mean） |
+| `probabilistic.build_probabilistic_report(...).per_model_by_qtype/_by_ctype` | `{model: {bucket: ModelProbabilisticAggregate}}` | v4 概率族 7 列（BI / BI_dec / NLL / MBS / ABI_crowd / ABI_uniform / fallback_share） |
+
+`composite.collect_bucket_values(...)` 把三路汇总成
+`{model: {metric: {bucket: value}}}` 的统一形状，再过一次
+`compute_composite(...)` 输出 `CompositeReport`。
+
+**加权公式**：见 `DESIGN.md` §3.5。缺失桶剔除并按比例归一化；全 None →
+composite 返 None；权重和不需归一化。
+
+**配置**（`Settings`）：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `COMPOSITE_WEIGHTS_QTYPE` | `yes_no=0.15,binary_named=0.15,multiple_choice=0.70` | qtype 维度全局默认权重 |
+| `COMPOSITE_WEIGHTS_CTYPE` | `single=0.40,multi=0.60` | ctype 维度全局默认权重 |
+| `COMPOSITE_WEIGHT_OVERRIDES_QTYPE` | `{}` | qtype 维度按指标覆盖；形如 `"fss=yes_no=0.05,multiple_choice=0.95"`，分号分隔多指标 |
+| `COMPOSITE_WEIGHT_OVERRIDES_CTYPE` | `{}` | ctype 维度同上 |
+
+启动期校验（`Settings.model_validator`）：桶名必须 ∈ 合法集合、权重 ≥ 0、
+至少一个 > 0。**指标名校验**放在 `compute_composite` 入口（运行时
+raise）——避免 `config.py` 反向 import `analysis.composite` 形成循环；指标
+名拼错的代价是分析阶段炸掉而非启动期，错误信息一样清楚。
+
+**输出契约**：
+
+| 文件 | 列序 |
+| --- | --- |
+| `per_model_composite_by_question_type.csv` | `model + sampling_n + weights_kind + (_SUMMARY_FIELDS 数据列)` |
+| `per_model_composite_by_choice_type.csv` | 同上 |
+
+`weights_kind` ∈ {`default`, `overridden`}：该 (model) 行只要有任一指标
+命中 override 即标 `overridden`。
+
+`composite_meta.json` 是审计跟踪：每个 (model, metric) 记录
+`value / buckets_used / weights_used_normalized / bucket_values /
+weights_kind`。`overall.json` 内嵌的 `composite` 段是同等结构的精简版。
+
+**与现有 slice 表的对齐**：`per_model_by_question_type.csv` /
+`per_model_by_choice_type.csv` 现在也补全了 v5 离散家族列（之前是 NULL
+占位）——`slice_v5_metrics_by_bucket` 的副产品，列序与
+`per_model_summary.csv` 一致。
+
+**与 evaluation 的串联**：`evaluation.py` 把 `Settings` 上的 4 个
+`COMPOSITE_*` 字段透传给 `analysis.run_analysis(...)` 的 keyword
+参数；`analysis` 模块自身不读 `.env`。CLI 入口
+`python -m forecast_eval.analysis ...` 会 best-effort 调
+`load_settings()`，失败（如无 `.env`）则回退到
+`composite.DEFAULT_WEIGHTS_*` + 空 overrides——单元测试零配置也能跑出
+composite 文件。
 
 ### 11.6 网格搜索分析（`react-tavily-grid-search`）
 

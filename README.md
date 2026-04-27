@@ -104,8 +104,19 @@ runs/
       per_model_summary.md          # markdown table with v5 main columns;
                                     #   probabilistic columns flagged with
                                     #   `†` and a K=5-resolution disclaimer
-      per_model_by_question_type.csv
-      per_model_by_choice_type.csv
+      per_model_by_question_type.csv  # 现已附 v5 列 (FSS / Cohen κ / Hamming /
+                                      #   Fleiss κ / 等), 与 per_model_summary
+                                      #   列序对齐
+      per_model_by_choice_type.csv    # 同上, 按 single / multi 切
+      per_model_composite_by_question_type.csv  # 综合得分总表 (按 question_type
+                                                #   桶加权合成所有指标; 列序与
+                                                #   per_model_summary 对齐, 多
+                                                #   一列 weights_kind)
+      per_model_composite_by_choice_type.csv    # 同上, 按 single / multi 切
+      composite_meta.json             # 综合得分审计跟踪: 权重快照 + 每个
+                                      #   (model, metric) 的 buckets_used /
+                                      #   weights_used_normalized / value /
+                                      #   bucket_values
       per_model_by_difficulty.csv   # γ-tertile slice (low/mid/high)
       error_breakdown.csv           # byte-regression-tested vs v3
       finish_reason_breakdown.csv   # byte-regression-tested vs v3
@@ -165,6 +176,43 @@ runs/
 
 <!-- exam-score-metric: -->
 **`exam_score_at_n_avg`** 列（紧跟 `at_least_all_at_n` 之后）—— 考试式部分得分：题正确答案集 $G$、模型选择 $\hat S$；当 $\hat S$ 含错选时该 sample 得 0，否则得 $|\hat S \cap G| / |G|$（漏选按比例扣分）。`cutoff` 与 `error` 剔除（"未完成过程"），parse 失败计 0（"完成但答错"）；先题内取均值得 $e_q$，再题间等权求均值。与 FSS（含 chance correction、软惩罚 FP）并列存在 —— 适合"一句话解释给非论文读者"。
+
+<!-- composite-score-by-subtype: -->
+### 综合得分按子题型加权（composite-score-by-subtype）
+
+`per_model_summary.csv` 把所有题型混算为单一均值；`per_model_composite_*.csv`
+则在两个维度上各做一遍"按子题型加权合成"：
+
+* `per_model_composite_by_question_type.csv` —— 桶 = `yes_no` /
+  `binary_named` / `multiple_choice`；
+* `per_model_composite_by_choice_type.csv` —— 桶 = `single` / `multi`。
+
+公式（对每个 model × metric × dimension 独立）：
+
+$$\text{composite}_m = \frac{\sum_{b\in B_{\text{valid}}} w_{m,b} \cdot v_{m,b}}{\sum_{b\in B_{\text{valid}}} w_{m,b}}$$
+
+$B_{\text{valid}}$ 是该 (model, metric) 下子题型实测值非 None 且权重 > 0
+的桶集合——缺失桶被剔除并按比例归一化（不会被当作 0）；全 None → composite
+返 None；权重和不要求等于 1（自动归一化）。
+
+**默认权重**（按"难题区分度高"原则）：
+
+| 维度 | 桶 | 默认权重 | 难度依据 |
+|---|---|---|---|
+| `question_type` | `yes_no` | 0.15 | k=2，盲猜 50%，模型间区分度低 |
+| `question_type` | `binary_named` | 0.15 | k=2，加名称识别但仍二选一 |
+| `question_type` | `multiple_choice` | 0.70 | k=2..N 跨度大，含多选，区分度最高 |
+| `choice_type` | `single` | 0.40 | 整体偏易（含 yes_no / binary_named） |
+| `choice_type` | `multi` | 0.60 | 真正的多选，几乎所有模型都很差，区分度高 |
+
+在 `.env` 中通过 `COMPOSITE_WEIGHTS_QTYPE` / `COMPOSITE_WEIGHTS_CTYPE`
+覆盖；按指标独立调权请用 `COMPOSITE_WEIGHT_OVERRIDES_QTYPE` /
+`COMPOSITE_WEIGHT_OVERRIDES_CTYPE`（见 `.env.example` 注释）。任何 (model)
+行只要有任一指标命中 override，CSV 的 `weights_kind` 列就标 `overridden`。
+
+`composite_meta.json` 是审计跟踪：每个综合值实际用了哪些桶、归一化后的
+权重、每桶原始 slice 值都列在里面，方便复现/解释。原 `per_model_summary.csv`
+与 `per_model_by_*.csv` 语义不变（仍是混合后的均值 / 子题型实测明细）。
 
 Model slug safety: `/` → `__`, any character outside `[A-Za-z0-9._-]` → `_`.
 So `openai/gpt-4o-mini` becomes `openai__gpt-4o-mini.db`.

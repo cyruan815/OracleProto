@@ -262,6 +262,55 @@ $$e_q = \frac{1}{|S_q|}\sum_{s \in S_q}\text{exam\_score}(s, G_q), \quad \text{g
 
 本指标允诺"摘除等价性"：删 `forecast_eval/analysis/exam_score.py` + `tests/test_exam_score.py` + 代码 / 文档中标记的少量挂接点（marker 字面与清单见 `openspec/changes/add-exam-score-metric/design.md` §D8），仓库回到引入本指标前的字节级一致状态。
 
+### 3.5 综合得分按子题型加权（composite-score-by-subtype）
+
+`per_model_summary.csv` 把所有题型混算为单一均值；这对"区分模型能力"不一定理想 —— 简单题（如 `yes_no` k=2）模型基本满分、不区分能力，多选题几乎所有模型都很差、区分度高。把两类题揉在一起算等于让"信息密度低的桶"和"信息密度高的桶"等权贡献给最终分数。
+
+`forecast_eval/analysis/composite.py` 提供"先按子题型分别算 → 再按用户配置权重合成 → 缺失桶剔除并归一化"的链路。**两个维度独立做一遍**（互不耦合，因为 `multiple_choice` 内部既有 single 又有 multi，两者并不正交）：
+
+* `question_type` 维度（桶：`yes_no` / `binary_named` / `multiple_choice`） → 写出 `per_model_composite_by_question_type.csv`；
+* `choice_type` 维度（桶：`single` / `multi`） → 写出 `per_model_composite_by_choice_type.csv`。
+
+#### 加权公式
+
+对每个 (model, dimension, metric)：
+
+$$\text{composite}_m = \frac{\sum_{b \in B_{\text{valid}}} w_{m,b} \cdot v_{m,b}}{\sum_{b \in B_{\text{valid}}} w_{m,b}}$$
+
+* $B_{\text{valid}}$ = 该 (model, metric) 下子题型实测值非 None **且**该桶权重 > 0 的桶集合
+* 缺失桶（slice 算不出来或权重 0）被剔除后，剩余桶的权重重新归一化（不会被当作 0）；
+* 全 None → composite = None；
+* 权重和不要求等于 1，分母自动归一化。
+
+#### 默认权重的"难题区分度高"原则
+
+| 维度 | 桶 | 默认权重 | 难度依据 |
+|---|---|---|---|
+| `question_type` | `yes_no` | 0.15 | k=2，盲猜 50%，模型间几乎不区分 |
+| `question_type` | `binary_named` | 0.15 | k=2 同上，加名称识别 |
+| `question_type` | `multiple_choice` | 0.70 | k=2..N 跨度大，含多选，区分度最高 |
+| `choice_type` | `single` | 0.40 | 整体偏易（含 yes_no / binary_named） |
+| `choice_type` | `multi` | 0.60 | 真正多选，几乎所有模型都很差，区分度高 |
+
+一句话：**让区分模型能力的桶贡献更大**。改成"我更关心简单题"只要把数字反过来即可。这是一个有取向的默认值，不是"中性"的——上面列的取向我们认为对绝大多数评测场景更合理；用户对此有不同看法时，覆盖一行 `.env` 就解决。
+
+#### 配置入口（`Settings` / `.env`）
+
+* `COMPOSITE_WEIGHTS_QTYPE` / `COMPOSITE_WEIGHTS_CTYPE`：全局默认权重，所有未显式覆盖的指标共享。
+* `COMPOSITE_WEIGHT_OVERRIDES_QTYPE` / `COMPOSITE_WEIGHT_OVERRIDES_CTYPE`：按指标独立覆盖。形如 `"fss=yes_no=0.05,multiple_choice=0.95"`，分号分隔多指标。指标名拼写错误（不在 `_SUMMARY_FIELDS` 数据列内）由 `compute_composite` 在分析阶段 raise，不会"静默回退到默认"——这是有意设计，配错了要让你知道。
+* 启动期校验：桶名必须 ∈ 合法集合、权重 ≥ 0、至少一个 > 0。
+
+#### 与现有 CSV 的关系
+
+* `per_model_summary.csv` 语义不变（仍是混合后的均值），不影响下游；
+* `per_model_by_question_type.csv` / `per_model_by_choice_type.csv` 现在补全了 v5 离散家族列（FSS / Cohen κ / Hamming / Fleiss κ / mean entropy / VCI / MVG），列序与 `per_model_summary.csv` 一致；
+* `per_model_composite_*.csv` 列序也与 `per_model_summary.csv` 对齐（多一列 `weights_kind` 标记 `default` / `overridden`），下游脚本只要换文件路径就能读"按子题型加权后的总表"；
+* `composite_meta.json` 是审计跟踪：每个综合值实际用了哪些桶、归一化后的权重、每桶原始 slice 值都在里面，可以一对一复现。
+
+#### v5 离散家族的"按桶切"
+
+`fss` / `cohen_kappa` / `hamming_score` / `fleiss_kappa` / `mean_entropy` / `vci` / `mvg` 在 v5 主链路里是按 model 全局算的（写进 `per_model_summary.csv`）；做加权合成必须先按桶切再算，所以 `composite.slice_v5_metrics_by_bucket` 接管了这件事。其结果**同时**回流给 `per_model_by_*.csv`——用户读子题型明细表也能看到这些指标，不再是 NULL 占位。
+
 ---
 
 ## 4. ReAct + Tool Use：把模型推理过程"摊开"
