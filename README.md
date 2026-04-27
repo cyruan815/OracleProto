@@ -93,7 +93,8 @@ runs/
     db/
       {model_slug}.db       # one SQLite per model (see schema below)
     analysis/               # generated after the run finishes
-      per_model_summary.csv         # v3 accuracy + v5 discrete-native
+      per_model_summary.csv         # v3 accuracy + exam_score_at_n_avg +
+                                    #   v5 discrete-native
                                     #   (FSS / Cohen κ / Hamming / Fleiss κ /
                                     #    mean entropy / VCI / MVG) +
                                     #   v4 companion probabilistic
@@ -161,6 +162,9 @@ runs/
     logs/
       {run_id}.log
 ```
+
+<!-- exam-score-metric: -->
+**`exam_score_at_n_avg`** 列（紧跟 `at_least_all_at_n` 之后）—— 考试式部分得分：题正确答案集 $G$、模型选择 $\hat S$；当 $\hat S$ 含错选时该 sample 得 0，否则得 $|\hat S \cap G| / |G|$（漏选按比例扣分）。`cutoff` 与 `error` 剔除（"未完成过程"），parse 失败计 0（"完成但答错"）；先题内取均值得 $e_q$，再题间等权求均值。与 FSS（含 chance correction、软惩罚 FP）并列存在 —— 适合"一句话解释给非论文读者"。
 
 Model slug safety: `/` → `__`, any character outside `[A-Za-z0-9._-]` → `_`.
 So `openai/gpt-4o-mini` becomes `openai__gpt-4o-mini.db`.

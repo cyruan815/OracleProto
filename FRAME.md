@@ -1259,6 +1259,20 @@ v5 删除了 `reliability_diagram_per_model.png` / `_calibrated.png` /
 run 没有 belief_trace、`belief_evolution.csv` 不写）。这套向后兼容保证
 v3→v4 单向迁移不重跑历史 run。
 
+<!-- exam-score-metric: removable section ↓ —— 删除直到下一个 `### 11.6` 标题 -->
+
+#### 考试式部分得分（exam_score）
+
+`forecast_eval/analysis/exam_score.py` 给 §11.5 的 discrete-native 指标族追加一把"对外解释的尺子"。公式 $\text{exam\_score}(\hat S, G) = (|\hat S \cap G|/|G|) \cdot \mathbb{1}(\hat S \setminus G = \emptyset)$ —— 含错选直接 0，否则按 partial recall 给分；与 FSS 的 chance correction / Tversky 软惩罚正交。
+
+聚合采用题内均值 → 题间均值两步（$e_q = \frac{1}{|S_q|}\sum_s \text{exam\_score}$，全局 $= \frac{1}{|Q|}\sum_q e_q$）；题内分母是**实际进基数的 sample 数**（cutoff / error 剔除，parse 失败计 0）。
+
+写到 `per_model_summary.csv` 的 `exam_score_at_n_avg` 列，紧跟 `at_least_all_at_n` 之后；通过 `Aggregate` 字段自动跟随所有 `_slice_by` 切片输出。
+
+SAMPLING_N 在该指标视角下重新解读为"独立测验次数"（每次得分独立 [0,1]、最终算术均值），与 best-of-N 的"取最高"框架（pass_any_at_n / majority_vote_accuracy）并存。
+
+约束：本指标**整体可摘除** —— 删 `exam_score.py` + `tests/test_exam_score.py` + 代码 / 文档中标记的挂接点（marker 字面与清单见 spec：`openspec/changes/add-exam-score-metric/specs/exam-score-metric/spec.md` §"摘除等价性"），仓库回到字节级一致状态。
+
 ### 11.6 网格搜索分析（`react-tavily-grid-search`）
 
 `Settings.TAVILY_MAX_RESULTS`（R）与 `REACT_MAX_SEARCH_CALLS`（C）支持
