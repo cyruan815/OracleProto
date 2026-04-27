@@ -319,6 +319,51 @@ treating them as fatal.
 Set `RUN_ID=<existing-run-id>` in `.env` (or CLI env) to resume into the same
 folder; leaving it blank mints a fresh `YYYYMMDD-HHMMSS-xxxx` id.
 
+## Search leak filter (v5.2)
+
+Tavily filters by *crawl/index* date, not by content time. A page indexed
+before `q.end_time` may still describe events that happened after it (wiki
+updates, aggregator pages, "looking ahead" sections). To plug that hole we
+add a Stage-2 LLM-based audit: every Tavily result is sent through an
+independent `detector` LLM that returns `keep` / `drop` per item. Items the
+detector flags `drop` are removed before the main LLM sees the search payload.
+
+Defaults (see `.env.example` for the full annotated block):
+
+- `ENABLE_SEARCH_LEAK_FILTER=true` — required to enable the filter; pair with
+  `LEAK_DETECTOR_API_KEY` + `LEAK_DETECTOR_MODEL`. Mutually requires
+  `ENABLE_WEB_SEARCH=true`; otherwise startup fails.
+- `LEAK_DETECTOR_BASE_URL` — optional; empty falls back to `LLM_BASE_URL`.
+  The detector client is independent of the main LLM client even when the
+  endpoints coincide (separate quota / timeout / backoff bookkeeping).
+- `LEAK_DETECTOR_FAIL_ACTION=drop` — fail-closed by default: detector errors
+  exhaust retries → item is dropped. Set to `keep` only as an A/B escape
+  hatch when you need to compare against the unfiltered baseline.
+- `LEAK_DETECTOR_RETRY_MAX` / `LEAK_DETECTOR_BACKOFF_S` — independent from
+  the main LLM's retry settings, so detector hiccups never push back on the
+  main LLM's quota window.
+
+Audit fields persisted per `web_search` call (`run_results.search_calls`
+JSON entry):
+
+```
+{ "query": ..., "end_date": ..., "n_results": <kept>,
+  "published_dates": [<raw-order, length == n_results_raw>],
+  "n_results_raw": <int>, "n_results_kept": <int>,
+  "detector_verdicts": ["keep","drop","failed:network", ...],
+  "detector_latency_ms": <int>, "detector_error_kind": str | null }
+```
+
+`run_meta.config_snapshot` additionally records the detector fingerprint
+triplet `leak_detector_enabled` / `leak_detector_model` /
+`leak_detector_prompt_hash` (sha256 of the prompt template, first 16 hex).
+
+Disable path: set `ENABLE_SEARCH_LEAK_FILTER=false` and the detector layer is
+bypassed entirely; behaviour is byte-identical to v5.1. The five existing
+information-barrier layers (web_search schema / `end_date` injection / Tavily
+`end_date` filter / `MODEL_TRAINING_CUTOFFS` / `:online` ban) remain
+unaffected.
+
 ## Historical smoke baseline
 
 Prior to the per-run directory refactor, early smoke runs wrote to a single

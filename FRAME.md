@@ -240,7 +240,7 @@ labels  = [opts[ord(L) - ord('A')] for L in letters]
 | Tool 搜索内容（Tavily 返回正文）  | ✅ 可控   | `end_date = end_time + TAVILY_END_DATE_OFFSET_DAYS` 由 Tool 实现层注入，LLM 无法感知（§3.1 / §3.2） |
 | Provider 内置 browsing / web tool | ✅ 可控   | **强制禁止**：`llm.chat` 只挂 `WEB_SEARCH_SCHEMA`，不开启任何 provider-native browsing / retrieval plugin；OpenRouter 路由时不传 `:online` 后缀、不传 `plugins` 字段 |
 | 模型参数记忆（训练数据）          | ⚠️ 部分可控 | 详见 §3.9：按模型训练截止日期过滤早于截止日期的题                                                  |
-| 搜索结果 snippet 里的"未来泄漏"   | ⚠️ 部分可控 | Tavily 的 `end_date` 过滤已在 publish date 层面截断；极少数索引错日期的页面仍可能漏出，不做额外处理 |
+| 搜索结果 snippet 里的"未来泄漏"   | ⚠️ 部分可控 | Tavily 的 `end_date` 过滤已在 publish date 层面截断；v5.2 起再叠一层 detector LLM 逐条审核内容（`search-leak-filter-v1`），verdict=drop 整条剔除 |
 | 题目文字本身的时间线索（如年份）  | ❌ 不可控 | 属于题目固有信息，不干预                                                                          |
 | LLM 训练后出现的外部知识回流      | ❌ 不可控 | 接受此偏差                                                                                        |
 
@@ -503,7 +503,7 @@ PRAGMA busy_timeout = 5000;      -- 多 reader 场景下避免 SQLITE_BUSY
 | `s{i}_parse_ok`               | `final_answer_letters is not None`                                                                      |
 | `user_prompt`                 | `prompts.render_user_prompt(q, templates)` 的返回值；每个问题渲染一次，首样本写入后 COALESCE 保留       |
 | `s{i}_messages_trace`         | 完整 `messages` 列表 JSON；`WRITE_MESSAGES_TRACE=false` 时 NULL                                         |
-| `s{i}_search_calls`           | 每次 `web_search` 调用的元数据 list（query / end_date / n_results / published_dates）                   |
+| `s{i}_search_calls`           | 每次 `web_search` 调用的元数据 list（query / end_date / n_results / published_dates；启用 leak filter 时再叠 `n_results_raw / n_results_kept / detector_verdicts / detector_latency_ms / detector_error_kind` 五字段，详见 `search-leak-filter-v1`） |
 | `s{i}_error`                  | retry 用尽后的错误分类码；正常完成（含 refusal / parse fail）为 NULL                                    |
 | `s{i}_created_at`             | 写入时刻的 UTC ISO-8601；作为"该 sample 槽是否被填过"的唯一信号                                         |
 | `s{i}_finish_reason`          | 最后一轮 `ChatCompletion.choices[0].finish_reason`（`stop` / `tool_calls` / `length` / `content_filter` …）；error 行（never reached LLM）写 NULL |
