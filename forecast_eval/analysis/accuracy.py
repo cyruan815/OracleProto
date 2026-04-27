@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterable
 
 from ..prompts import index_to_letter
 from .flatten import SampleRow
+from . import exam_score as _exam_score  # exam-score-metric: hook 0/3 (import)
 
 
 def _mean(values: Iterable[float | int]) -> float | None:
@@ -48,6 +49,8 @@ class Aggregate:
     pass_any_at_n: float | None
     at_least_majority_at_n: float | None
     at_least_all_at_n: float | None
+
+    exam_score_at_n_avg: float | None  # exam-score-metric: hook 1/3 (Aggregate field)
 
     majority_vote_accuracy: float | None
     majority_vote_resolvable_rate: float | None
@@ -83,6 +86,7 @@ class Aggregate:
             "pass_any_at_n": _round(self.pass_any_at_n),
             "at_least_majority_at_n": _round(self.at_least_majority_at_n),
             "at_least_all_at_n": _round(self.at_least_all_at_n),
+            "exam_score_at_n_avg": _round(self.exam_score_at_n_avg),  # exam-score-metric: hook 2/3 (CSV column order)
             "majority_vote_accuracy": _round(self.majority_vote_accuracy),
             "majority_vote_resolvable_rate": _round(self.majority_vote_resolvable_rate),
             "parse_failure_rate": _round(self.parse_failure_rate),
@@ -202,6 +206,13 @@ def _aggregate(
     else:
         final_answer_retry_rate = None
 
+    # exam-score-metric: hook 3/3 (compute & inject)
+    exam_value = (
+        _exam_score.exam_score_at_n_avg(eligible_samples, gt_map)
+        if gt_map is not None
+        else None
+    )
+
     return Aggregate(
         eligible_samples=len(eligible_samples),
         eligible_questions=len(eligible_questions),
@@ -213,6 +224,7 @@ def _aggregate(
         pass_any_at_n=pass_any_at_n,
         at_least_majority_at_n=at_least_majority_at_n,
         at_least_all_at_n=at_least_all_at_n,
+        exam_score_at_n_avg=exam_value,
         majority_vote_accuracy=majority_vote_accuracy,
         majority_vote_resolvable_rate=majority_vote_resolvable_rate,
         parse_failure_rate=parse_failure_rate,
