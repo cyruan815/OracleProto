@@ -61,6 +61,15 @@ from .accuracy import (
     hamming_score,
 )
 from .aggregation import ShrinkageResult, loo_shrinkage
+from .composite import (
+    DEFAULT_WEIGHTS_CTYPE,
+    DEFAULT_WEIGHTS_QTYPE,
+    CompositeReport,
+    V5SliceResult,
+    collect_bucket_values,
+    compute_composite,
+    slice_v5_metrics_by_bucket,
+)
 from .behavior import (
     build_belief_evolution_rows,
     confidence_calibration,
@@ -104,6 +113,7 @@ from .proper_score import (
 from .writers import (
     _SUMMARY_FIELDS,
     _write_belief_evolution_csv,
+    _write_composite_meta_json,
     _write_confidence_calibration_csv,
     _write_entropy_accuracy_bins_csv,
     _write_error_breakdown_csv,
@@ -116,6 +126,7 @@ from .writers import (
     _write_paired_delta_bi_csv,
     _write_pairwise_significance_csv,
     _write_per_model_by_difficulty_csv,
+    _write_per_model_composite_csv,
     _write_per_model_summary_csv,
     _write_per_model_summary_md,
     _write_posterior_pairwise_csv,
@@ -268,8 +279,21 @@ def _paired_bootstrap_pairs_by_difficulty(
 # --------------------------------------------------------------------------- #
 
 
-def run_analysis(run_dir: Path) -> list[Path]:
-    """Generate every analysis artefact for the run and return the file paths."""
+def run_analysis(
+    run_dir: Path,
+    *,
+    composite_weights_qtype: dict[str, float] | None = None,
+    composite_weights_ctype: dict[str, float] | None = None,
+    composite_overrides_qtype: dict[str, dict[str, float]] | None = None,
+    composite_overrides_ctype: dict[str, dict[str, float]] | None = None,
+) -> list[Path]:
+    """Generate every analysis artefact for the run and return the file paths.
+
+    composite-score-by-subtype: 当四个 ``composite_*`` 参数为 ``None`` 时，回
+    退到 ``composite.DEFAULT_WEIGHTS_*`` + 空 overrides（与 ``Settings`` 默认
+    值同义），让单元测试 / 重跑 CLI 在没有 ``.env`` 的环境也能跑出 composite
+    输出。``evaluation.py`` 在线评测时把 ``Settings`` 上的对应字段透传进来。
+    """
     run_dir = Path(run_dir)
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.exists():
@@ -282,6 +306,28 @@ def run_analysis(run_dir: Path) -> list[Path]:
     # `analysis_schema` was added in v4 manifests. v3 runs replayed under v4/v5
     # code don't carry the field; treat that as "v3 fallback semantics".
     analysis_schema: str | None = manifest.get("analysis_schema")
+
+    # composite-score-by-subtype: 解析权重参数。None → 默认。
+    weights_qtype = (
+        dict(composite_weights_qtype)
+        if composite_weights_qtype is not None
+        else dict(DEFAULT_WEIGHTS_QTYPE)
+    )
+    weights_ctype = (
+        dict(composite_weights_ctype)
+        if composite_weights_ctype is not None
+        else dict(DEFAULT_WEIGHTS_CTYPE)
+    )
+    overrides_qtype = (
+        {m: dict(sub) for m, sub in composite_overrides_qtype.items()}
+        if composite_overrides_qtype
+        else {}
+    )
+    overrides_ctype = (
+        {m: dict(sub) for m, sub in composite_overrides_ctype.items()}
+        if composite_overrides_ctype
+        else {}
+    )
 
     db_dir = run_dir / "db"
     analysis_dir = run_dir / "analysis"
@@ -367,6 +413,59 @@ def run_analysis(run_dir: Path) -> list[Path]:
             by_q, gt_map_global, options_map_global,
         )
 
+    # ------------------------------------------------------------------ #
+    # composite-score-by-subtype: 按 question_type / choice_type 把 v5 离散
+    # 家族 (FSS / Cohen κ / Hamming / Consistency) 在每个桶上重新算一遍。
+    # 这些值同时:
+    #   * 喂给 ``per_model_by_question_type.csv`` / ``per_model_by_choice_type.csv``
+    #     (现在它们会带 v5 列, 不再是 NULL 占位);
+    #   * 喂给 :func:`compute_composite` 做加权合成。
+    # ------------------------------------------------------------------ #
+    v5_slice_by_qtype: dict[str, dict[str, V5SliceResult]] = {}
+    v5_slice_by_ctype: dict[str, dict[str, V5SliceResult]] = {}
+    for model, samples in samples_by_model.items():
+        v5_slice_by_qtype[model] = slice_v5_metrics_by_bucket(
+            samples, gt_map_global, options_map_global,
+            key_fn=lambda s: s.question_type,
+        )
+        v5_slice_by_ctype[model] = slice_v5_metrics_by_bucket(
+            samples, gt_map_global, options_map_global,
+            key_fn=lambda s: s.choice_type,
+        )
+
+    # ------------------------------------------------------------------ #
+    # composite-score-by-subtype: 按桶值合成 → CompositeReport。
+    # ``per_model_agg_qtype`` / ``per_model_agg_ctype`` 已经是 ``{model:
+    # {bucket: Aggregate}}`` 形式; 加上 v5_slice 与 prob_report.per_model_by_*
+    # 共同构成 collect_bucket_values 的输入。
+    # ------------------------------------------------------------------ #
+    bucket_values_qtype = collect_bucket_values(
+        aggregate_slice=per_model_agg_qtype,
+        v5_slice=v5_slice_by_qtype,
+        prob_slice=prob_report.per_model_by_qtype,
+    )
+    bucket_values_ctype = collect_bucket_values(
+        aggregate_slice=per_model_agg_ctype,
+        v5_slice=v5_slice_by_ctype,
+        prob_slice=prob_report.per_model_by_ctype,
+    )
+    composite_qtype: CompositeReport | None = None
+    composite_ctype: CompositeReport | None = None
+    if bucket_values_qtype:
+        composite_qtype = compute_composite(
+            dimension="question_type",
+            bucket_values_per_model=bucket_values_qtype,
+            weights_default=weights_qtype,
+            overrides=overrides_qtype,
+        )
+    if bucket_values_ctype:
+        composite_ctype = compute_composite(
+            dimension="choice_type",
+            bucket_values_per_model=bucket_values_ctype,
+            weights_default=weights_ctype,
+            overrides=overrides_ctype,
+        )
+
     written: list[Path] = []
     # v5: per_model_summary.csv now carries v3 + FSS + Consistency + v4
     # probabilistic columns; markdown synthesises them with the K=5
@@ -387,6 +486,7 @@ def run_analysis(run_dir: Path) -> list[Path]:
             "question_type",
             slice_qtype_payload,
             prob=prob_report.per_model_by_qtype,
+            v5_slice=v5_slice_by_qtype,
         ))
     if slice_ctype_payload:
         written.append(_write_slice_csv(
@@ -394,6 +494,26 @@ def run_analysis(run_dir: Path) -> list[Path]:
             "choice_type",
             slice_ctype_payload,
             prob=prob_report.per_model_by_ctype,
+            v5_slice=v5_slice_by_ctype,
+        ))
+    # composite-score-by-subtype: 两张加权综合得分总表 + 一份审计 JSON。
+    if composite_qtype is not None:
+        written.append(_write_per_model_composite_csv(
+            analysis_dir / "per_model_composite_by_question_type.csv",
+            composite_qtype,
+            sampling_n_by_model,
+        ))
+    if composite_ctype is not None:
+        written.append(_write_per_model_composite_csv(
+            analysis_dir / "per_model_composite_by_choice_type.csv",
+            composite_ctype,
+            sampling_n_by_model,
+        ))
+    if composite_qtype is not None or composite_ctype is not None:
+        written.append(_write_composite_meta_json(
+            analysis_dir / "composite_meta.json",
+            composite_qtype,
+            composite_ctype,
         ))
     if per_model_error:
         written.append(_write_error_breakdown_csv(
@@ -415,6 +535,8 @@ def run_analysis(run_dir: Path) -> list[Path]:
         probabilistic_by_qtype=prob_report.per_model_by_qtype,
         probabilistic_by_ctype=prob_report.per_model_by_ctype,
         analysis_schema=analysis_schema,
+        composite_qtype=composite_qtype,
+        composite_ctype=composite_ctype,
     ))
 
     # ------------------------------------------------------------------ #

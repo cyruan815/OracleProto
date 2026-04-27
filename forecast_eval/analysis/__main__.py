@@ -1,7 +1,8 @@
 """CLI entry: `python -m forecast_eval.analysis RUNS_ROOT/{run_id}`.
 
 Kept as a thin wrapper so `run_analysis` stays importable without argparse
-overhead. Behaviour matches the v3 single-file `analysis.py` CLI byte-for-byte.
+overhead. composite-score-by-subtype: 在 ``.env`` 可读时, 把子题型权重透传
+给 ``run_analysis``; 否则回退到默认权重 (与 ``Settings`` 默认值同义)。
 """
 from __future__ import annotations
 
@@ -19,7 +20,21 @@ def _cli(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("run_dir", help="Path to a RUNS_ROOT/{run_id} directory.")
     args = parser.parse_args(argv)
-    paths = run_analysis(Path(args.run_dir))
+    kwargs: dict[str, object] = {}
+    try:
+        from ..config import load_settings
+
+        cfg = load_settings()
+    except Exception:  # noqa: BLE001 — .env 缺失或 LLM_API_KEY 未填都会进来
+        cfg = None
+    if cfg is not None:
+        kwargs.update(
+            composite_weights_qtype=cfg.COMPOSITE_WEIGHTS_QTYPE,
+            composite_weights_ctype=cfg.COMPOSITE_WEIGHTS_CTYPE,
+            composite_overrides_qtype=cfg.COMPOSITE_WEIGHT_OVERRIDES_QTYPE,
+            composite_overrides_ctype=cfg.COMPOSITE_WEIGHT_OVERRIDES_CTYPE,
+        )
+    paths = run_analysis(Path(args.run_dir), **kwargs)
     for p in paths:
         print(p)
     return 0

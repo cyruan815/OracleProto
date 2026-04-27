@@ -23,6 +23,7 @@ from .behavior import (
     PDPRow,
     ReflectionABRow,
 )
+from .composite import CompositeReport, V5SliceResult, _v5_slice_to_columns
 from .consistency import ConsistencyReport
 from .inference import MetricBootstrapResult, ModelPairResult, PairedBootstrapResult
 from .proper_score import ModelProbabilisticAggregate
@@ -226,11 +227,18 @@ def _write_slice_csv(
     slice_header_field: str,
     per_model: dict[str, tuple[int, dict[str, Aggregate]]],
     prob: dict[str, dict[str, ModelProbabilisticAggregate]] | None = None,
+    v5_slice: dict[str, dict[str, V5SliceResult]] | None = None,
 ) -> Path:
-    """Per-(model, slice_key) CSV. v5 columns are absent on slice CSVs because
-    FSS / Fleiss κ / etc. would need per-slice recompute; the slice tables
-    keep v3 + v4 columns and add NULL placeholders for v5 columns to maintain
-    a single header schema across `per_model_summary.csv` and slice tables.
+    """Per-(model, slice_key) CSV.
+
+    Slice tables now carry the full ``_SUMMARY_FIELDS`` schema: v3 / v5 discrete
+    family / v5 consistency family / v4 probabilistic — every column from
+    ``per_model_summary.csv`` is present, computed on the slice subset.
+
+    v5 columns require per-bucket recompute via
+    :func:`composite.slice_v5_metrics_by_bucket`; when ``v5_slice=None``
+    (legacy callers, or buckets without v5 data) those columns fall back to
+    ``None`` so the header schema stays uniform.
     """
     header = ["model", slice_header_field, "sampling_n", *[
         f for f in _SUMMARY_FIELDS if f not in ("model", "sampling_n")
@@ -238,20 +246,114 @@ def _write_slice_csv(
     rows: list[list[Any]] = []
     for model, (sampling_n, agg_map) in per_model.items():
         prob_for_model = prob.get(model) if prob else None
+        v5_for_model = v5_slice.get(model) if v5_slice else None
         for key, agg in agg_map.items():
             prob_agg = prob_for_model.get(key) if prob_for_model else None
+            v5_res = v5_for_model.get(key) if v5_for_model else None
+            v5_cols = _v5_slice_to_columns(v5_res)
             row_dict = {
                 "model": model,
                 slice_header_field: key,
                 "sampling_n": sampling_n,
                 **agg.as_ordered_dict(),
-                # v5 columns NULL on slice rows (per-slice recompute deferred).
-                **{k: None for k in _DISCRETE_FSS_FIELDS},
-                **{k: None for k in _CONSISTENCY_FIELDS},
+                # v5 columns recomputed on the bucket subset (None when
+                # v5_slice is absent or the bucket carries no parsed trials).
+                **{k: _round(v5_cols.get(k)) for k in _DISCRETE_FSS_FIELDS},
+                **{k: _round(v5_cols.get(k)) for k in _CONSISTENCY_FIELDS},
                 **_prob_dict(prob_agg),
             }
             rows.append([row_dict.get(k) for k in header])
     return _write_csv(path, header, rows)
+
+
+# --------------------------------------------------------------------------- #
+# composite-score-by-subtype writers
+# --------------------------------------------------------------------------- #
+
+
+def _write_per_model_composite_csv(
+    path: Path,
+    report: CompositeReport,
+    sampling_n_by_model: dict[str, int],
+) -> Path:
+    """每个 (model) 一行的综合得分总表。
+
+    列顺序 = ``model`` / ``sampling_n`` / ``weights_kind`` / ``_SUMMARY_FIELDS``
+    剩余数据列。读这张表的下游脚本只要把"原 ``per_model_summary.csv`` 路径"
+    换成本表路径，列名一一对齐（除了多出来的 ``weights_kind``）。
+
+    ``weights_kind``:
+    * ``default`` — 该 (model) 的所有指标都使用全局默认权重；
+    * ``overridden`` — 任一指标使用了 ``COMPOSITE_WEIGHT_OVERRIDES_*``
+      中的覆盖值。
+    """
+    data_fields = [
+        f for f in _SUMMARY_FIELDS if f not in ("model", "sampling_n")
+    ]
+    header = ["model", "sampling_n", "weights_kind", *data_fields]
+    rows: list[list[Any]] = []
+    for model in sorted(report.per_model.keys()):
+        sampling_n = sampling_n_by_model.get(model, "")
+        kind = "overridden" if report.is_overridden(model) else "default"
+        per_metric = report.per_model[model]
+        cells = [model, sampling_n, kind]
+        for field in data_fields:
+            info = per_metric.get(field)
+            cells.append(_round(info.value) if info is not None else None)
+        rows.append(cells)
+    return _write_csv(path, header, rows)
+
+
+def _write_composite_meta_json(
+    path: Path,
+    qtype_report: CompositeReport | None,
+    ctype_report: CompositeReport | None,
+) -> Path:
+    """审计跟踪: 写权重快照、每个 (model, metric) 的 buckets_used /
+    weights_used_normalized / value / bucket_values。
+
+    与 CSV 同分析目录共存; 对照 CSV 任何一列, 在 JSON 里都能查到该综合值
+    实际用了哪些桶、归一化后的权重、各桶原始 slice 值。
+    """
+
+    def _serialize_report(rep: CompositeReport) -> dict[str, Any]:
+        per_model: dict[str, dict[str, Any]] = {}
+        for model in sorted(rep.per_model.keys()):
+            per_metric_out: dict[str, Any] = {}
+            for metric, info in sorted(rep.per_model[model].items()):
+                per_metric_out[metric] = {
+                    "value": _round(info.value),
+                    "buckets_used": list(info.buckets_used),
+                    "weights_used_normalized": {
+                        b: round(w, 6)
+                        for b, w in info.weights_used_normalized.items()
+                    },
+                    "bucket_values": {
+                        b: (_round(v) if isinstance(v, float) else v)
+                        for b, v in info.bucket_values.items()
+                    },
+                    "weights_kind": info.weights_kind,
+                }
+            per_model[model] = per_metric_out
+        return {
+            "dimension": rep.dimension,
+            "weights_default": dict(rep.weights_default),
+            "overrides": {
+                m: dict(sub) for m, sub in rep.overrides.items()
+            },
+            "per_model": per_model,
+        }
+
+    payload: dict[str, Any] = {}
+    if qtype_report is not None:
+        payload["question_type"] = _serialize_report(qtype_report)
+    if ctype_report is not None:
+        payload["choice_type"] = _serialize_report(ctype_report)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return path
 
 
 def _write_error_breakdown_csv(
@@ -419,6 +521,8 @@ def _write_overall_json(
         dict[str, dict[str, ModelProbabilisticAggregate]] | None
     ) = None,
     analysis_schema: str | None = None,
+    composite_qtype: CompositeReport | None = None,
+    composite_ctype: CompositeReport | None = None,
 ) -> Path:
     payload: dict[str, Any] = {
         "run_id": run_id,
@@ -451,6 +555,33 @@ def _write_overall_json(
         }
     if analysis_schema is not None:
         payload["analysis_schema"] = analysis_schema
+    if composite_qtype is not None or composite_ctype is not None:
+        payload["composite"] = {}
+        for tag, rep in (
+            ("question_type", composite_qtype),
+            ("choice_type", composite_ctype),
+        ):
+            if rep is None:
+                continue
+            payload["composite"][tag] = {
+                "weights_default": dict(rep.weights_default),
+                "overrides": {m: dict(sub) for m, sub in rep.overrides.items()},
+                "per_model": {
+                    model: {
+                        metric: {
+                            "value": _round(info.value),
+                            "buckets_used": list(info.buckets_used),
+                            "weights_used_normalized": {
+                                b: round(w, 6)
+                                for b, w in info.weights_used_normalized.items()
+                            },
+                            "weights_kind": info.weights_kind,
+                        }
+                        for metric, info in sorted(per_metric.items())
+                    }
+                    for model, per_metric in sorted(rep.per_model.items())
+                },
+            }
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -1042,6 +1173,8 @@ __all__ = [
     "_write_csv",
     "_write_per_model_summary_csv",
     "_write_slice_csv",
+    "_write_per_model_composite_csv",
+    "_write_composite_meta_json",
     "_write_error_breakdown_csv",
     "_write_finish_reason_breakdown_csv",
     "_write_per_model_summary_md",
