@@ -35,7 +35,7 @@ from loguru import logger
 
 from forecast_eval import analysis
 from forecast_eval import db as dbmod
-from forecast_eval import loader, runner
+from forecast_eval import leak_filter, loader, runner
 from forecast_eval.config import Settings
 from forecast_eval.errors import AuthError
 from forecast_eval.llm import AuthError as LLMAuthError
@@ -248,6 +248,21 @@ def _init_model_db(
     questions = loader.sync_questions(source_path, conn, filters, table=cell_settings.SOURCE_TABLE)
     cutoff = cell_settings.MODEL_TRAINING_CUTOFFS.get(real_model)
     config_snapshot = dbmod.snapshot_settings(cell_settings)
+    # search-leak-filter-v1: detector fingerprint triplet (enabled / model /
+    # prompt_hash) into config_snapshot. Same injection pattern as
+    # `grid_origin` below — keeps `db.register_run_meta` signature unchanged
+    # and `db.snapshot_settings` pure (Settings → dict). Disabled runs still
+    # write the three keys with default values so the JSON shape stays
+    # consistent across runs.
+    leak_enabled = bool(cell_settings.ENABLE_SEARCH_LEAK_FILTER)
+    config_snapshot = {
+        **config_snapshot,
+        "leak_detector_enabled": leak_enabled,
+        "leak_detector_model": cell_settings.LEAK_DETECTOR_MODEL if leak_enabled else "",
+        "leak_detector_prompt_hash": (
+            leak_filter._compute_prompt_hash() if leak_enabled else ""
+        ),
+    }
     grid_origin = {
         "real_model": real_model,
         "R": R,
