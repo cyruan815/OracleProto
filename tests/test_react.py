@@ -64,6 +64,10 @@ def _make_settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Setting
     monkeypatch.setenv("REACT_MIN_SEARCH_CALLS", "0")
     monkeypatch.setenv("REACT_MAX_NUDGES", "0")
     monkeypatch.setenv("ENABLE_WEB_SEARCH", "true")
+    # force-final-answer-near-limit-v1 默认开; 这里关掉以让 v3/v4/v5.1 历史测试保持
+    # byte-identical 行为. 新机制有专属测试 (test_force_final_*).
+    monkeypatch.setenv("REACT_BUDGET_AWARENESS_PROTOCOL", "false")
+    monkeypatch.setenv("REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT", "false")
     for k, v in overrides.items():
         monkeypatch.setenv(k, v)
     base = Settings(_env_file=None)
@@ -604,6 +608,7 @@ async def test_final_answer_retry_triggered(
         monkeypatch,
         REACT_MAX_STEPS="6",
         REACT_MAX_SEARCH_CALLS="100",  # not the budget we're testing here
+        REACT_FINAL_ANSWER_RETRY="true",  # class default is False post-v6; opt-in here
     )
     script = [
         (_tool_msg(f"call_{i}", f"q{i}"), "tool_calls", {"response_id": f"r{i}"})
@@ -691,6 +696,7 @@ async def test_final_answer_retry_still_empty(
         monkeypatch,
         REACT_MAX_STEPS="6",
         REACT_MAX_SEARCH_CALLS="100",
+        REACT_FINAL_ANSWER_RETRY="true",  # class default is False post-v6; opt-in here
     )
     script = [
         (_tool_msg(f"call_{i}", f"q{i}"), "tool_calls", {"response_id": f"r{i}"})
@@ -891,3 +897,274 @@ async def test_final_answer_retry_skipped_when_already_filled(
     assert result.react_steps == 1
     # Exactly 1 LLM call — no retry.
     assert len(llm.calls) == 1
+
+
+# ---- force-final-answer-near-limit-v1 ---------------------------------------
+
+
+_PENULTIMATE_MARKER = "second-to-last"
+_LAST_STEP_MARKER = "Harness cutoff"
+_BUDGET_MARKER = "Budget Awareness"
+
+
+async def test_budget_awareness_protocol_appended_when_enabled(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When REACT_BUDGET_AWARENESS_PROTOCOL=true, the budget tail is part of
+    user_prompt and reflects the cell-local REACT_MAX_STEPS / *_SEARCH_CALLS."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="6",
+        REACT_MAX_SEARCH_CALLS="4",
+        REACT_BUDGET_AWARENESS_PROTOCOL="true",
+    )
+    script = [(_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r0"})]
+    monkeypatch.setattr(react, "llm_chat", _ScriptedLLM(script))
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+    assert _BUDGET_MARKER in result.user_prompt
+    # The protocol must surface the actual N / C the cell will run with.
+    assert "**6**" in result.user_prompt  # max_steps
+    assert "**4**" in result.user_prompt  # max_search_calls
+
+
+async def test_budget_awareness_protocol_disabled_byte_identical(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REACT_BUDGET_AWARENESS_PROTOCOL=false → user_prompt MUST be byte-
+    identical to the v5.1 rendering (no budget tail)."""
+    settings = _make_settings(monkeypatch, REACT_BUDGET_AWARENESS_PROTOCOL="false")
+    monkeypatch.setattr(
+        react,
+        "llm_chat",
+        _ScriptedLLM([(_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r"})]),
+    )
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+    assert _BUDGET_MARKER not in result.user_prompt
+
+
+async def test_force_final_near_limit_two_stage_ladder(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LOOKAHEAD=2 (default): with REACT_MAX_STEPS=3 the loop should inject a
+    soft warning at step 2 (remaining=2) and a hard cutoff at step 3
+    (remaining=1). The hard cutoff must coincide with `tools=[]` — verified
+    behaviorally by scripting an LLM that returns content even though the
+    earlier turns returned tool_calls.
+    """
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="3",
+        REACT_MAX_SEARCH_CALLS="100",  # never the binding constraint here
+        REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT="true",
+        REACT_FORCE_FINAL_ANSWER_LOOKAHEAD="2",
+    )
+    script = [
+        # Step 1 (remaining=3): no injection, model issues a tool_call.
+        (_tool_msg("call_1", "q1"), "tool_calls", {"response_id": "r1"}),
+        # Step 2 (remaining=2): soft warning is injected BEFORE this call;
+        # tools schema still exposed so the model could search again. Here
+        # we have it search once more.
+        (_tool_msg("call_2", "q2"), "tool_calls", {"response_id": "r2"}),
+        # Step 3 (remaining=1): hard cutoff message + tools=[]; the scripted
+        # LLM emits content with the boxed answer.
+        (_final_msg("\\boxed{No}"), "stop", {"response_id": "r3"}),
+    ]
+    llm = _ScriptedLLM(
+        script,
+        prompt_seq=(101, 202, 303),
+        completion_seq=(11, 22, 33),
+        reasoning_seq=(1, 2, 3),
+    )
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    # Loop ran exactly 3 steps, no fall-through retry.
+    assert result.react_steps == 3
+    assert result.final_answer_retry_used == 0
+    assert result.parse_ok == 1
+    assert "\\boxed{No}" in result.final_answer_raw
+    # nudges_used MUST stay 0 — these injections are harness resilience, not
+    # search-floor enforcement (parity with REACT_FINAL_ANSWER_RETRY).
+    assert result.nudges_used == 0
+
+    # messages_trace must contain BOTH injected messages, in the right order
+    # and with the right roles.
+    trace = json.loads(result.messages_trace)
+    user_msgs = [m for m in trace if m.get("role") == "user"]
+    penult = [m for m in user_msgs if _PENULTIMATE_MARKER in (m.get("content") or "")]
+    last = [m for m in user_msgs if _LAST_STEP_MARKER in (m.get("content") or "")]
+    assert len(penult) == 1, f"expected 1 soft-warning user msg, got {len(penult)}"
+    assert len(last) == 1, f"expected 1 hard-cutoff user msg, got {len(last)}"
+    # Soft warning precedes hard cutoff in the trace.
+    assert trace.index(penult[0]) < trace.index(last[0])
+
+
+async def test_force_final_near_limit_lookahead_one(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LOOKAHEAD=1 means ONLY hard-cutoff on the last step, no soft warning."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="3",
+        REACT_MAX_SEARCH_CALLS="100",
+        REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT="true",
+        REACT_FORCE_FINAL_ANSWER_LOOKAHEAD="1",
+    )
+    script = [
+        (_tool_msg("call_1", "q1"), "tool_calls", {"response_id": "r1"}),
+        (_tool_msg("call_2", "q2"), "tool_calls", {"response_id": "r2"}),
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r3"}),
+    ]
+    monkeypatch.setattr(react, "llm_chat", _ScriptedLLM(script))
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    trace = json.loads(result.messages_trace)
+    user_msgs = [m for m in trace if m.get("role") == "user"]
+    penult = [m for m in user_msgs if _PENULTIMATE_MARKER in (m.get("content") or "")]
+    last = [m for m in user_msgs if _LAST_STEP_MARKER in (m.get("content") or "")]
+    assert len(penult) == 0  # LOOKAHEAD=1 suppresses the soft warning
+    assert len(last) == 1
+
+
+async def test_force_final_near_limit_disabled(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the switch is off, neither the soft warning nor the hard cutoff
+    fires. The loop runs to its natural end and (with retry off) leaves
+    final_raw empty if the model never gives content."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="3",
+        REACT_MAX_SEARCH_CALLS="100",
+        REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT="false",
+        REACT_FINAL_ANSWER_RETRY="false",
+    )
+    script = [
+        (_tool_msg("call_1", "q1"), "tool_calls", {"response_id": "r1"}),
+        (_tool_msg("call_2", "q2"), "tool_calls", {"response_id": "r2"}),
+        (_tool_msg("call_3", "q3"), "tool_calls", {"response_id": "r3"}),
+    ]
+    monkeypatch.setattr(react, "llm_chat", _ScriptedLLM(script))
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    trace = json.loads(result.messages_trace)
+    user_msgs = [m for m in trace if m.get("role") == "user"]
+    assert all(
+        _PENULTIMATE_MARKER not in (m.get("content") or "")
+        and _LAST_STEP_MARKER not in (m.get("content") or "")
+        for m in user_msgs
+    )
+    assert result.parse_ok == 0
+    assert result.final_answer_raw == ""
+
+
+async def test_force_final_near_limit_supersedes_budget_exceeded(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When BOTH the budget-exceeded drop-tools branch AND the last-step
+    hard-cutoff would fire on the SAME step, only one user message is injected
+    (the hard-cutoff one) and the resulting tools list is the same `[]`. We
+    verify by setting a tiny search budget so it's already exhausted by the
+    last step, then confirming exactly one harness user message lands on the
+    final step."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="3",
+        REACT_MAX_SEARCH_CALLS="2",
+        REACT_BUDGET_EXCEEDED_DROP_TOOLS="true",
+        REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT="true",
+        REACT_FORCE_FINAL_ANSWER_LOOKAHEAD="2",
+    )
+    script = [
+        (_tool_msg("call_1", "q1"), "tool_calls", {"response_id": "r1"}),
+        # Step 2 (remaining=2): soft warning injected; budget already at 1/2
+        # but not yet exhausted. Model issues 2nd search → budget now 2/2.
+        (_tool_msg("call_2", "q2"), "tool_calls", {"response_id": "r2"}),
+        # Step 3 (remaining=1): both branches would want tools=[]. Hard
+        # cutoff wins; only ONE harness user message at this point.
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r3"}),
+    ]
+    monkeypatch.setattr(react, "llm_chat", _ScriptedLLM(script))
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    trace = json.loads(result.messages_trace)
+    last_msgs = [
+        m for m in trace
+        if m.get("role") == "user"
+        and _LAST_STEP_MARKER in (m.get("content") or "")
+    ]
+    assert len(last_msgs) == 1
+    assert result.tool_calls_count == 2  # both searches went through
+
+
+def test_settings_rejects_lookahead_above_max_steps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_API_KEY", "sk-or-v1-TEST_ABCDEFGH")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-TEST_ABCDEFGH")
+    monkeypatch.setenv("MODELS", "openai/gpt-4o-mini")
+    monkeypatch.setenv("REACT_MAX_STEPS", "3")
+    monkeypatch.setenv("REACT_FORCE_FINAL_ANSWER_LOOKAHEAD", "5")
+    with pytest.raises(ValueError, match="REACT_FORCE_FINAL_ANSWER_LOOKAHEAD"):
+        Settings(_env_file=None)
+
+
+def test_settings_rejects_lookahead_below_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_API_KEY", "sk-or-v1-TEST_ABCDEFGH")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-TEST_ABCDEFGH")
+    monkeypatch.setenv("MODELS", "openai/gpt-4o-mini")
+    monkeypatch.setenv("REACT_FORCE_FINAL_ANSWER_LOOKAHEAD", "0")
+    with pytest.raises(ValueError, match="REACT_FORCE_FINAL_ANSWER_LOOKAHEAD"):
+        Settings(_env_file=None)

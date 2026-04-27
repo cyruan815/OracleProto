@@ -10,6 +10,9 @@ from forecast_eval.prompts import (
     BELIEF_PROTOCOL,
     REFLECTION_PROTOCOL,
     _build_nudge_message,
+    build_budget_awareness_protocol,
+    build_last_step_force_finalisation,
+    build_penultimate_step_warning,
     index_to_letter,
     letter_to_index,
     render_user_prompt,
@@ -286,3 +289,94 @@ def test_reflection_then_belief_order(templates: dict[str, str]) -> None:
     belief_pos = rendered.find("Belief Protocol")
     assert refl_pos > 0 and belief_pos > 0
     assert refl_pos < belief_pos, "reflection MUST appear before belief in the rendered message"
+
+
+# ---- force-final-answer-near-limit-v1 ---------------------------------------
+
+
+def test_budget_awareness_protocol_contains_budget_numbers() -> None:
+    """The rendered budget tail must surface the actual N / C the run uses, so
+    the model's plan is grounded in the real harness limits (not a generic
+    placeholder)."""
+    text = build_budget_awareness_protocol(max_steps=12, max_search_calls=8)
+    assert "Budget Awareness" in text
+    assert "**12**" in text
+    assert "**8**" in text
+    # Plain prose tells the model to leave the last step for the boxed answer.
+    assert "LAST step" in text or "final step" in text.lower()
+    assert "\\boxed{...}" in text
+
+
+def test_budget_awareness_protocol_handles_zero_searches() -> None:
+    """When ENABLE_WEB_SEARCH=false the runtime passes max_search_calls=0;
+    the protocol must NOT advertise a positive search budget in that case."""
+    text = build_budget_awareness_protocol(max_steps=4, max_search_calls=0)
+    assert "**4**" in text
+    assert "web_search is disabled" in text
+    # No "**N** web_search" claim when the tool is gone.
+    assert "**0** `web_search`" not in text
+
+
+def test_budget_awareness_protocol_rejects_invalid_inputs() -> None:
+    with pytest.raises(ValueError):
+        build_budget_awareness_protocol(max_steps=0, max_search_calls=5)
+    with pytest.raises(ValueError):
+        build_budget_awareness_protocol(max_steps=4, max_search_calls=-1)
+
+
+def test_budget_awareness_appended_when_provided(templates: dict[str, str]) -> None:
+    q = _yes_no_question()
+    plain = render_user_prompt(q, templates)
+    tail = build_budget_awareness_protocol(max_steps=6, max_search_calls=4)
+    with_budget = render_user_prompt(q, templates, budget_awareness_protocol=tail)
+    assert with_budget.startswith(plain)
+    assert "Budget Awareness" in with_budget
+    assert "**6**" in with_budget
+    assert "**4**" in with_budget
+
+
+def test_budget_awareness_default_is_off(templates: dict[str, str]) -> None:
+    q = _yes_no_question()
+    rendered = render_user_prompt(q, templates)
+    assert "Budget Awareness" not in rendered
+
+
+def test_budget_awareness_before_reflection_and_belief(templates: dict[str, str]) -> None:
+    """Order contract: budget → reflection → belief. Budget must come FIRST so
+    the model has the global plan before reading methodology layers."""
+    q = _yes_no_question()
+    rendered = render_user_prompt(
+        q,
+        templates,
+        budget_awareness_protocol=build_budget_awareness_protocol(
+            max_steps=6, max_search_calls=4
+        ),
+        reflection_protocol=REFLECTION_PROTOCOL,
+        belief_protocol=BELIEF_PROTOCOL,
+    )
+    budget_pos = rendered.find("Budget Awareness")
+    refl_pos = rendered.find("Forecasting Protocol")
+    belief_pos = rendered.find("Belief Protocol")
+    assert 0 < budget_pos < refl_pos < belief_pos
+
+
+def test_penultimate_warning_mentions_budget_state() -> None:
+    """The soft warning must surface (current_step / max_steps) and the search
+    budget snapshot so the model knows where it stands."""
+    msg = build_penultimate_step_warning(
+        current_step=2, max_steps=3, searches_done=1, max_search_calls=4
+    )
+    assert "2 of 3" in msg
+    assert "1/4" in msg
+    assert "second-to-last" in msg
+    # The warning explicitly previews what happens next turn.
+    assert "NEXT step" in msg
+
+
+def test_last_step_force_finalisation_mentions_cutoff() -> None:
+    msg = build_last_step_force_finalisation(current_step=3, max_steps=3)
+    assert "Harness cutoff" in msg
+    assert "3 of 3" in msg
+    assert "\\boxed{...}" in msg
+    # Tells the model not to default to an empty reply.
+    assert "empty reply" in msg.lower() or "scores zero" in msg.lower()

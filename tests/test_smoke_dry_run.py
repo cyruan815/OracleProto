@@ -52,6 +52,11 @@ def _make_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     # Pin Tavily raw_content off so the smoke test stays focused on plumbing
     # rather than tracking the default in .env.example
     monkeypatch.setenv("TAVILY_INCLUDE_RAW_CONTENT", "false")
+    # force-final-answer-near-limit-v1 默认开; smoke 测试以最小步数跑全栈 plumbing,
+    # 关掉新机制让 user_prompt / messages_trace 形态与 v5.1 字节级一致 (新机制有专属
+    # test_force_final_* 测试).
+    monkeypatch.setenv("REACT_BUDGET_AWARENESS_PROTOCOL", "false")
+    monkeypatch.setenv("REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT", "false")
     return Settings(_env_file=None)
 
 
