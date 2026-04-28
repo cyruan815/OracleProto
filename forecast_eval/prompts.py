@@ -97,37 +97,109 @@ If you cannot produce a valid belief block, emit your boxed answer anyway — th
 """
 
 
-def _build_nudge_message(*, searches_done: int, min_required: int) -> str:
-    """User-side reminder injected when the LLM tries to finalise too early.
+# ---------------------------------------------------------------------------
+# Harness status injections (unified format).
+#
+# Every harness-injected user message during the ReAct loop shares ONE format:
+# a status header on the first line + a scenario-specific directive below it.
+# This eliminates the steady drift between the historical "penultimate /
+# last-step / budget-exhausted / step-position" branches (each had its own
+# tone, its own step counter, and overlapping content), and gives the LLM a
+# single, predictable shape to parse.
+#
+# Header:
+#   [Harness status] step k/N (R remaining) · web_search s/C used (M left).
+#
+# Builders below all call `_build_status_header` for line one, then append
+# the directive that matches the scenario. The directive is the only place
+# the four scenarios diverge — header math is shared so the step counter,
+# search counter, and "remaining" math cannot drift.
+# ---------------------------------------------------------------------------
 
-    Phrased as concrete process feedback so the model knows what behaviour to
-    change, not as scolding. The message never reveals end_date or any other
-    information-barrier internal — it only references the public search count
-    and the public minimum from `.env`.
+
+def _build_status_header(
+    *,
+    current_step: int,
+    max_steps: int,
+    searches_done: int,
+    max_search_calls: int,
+) -> str:
+    """Single-line status banner used by every harness injection.
+
+    `current_step` is 1-indexed and refers to the step the LLM is ABOUT TO
+    issue (matches every existing builder's convention). `max_search_calls`
+    can be 0 (web_search disabled in this run); we emit a clear "disabled"
+    note in that case rather than printing `0/0`.
     """
+    if max_steps < 1:
+        raise ValueError(f"max_steps must be >= 1, got {max_steps}")
+    if current_step < 1 or current_step > max_steps:
+        raise ValueError(
+            f"current_step must be in [1, {max_steps}]; got {current_step}"
+        )
+    if max_search_calls < 0:
+        raise ValueError(f"max_search_calls must be >= 0, got {max_search_calls}")
+    if searches_done < 0:
+        raise ValueError(f"searches_done must be >= 0, got {searches_done}")
+    steps_remaining = max_steps - current_step + 1  # incl. the step we're entering
+    if max_search_calls > 0:
+        searches_left = max(max_search_calls - searches_done, 0)
+        search_clause = (
+            f"web_search {searches_done}/{max_search_calls} used "
+            f"({searches_left} left)"
+        )
+    else:
+        search_clause = "web_search disabled"
     return (
-        f"You attempted to give a final answer after only {searches_done} "
-        f"web_search call(s), but the forecasting protocol requires consulting "
-        f"at least {min_required} sources from DIFFERENT angles before "
-        "committing. Please continue the investigation: pick a NEW angle you "
-        "have not yet exercised (e.g. an opposing viewpoint, an independent "
-        "data source, or a base-rate comparable), issue another `web_search`, "
-        "then reflect on what it adds before you finalise. Do not repeat a "
-        "near-duplicate of any previous query."
+        f"[Harness status] step {current_step}/{max_steps} "
+        f"({steps_remaining} remaining, including this one) · {search_clause}."
     )
 
 
-# Budget-awareness protocol (force-final-answer-near-limit-v1).
-# Tail-attached to the user message in the SAME slot as REFLECTION / BELIEF
-# protocols (NOT part of `prompt_templates`, so `prompt_templates_hash` stays
-# stable; the text is recorded per-sample in `user_prompt` and run-wide in
-# `run_meta.config_snapshot`). Pairs with the dynamic last-step injectors
-# (`build_penultimate_step_warning` / `build_last_step_force_finalisation`)
-# in react.py — this protocol gives the model upfront budget awareness so
-# it can plan to leave the final step for the boxed answer; the dynamic
-# injectors are the runtime safety net when the plan slips.
+def _build_nudge_message(
+    *,
+    current_step: int,
+    max_steps: int,
+    searches_done: int,
+    max_search_calls: int,
+    min_required: int,
+) -> str:
+    """Soft search-floor reminder when the LLM tries to finalise too early.
+
+    Phrased as concrete process feedback (not scolding). The message never
+    reveals `end_date` / training-cutoff / other information-barrier internals
+    — it only references public counters (search count, the public minimum
+    from `.env`) and the public step counter. Includes the unified status
+    header so the model never has to count messages to know where it stands.
+    """
+    header = _build_status_header(
+        current_step=current_step,
+        max_steps=max_steps,
+        searches_done=searches_done,
+        max_search_calls=max_search_calls,
+    )
+    return (
+        f"{header}\n"
+        f"You attempted to give a final answer after only {searches_done} "
+        f"web_search call(s), but the forecasting protocol requires consulting "
+        f"at least {min_required} sources from DIFFERENT angles before "
+        "committing. Continue the investigation: pick a NEW angle you have not "
+        "yet exercised (e.g. an opposing viewpoint, an independent data source, "
+        "or a base-rate comparable), issue another `web_search`, then reflect "
+        "on what it adds before you finalise. Do not repeat a near-duplicate "
+        "of any previous query."
+    )
+
+
+# Budget-awareness protocol (static, appended once to the initial user prompt).
+# Pairs with the runtime status injections below — this section gives the model
+# the global plan up front; the runtime injectors then deliver the position-
+# specific reminder at penultimate / last / budget-exhausted / continuation
+# moments. The static text is NOT part of `prompt_templates`
+# (`prompt_templates_hash` stays bit-stable); its presence is recorded per
+# sample via the `user_prompt` field and run-wide via `Settings.config_snapshot`.
 def build_budget_awareness_protocol(*, max_steps: int, max_search_calls: int) -> str:
-    """Render the budget-awareness tail.
+    """Render the budget-awareness tail attached to the initial user prompt.
 
     `max_steps` is `REACT_MAX_STEPS` and `max_search_calls` is the cell-local
     `REACT_MAX_SEARCH_CALLS` int (the dispatcher has already downcast the
@@ -148,60 +220,192 @@ def build_budget_awareness_protocol(*, max_steps: int, max_search_calls: int) ->
         "\n\n---\n"
         "**Budget Awareness — your harness has hard limits.**\n\n"
         f"You may take at most **{max_steps}** reasoning/tool steps {search_clause}. "
-        "Each assistant turn counts as one step regardless of whether it issues `tool_calls` "
-        "or content. Plan ahead so your LAST step is the one that emits the final "
-        "`\\boxed{...}` answer — if step "
-        f"{max_steps} still contains `tool_calls`, the answer is forfeit and the "
-        "sample is scored as a parse failure.\n\n"
-        "**Recommended pacing.**\n"
-        "- Use the early-to-middle steps to investigate, search, and reflect across distinct angles.\n"
-        "- Reserve at least the FINAL step for committing your answer with no `tool_calls`.\n"
-        "- The harness will inject a reminder when you near the step limit, and will strip the "
-        "`web_search` schema entirely on the very last step to force a content-only reply. Do not "
-        "rely on these safety nets — plan to commit on your own initiative.\n"
-        "- If decisive evidence is already in hand mid-budget, commit early; do not consume the "
-        "budget for its own sake.\n"
+        "Each assistant turn — whether it issues tool calls or plain content — counts "
+        "as one step against this budget.\n\n"
+        "**How the loop exits.**\n"
+        "The loop stops as soon as your reply contains a parseable `\\boxed{...}` answer. "
+        "Replies without `\\boxed{...}` (tool-call turns or intermediate content turns) "
+        "keep the loop running and each cost one step. There is no penalty for "
+        "separating reasoning from your final commitment — just include `\\boxed{...}` "
+        "when you are ready.\n\n"
+        "**Pacing rules.**\n"
+        "- Commit with `\\boxed{...}` as soon as your evidence is sufficient.\n"
+        "- When `web_search` is removed (budget exhausted or step limit reached), "
+        "include `\\boxed{...}` in your next reply.\n"
+        f"- Step {max_steps} is the hard deadline: the harness strips all tools and "
+        "forces a final reply — if it still lacks `\\boxed{...}`, the sample scores zero.\n\n"
+        "**Status feedback.**\n"
+        "Before each of your turns the harness may inject a short user message "
+        "starting with `[Harness status] step k/N ...` carrying the live step "
+        "and search counters. Tool error replies likewise include a `status` "
+        "field. Read those — they are the source of truth for your remaining "
+        "budget so you do not have to count messages yourself.\n"
     )
 
 
 def build_penultimate_step_warning(
     *, current_step: int, max_steps: int, searches_done: int, max_search_calls: int
 ) -> str:
-    """Soft reminder injected as a user message at the second-to-last step.
+    """Soft reminder injected as a user message inside the LOOKAHEAD window
+    (typically the second-to-last step).
 
-    Goal: give the model one last opportunity to issue a decisive `web_search`
-    while making it explicit that the very next step will be content-only.
-    `current_step` and `max_steps` are 1-indexed in the message text (matches
-    how the budget-awareness protocol talks about "step N") even though
-    react.py iterates from 0.
+    Branches on whether the search budget is already exhausted:
+    - Exhausted (or web_search disabled): tools will be stripped THIS turn;
+      the model can no longer search and must commit on this reply or the next.
+    - Remaining: model may issue one last decisive search, or commit early.
+
+    Both branches use the unified status header so the model always has an
+    up-to-date snapshot of (step, searches) without doing arithmetic.
     """
+    header = _build_status_header(
+        current_step=current_step,
+        max_steps=max_steps,
+        searches_done=searches_done,
+        max_search_calls=max_search_calls,
+    )
+    if max_search_calls == 0 or searches_done >= max_search_calls:
+        # Budget already exhausted (or search disabled): tools are being stripped
+        # this turn. The model cannot defer searching — it must commit now or
+        # on the next (final) step.
+        return (
+            f"{header}\n"
+            f"You are at the second-to-last step. The `web_search` tool schema "
+            "has been removed (no search budget left for this run). Include "
+            "`\\boxed{...}` in this reply, or the harness will force a final "
+            "reply on the next (final) step. The next step is the hard deadline."
+        )
     return (
-        f"Harness reminder: this is step {current_step} of {max_steps} (the "
-        "second-to-last). On the NEXT step the harness will strip the "
-        "`web_search` tool schema and require a content-only reply with your "
-        f"final `\\boxed{{...}}` answer. You have used {searches_done}/"
-        f"{max_search_calls} search call(s). If a single decisive search is "
-        "still missing, issue it now; otherwise begin consolidating your "
-        "reasoning so the next turn can commit."
+        f"{header}\n"
+        "You are at the second-to-last step. You may issue ONE more "
+        "`web_search` if a single decisive query is still missing, OR commit "
+        "with `\\boxed{...}` now. The NEXT step strips `web_search` and is "
+        "the hard deadline."
     )
 
 
 def build_last_step_force_finalisation(
-    *, current_step: int, max_steps: int
+    *,
+    current_step: int,
+    max_steps: int,
+    searches_done: int,
+    max_search_calls: int,
 ) -> str:
     """Hard cutoff message paired with `tools=[]` on the final step.
 
-    Same tone as the legacy `REACT_FINAL_ANSWER_RETRY` bail-out
-    ("Time to commit") — kept consistent on purpose so traces remain
-    comparable across runs that use either mechanism.
+    Same tone and contract as the legacy `REACT_FINAL_ANSWER_RETRY` bail-out
+    ("Time to commit") — kept consistent on purpose so traces stay comparable
+    across runs that use either mechanism. Status header keeps the step /
+    search counters visible so the model can ground its base-rate guess in
+    what it actually did or did not get to investigate.
     """
+    header = _build_status_header(
+        current_step=current_step,
+        max_steps=max_steps,
+        searches_done=searches_done,
+        max_search_calls=max_search_calls,
+    )
     return (
+        f"{header}\n"
         f"Harness cutoff: this is the final step ({current_step} of "
         f"{max_steps}) and the `web_search` tool schema has been removed. "
-        "Stop investigating and output your final `\\boxed{...}` answer "
-        "now. If your evidence is incomplete, give your best calibrated "
-        "guess from base rates rather than producing no answer — an empty "
-        "reply scores zero."
+        "Stop investigating and output your final `\\boxed{...}` answer NOW. "
+        "An empty reply or a reply without `\\boxed{...}` scores zero — even "
+        "an uneducated base-rate guess in the box beats no answer."
+    )
+
+
+def build_search_budget_exhausted_commit(
+    *,
+    current_step: int,
+    max_steps: int,
+    searches_done: int,
+    max_search_calls: int,
+) -> str:
+    """Injected once when the search budget is hit and tools are being stripped.
+
+    Unlike the step-limit cutoffs this fires mid-budget: the model may still
+    have remaining steps but no more searches. The directive guides the model
+    to commit immediately or in the next step rather than burning the leftover
+    turns commenting.
+    """
+    header = _build_status_header(
+        current_step=current_step,
+        max_steps=max_steps,
+        searches_done=searches_done,
+        max_search_calls=max_search_calls,
+    )
+    return (
+        f"{header}\n"
+        "Search budget exhausted — the `web_search` tool schema has been "
+        "removed for all remaining steps. Include `\\boxed{...}` in this "
+        "reply or the next to commit your final answer. The loop continues "
+        "until `\\boxed{...}` appears or the step limit is reached."
+    )
+
+
+def build_continuation_after_unboxed_content(
+    *,
+    current_step: int,
+    max_steps: int,
+    searches_done: int,
+    max_search_calls: int,
+) -> str:
+    """Injected when the previous step returned content but no parseable
+    `\\boxed{...}` and we still have steps left.
+
+    Replaces the old inline "Harness: step N complete — no \\boxed detected"
+    user-message string in react.py. Keeping it in `prompts.py` means the
+    full set of harness injections share both the status-header math and a
+    consistent voice. The directive is intentionally permissive ("continue
+    or commit") because a no-boxed content turn is normal mid-flight: the
+    model is free to keep reasoning, search again, or wrap up — but it must
+    know exactly where it stands first.
+    """
+    header = _build_status_header(
+        current_step=current_step,
+        max_steps=max_steps,
+        searches_done=searches_done,
+        max_search_calls=max_search_calls,
+    )
+    return (
+        f"{header}\n"
+        "Your previous reply did not contain a parseable `\\boxed{...}` "
+        "answer, so the loop continues. Either keep investigating (more "
+        "reasoning or another `web_search`) or include `\\boxed{...}` in "
+        "your next reply to commit."
+    )
+
+
+def build_tool_error_status(
+    *,
+    current_step: int,
+    max_steps: int,
+    searches_done: int,
+    max_search_calls: int,
+    next_step_strips_tools: bool,
+) -> str:
+    """Status string attached to `tool_error` payloads.
+
+    Tool-error turns happen INSIDE the assistant→tool→assistant cycle, so we
+    cannot inject a user message there without breaking message ordering.
+    Instead we surface the live status as a JSON `status` field inside the
+    tool message payload, mirroring the wording the user-side injectors use.
+    """
+    if max_search_calls > 0:
+        searches_left = max(max_search_calls - searches_done, 0)
+        budget = (
+            f"web_search {searches_done}/{max_search_calls} used "
+            f"({searches_left} left)"
+        )
+    else:
+        budget = "web_search disabled"
+    suffix = (
+        " The next step strips `web_search`; commit `\\boxed{...}` then."
+        if next_step_strips_tools
+        else " Output `\\boxed{...}` once your evidence is sufficient."
+    )
+    return (
+        f"step {current_step}/{max_steps}, {budget}.{suffix}"
     )
 
 

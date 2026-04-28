@@ -18,8 +18,11 @@ from .prompts import (
     REFLECTION_PROTOCOL,
     _build_nudge_message,
     build_budget_awareness_protocol,
+    build_continuation_after_unboxed_content,
     build_last_step_force_finalisation,
     build_penultimate_step_warning,
+    build_search_budget_exhausted_commit,
+    build_tool_error_status,
     render_user_prompt,
 )
 from .search import SearchResult, tavily_search
@@ -209,7 +212,27 @@ async def run_react(
     final_raw = ""
     steps_executed = 0
     nudges_used = 0
+    budget_exhausted_notified = False
+    # When the previous step returned content but no parseable `\boxed{...}`,
+    # we want to tell the model "your last reply had no boxed answer; here is
+    # your live status; continue or commit". The historical implementation
+    # injected that message immediately after the assistant turn — that could
+    # collide with the next step's penultimate / last-step / budget-exhausted
+    # injection (two consecutive user messages with overlapping content). We
+    # now defer it: set the flag here, inject the unified continuation message
+    # at the TOP of the next iteration UNLESS a higher-priority injection
+    # (last-step cutoff, penultimate warning, budget-exhausted notice) already
+    # carries the same status header for that turn.
+    pending_continuation = False
     last_resp: ChatResponse | None = None
+    # `effective_max_search_calls` is what the LLM-facing prompts should
+    # advertise as the search budget: 0 when web_search is disabled (so the
+    # status header reads "web_search disabled" instead of "0/0 used"), the
+    # cell-local int otherwise. Used by every harness injection below so the
+    # number the model sees is always consistent with the real budget.
+    effective_max_search_calls = (
+        int(settings.REACT_MAX_SEARCH_CALLS) if settings.ENABLE_WEB_SEARCH else 0
+    )
     # ENABLE_WEB_SEARCH=false → LLM 看不到任何 tool schema, 循环会在首轮直接返回
     # content 并 break, Tavily 完全不会被调用. 此时也禁用 nudge — 没有搜索可以再做.
     tool_schemas: list[dict[str, Any]] = (
@@ -223,73 +246,111 @@ async def run_react(
 
     for step in range(settings.REACT_MAX_STEPS):
         steps_executed = step + 1
-        # force-final-answer-near-limit-v1 (B): inject a user-side reminder
-        # (and possibly strip tools) when the loop is approaching the step
-        # ceiling. `remaining` counts the step ABOUT to be issued — so when
-        # `remaining == 1` this is the LAST step, when `remaining == 2` this
-        # is the second-to-last. Two-stage ladder driven by LOOKAHEAD:
-        #   - LOOKAHEAD = 1: only hard-cutoff on the last step.
-        #   - LOOKAHEAD = 2 (default): soft warning at remaining==2, then
-        #     hard cutoff at remaining==1.
-        # The injected user messages do NOT increment `nudges_used` (semantic
-        # parity with the legacy REACT_FINAL_ANSWER_RETRY bail-out — both are
-        # harness-side resilience, not search-floor enforcement).
+        searches_done_now = len(search_calls)
+        # ------------------------------------------------------------------
+        # Pre-step injection decision.
+        #
+        # All four runtime injection paths share the same status header (see
+        # `prompts._build_status_header`) so the model gets one predictable
+        # shape per turn. We pick AT MOST ONE of:
+        #
+        #   (1) last-step hard cutoff — `tools=[]` + force-finalise text;
+        #   (2) penultimate soft warning — tools still exposed inside the
+        #       LOOKAHEAD window;
+        #   (3) budget-exhausted commit notice — search budget consumed and
+        #       `REACT_BUDGET_EXCEEDED_DROP_TOOLS=True`, fired ONCE;
+        #   (4) continuation after a content-no-boxed turn — tells the model
+        #       "your last reply had no \\boxed{...}, here is the live status".
+        #
+        # Priority is (1) > (2) > (3) > (4); higher-priority injections
+        # already carry the live status header so we never double-inject.
+        # `pending_continuation` is consumed unconditionally each turn — once
+        # we've entered any branch the model sees a status header, so the
+        # "no boxed last turn" reminder has been delivered (or superseded).
+        # ------------------------------------------------------------------
         force_final_active = (
             settings.REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT
             and (settings.REACT_MAX_STEPS - step) <= settings.REACT_FORCE_FINAL_ANSWER_LOOKAHEAD
         )
+        budget_dropped = (
+            settings.REACT_BUDGET_EXCEEDED_DROP_TOOLS
+            and searches_done_now >= settings.REACT_MAX_SEARCH_CALLS
+        )
         force_final_hard_cutoff = False
+        injection: str | None = None
         if force_final_active:
             remaining = settings.REACT_MAX_STEPS - step
             if remaining == 1:
-                # Last step — hard cutoff: append the force-finalise message
-                # and strip tools so the model can ONLY emit content. This
-                # supersedes the budget-exceeded drop-tools branch below
-                # (whichever fires first wins; the resulting tools list is
-                # the same).
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": build_last_step_force_finalisation(
-                            current_step=steps_executed,
-                            max_steps=settings.REACT_MAX_STEPS,
-                        ),
-                    }
+                # Last step — hard cutoff: status header + force-finalise +
+                # tools=[] so the model can ONLY emit content. Supersedes
+                # both the budget-exhausted branch and the continuation
+                # reminder (whichever else would have fired, this one wins
+                # because it carries the strictest contract).
+                injection = build_last_step_force_finalisation(
+                    current_step=steps_executed,
+                    max_steps=settings.REACT_MAX_STEPS,
+                    searches_done=searches_done_now,
+                    max_search_calls=effective_max_search_calls,
                 )
                 force_final_hard_cutoff = True
             else:
-                # Remaining ∈ [2, LOOKAHEAD] — soft warning. Tools schema is
-                # still available so the model can issue ONE last decisive
-                # search before the cutoff lands on the next turn.
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": build_penultimate_step_warning(
-                            current_step=steps_executed,
-                            max_steps=settings.REACT_MAX_STEPS,
-                            searches_done=len(search_calls),
-                            max_search_calls=int(settings.REACT_MAX_SEARCH_CALLS)
-                            if settings.ENABLE_WEB_SEARCH
-                            else 0,
-                        ),
-                    }
+                # Remaining ∈ [2, LOOKAHEAD] — soft warning. The penultimate
+                # builder branches internally on whether the search budget is
+                # already exhausted (in that case it tells the model the
+                # tools are gone THIS turn). Tools list decision is made
+                # below: we still hand `tool_schemas` to the LLM unless the
+                # search budget is actually spent.
+                injection = build_penultimate_step_warning(
+                    current_step=steps_executed,
+                    max_steps=settings.REACT_MAX_STEPS,
+                    searches_done=searches_done_now,
+                    max_search_calls=effective_max_search_calls,
                 )
-        # v5.1 (harness-resilience) D1: once the cumulative web_search budget
-        # is spent, drop the tool schema for subsequent LLM calls so the model
-        # is forced down the no-tool path (assistant_msg.tool_calls becomes
-        # empty → existing `if not tool_calls: ... break` finalises). Default
-        # opt-out via REACT_BUDGET_EXCEEDED_DROP_TOOLS=False restores legacy
-        # behaviour (model keeps requesting web_search and gets `search budget
-        # exceeded` tool_result echoes).
-        if force_final_hard_cutoff:
+        elif budget_dropped and not budget_exhausted_notified:
+            # Search budget just hit (or hit on a previous turn but we never
+            # got around to telling the model — only fires once per run).
+            injection = build_search_budget_exhausted_commit(
+                current_step=steps_executed,
+                max_steps=settings.REACT_MAX_STEPS,
+                searches_done=searches_done_now,
+                max_search_calls=effective_max_search_calls,
+            )
+            budget_exhausted_notified = True
+        elif pending_continuation:
+            # Lowest priority: previous turn was content w/o `\boxed{...}` and
+            # nothing else needs to fire. This replaces the historical inline
+            # "Harness: step N complete — no \boxed detected" injection that
+            # used to land immediately after the assistant turn (which could
+            # then double-inject with penultimate / last-step on the next
+            # iteration). Deferring to the TOP of the next iteration removes
+            # that double-injection.
+            injection = build_continuation_after_unboxed_content(
+                current_step=steps_executed,
+                max_steps=settings.REACT_MAX_STEPS,
+                searches_done=searches_done_now,
+                max_search_calls=effective_max_search_calls,
+            )
+
+        if injection is not None:
+            messages.append({"role": "user", "content": injection})
+        # `pending_continuation` is reset whether or not we injected — if a
+        # higher-priority branch fired, its status header has already conveyed
+        # the live counters, so the continuation reminder would be redundant.
+        pending_continuation = False
+
+        # ------------------------------------------------------------------
+        # Tool schema decision.
+        #
+        # `tools_for_this_step` is what the LLM sees on this turn:
+        # - hard cutoff (last step): always `[]`
+        # - search budget consumed AND DROP_TOOLS=True: always `[]`
+        # - else: full tool schema list (empty when web_search disabled)
+        # ------------------------------------------------------------------
+        if force_final_hard_cutoff or budget_dropped:
             tools_for_this_step: list[dict[str, Any]] = []
-        elif (
-            settings.REACT_BUDGET_EXCEEDED_DROP_TOOLS
-            and len(search_calls) >= settings.REACT_MAX_SEARCH_CALLS
-        ):
-            tools_for_this_step = []
         else:
             tools_for_this_step = tool_schemas
+
         t_step_start = time.monotonic()
         resp = await llm_chat(
             model=model,
@@ -321,50 +382,112 @@ async def run_react(
 
         tool_calls = assistant_msg.get("tool_calls") or []
         if not tool_calls:
-            # LLM 想给最终答案. 软性最低搜索次数兜底: 不够就 nudge 一次让它继续检索.
-            # 不抢占 REACT_MAX_STEPS 硬天花板, 受 REACT_MAX_NUDGES 上限保护防死循环.
+            content = assistant_msg.get("content") or ""
+            # Soft search-floor: nudge the model once to keep researching when
+            # it commits below `REACT_MIN_SEARCH_CALLS`. Floor is opt-in
+            # (default 0) and bounded by `REACT_MAX_NUDGES` so we cannot
+            # nudge-loop forever. Nudges DO consume a step against the hard
+            # `REACT_MAX_STEPS` ceiling. The injected message carries the
+            # same unified status header as every other harness injection.
             if (
                 nudge_enabled
-                and len(search_calls) < settings.REACT_MIN_SEARCH_CALLS
+                and searches_done_now < settings.REACT_MIN_SEARCH_CALLS
                 and nudges_used < settings.REACT_MAX_NUDGES
-                and step < settings.REACT_MAX_STEPS - 1  # 留至少 1 步给后续答复
+                and step < settings.REACT_MAX_STEPS - 1
             ):
                 messages.append(
                     {
                         "role": "user",
                         "content": _build_nudge_message(
-                            searches_done=len(search_calls),
+                            current_step=steps_executed,
+                            max_steps=settings.REACT_MAX_STEPS,
+                            searches_done=searches_done_now,
+                            max_search_calls=effective_max_search_calls,
                             min_required=settings.REACT_MIN_SEARCH_CALLS,
                         ),
                     }
                 )
                 nudges_used += 1
                 continue
-            final_raw = assistant_msg.get("content") or ""
-            break
+            # Exit signal is a parseable `\boxed{...}`, NOT "no tool_calls".
+            # `final_raw` is always updated so the natural-end fallback can
+            # surface the most recent content turn even when no `\boxed{...}`
+            # ever appeared. The hard step ceiling guarantees termination
+            # even on chains of unboxed content turns.
+            final_raw = content
+            if parse_answer(content, q) is not None:
+                break
+            # No parseable boxed → defer the continuation message to the next
+            # iteration's pre-step injection so it cannot collide with a
+            # higher-priority status injection (last-step / penultimate /
+            # budget-exhausted). On the FINAL iteration there is no next
+            # turn, so the flag would just be discarded (the loop ends and
+            # `final_raw` already holds whatever content we got).
+            pending_continuation = True
 
         for tc in tool_calls:
             tc_id = tc.get("id") or ""
             fn = tc.get("function") or {}
             fn_name = fn.get("name")
             raw_args = fn.get("arguments")
+            # Live budget snapshot attached to every tool_error this turn so
+            # the model sees its remaining budget INSIDE the assistant→tool
+            # cycle (where we cannot inject a user message). `searches_done`
+            # uses the post-loop count so each successive error in the same
+            # turn reflects any search that just ran.
+            error_status = build_tool_error_status(
+                current_step=steps_executed,
+                max_steps=settings.REACT_MAX_STEPS,
+                searches_done=len(search_calls),
+                max_search_calls=effective_max_search_calls,
+                # If THIS step is the last one (hard cutoff) we already have
+                # tools=[] and the model isn't doing more tool calls. For all
+                # earlier steps the next step strips tools iff the budget is
+                # already exhausted (or about to be after this turn). We use
+                # the simple "step+1 is the LAST step" heuristic plus the
+                # current-budget check; either way the model is told its
+                # search runway is gone.
+                next_step_strips_tools=(
+                    step + 1 >= settings.REACT_MAX_STEPS
+                    or (
+                        settings.REACT_BUDGET_EXCEEDED_DROP_TOOLS
+                        and len(search_calls) >= settings.REACT_MAX_SEARCH_CALLS
+                    )
+                ),
+            )
 
             if fn_name != "web_search":
-                messages.append(tool_error_message(tc_id, f"unknown tool: {fn_name}"))
+                messages.append(
+                    tool_error_message(
+                        tc_id, f"unknown tool: {fn_name}", status=error_status
+                    )
+                )
                 continue
 
             if len(search_calls) >= settings.REACT_MAX_SEARCH_CALLS:
-                messages.append(tool_error_message(tc_id, "search budget exceeded"))
+                messages.append(
+                    tool_error_message(
+                        tc_id, "search budget exceeded", status=error_status
+                    )
+                )
                 continue
 
             args, err = parse_tool_arguments(raw_args if isinstance(raw_args, str) else json.dumps(raw_args or {}))
             if err is not None or args is None:
-                messages.append(tool_error_message(tc_id, err or "invalid arguments"))
+                messages.append(
+                    tool_error_message(
+                        tc_id, err or "invalid arguments", status=error_status
+                    )
+                )
                 continue
 
             query, qerr = extract_query(args)
             if qerr is not None or query is None:
-                messages.append(tool_error_message(tc_id, qerr or "missing query"))
+                messages.append(
+                    tool_error_message(
+                        tc_id, qerr or "missing query", status=error_status
+                    )
+                )
                 continue
 
             if search_semaphore is not None:

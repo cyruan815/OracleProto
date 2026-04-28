@@ -57,12 +57,28 @@ def extract_query(args: dict[str, Any]) -> tuple[str | None, str | None]:
     return q, None
 
 
-def tool_error_message(tool_call_id: str, reason: str) -> dict[str, Any]:
-    """Build a role=tool message carrying an error payload back to the LLM."""
+def tool_error_message(
+    tool_call_id: str,
+    reason: str,
+    *,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Build a role=tool message carrying an error payload back to the LLM.
+
+    The optional `status` slot surfaces live harness state (step counter,
+    search budget, "next step strips tools" hint) so the model never has to
+    count messages to know its remaining budget. We never inject a user
+    message between an assistant tool_call and its matching tool message
+    (that would break OpenAI / Anthropic message ordering), so this status
+    field is the only way to deliver budget context inside the tool cycle.
+    """
+    payload: dict[str, Any] = {"error": reason}
+    if status is not None:
+        payload["status"] = status
     return {
         "role": "tool",
         "tool_call_id": tool_call_id,
-        "content": json.dumps({"error": reason}, ensure_ascii=False),
+        "content": json.dumps(payload, ensure_ascii=False),
     }
 
 
