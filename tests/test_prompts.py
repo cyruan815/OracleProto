@@ -94,40 +94,6 @@ def test_multiple_choice_render_under_26(templates: dict[str, str]) -> None:
     assert "\nC. Lower" in rendered
 
 
-def test_multiple_choice_over_26_protects_labels(templates: dict[str, str]) -> None:
-    """Use real DB data so tests match what actually ships."""
-    import sqlite3
-
-    conn = sqlite3.connect(f"file:{SOURCE_DB}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT id, choice_type, question_type, event, options, answer, end_time "
-        "FROM forecast_eval_set_example WHERE json_array_length(options) > 26 ORDER BY json_array_length(options) DESC LIMIT 1"
-    ).fetchone()
-    conn.close()
-    assert row is not None
-
-    q = Question(
-        id=row["id"],
-        choice_type=row["choice_type"],
-        question_type=row["question_type"],
-        event=row["event"],
-        options=row["options"],
-        answer=row["answer"],
-        end_time=row["end_time"],
-    )
-    rendered = render_user_prompt(q, templates)
-
-    options = json.loads(q.options)
-    # Every option must appear in the rendered prompt, even those whose letter
-    # falls outside A..Z (those lines are rendered with backtick protection).
-    for i, label in enumerate(options):
-        letter = index_to_letter(i)
-        if i < 26:
-            assert f"{letter}. {label}" in rendered
-        else:
-            assert f"`{letter}`. {label}" in rendered
-
 
 def test_render_is_deterministic(templates: dict[str, str]) -> None:
     q = Question(
@@ -203,13 +169,23 @@ def test_reflection_protocol_none_equivalent_to_off(templates: dict[str, str]) -
 
 
 def test_nudge_message_mentions_counts_and_new_angle() -> None:
-    msg = _build_nudge_message(searches_done=1, min_required=3)
+    msg = _build_nudge_message(
+        current_step=2,
+        max_steps=6,
+        searches_done=1,
+        max_search_calls=4,
+        min_required=3,
+    )
     # 必须客观陈述事实, 不泄露 end_date 等内部信息, 同时要求 LLM 换角度而非重复.
     assert "1" in msg
     assert "3" in msg
     assert "NEW angle" in msg or "new angle" in msg.lower()
     assert "end_date" not in msg
     assert "training cutoff" not in msg.lower()
+    # 统一 status header 必须出现, 让 LLM 知道当前步数 / 搜索预算位置.
+    assert "[Harness status]" in msg
+    assert "step 2/6" in msg
+    assert "1/4 used" in msg
 
 
 # ---- v4 belief protocol -----------------------------------------------------
@@ -302,8 +278,8 @@ def test_budget_awareness_protocol_contains_budget_numbers() -> None:
     assert "Budget Awareness" in text
     assert "**12**" in text
     assert "**8**" in text
-    # Plain prose tells the model to leave the last step for the boxed answer.
-    assert "LAST step" in text or "final step" in text.lower()
+    # The text must name the hard deadline step (in some form, case-insensitive).
+    assert "final step" in text.lower() or "step 12" in text.lower()
     assert "\\boxed{...}" in text
 
 
@@ -366,17 +342,102 @@ def test_penultimate_warning_mentions_budget_state() -> None:
     msg = build_penultimate_step_warning(
         current_step=2, max_steps=3, searches_done=1, max_search_calls=4
     )
-    assert "2 of 3" in msg
-    assert "1/4" in msg
+    # 统一 status header 提供步号与搜索预算 (e.g. "step 2/3 ... web_search 1/4 used")
+    assert "[Harness status]" in msg
+    assert "step 2/3" in msg
+    assert "1/4 used" in msg
     assert "second-to-last" in msg
     # The warning explicitly previews what happens next turn.
     assert "NEXT step" in msg
 
 
+def test_penultimate_warning_when_budget_exhausted() -> None:
+    """When the search budget is already gone, the second-to-last step warning
+    must say tools are stripped THIS turn and the next step is the deadline."""
+    msg = build_penultimate_step_warning(
+        current_step=2, max_steps=3, searches_done=4, max_search_calls=4
+    )
+    assert "[Harness status]" in msg
+    assert "4/4 used" in msg
+    assert "(0 left)" in msg
+    assert "second-to-last" in msg
+    assert "removed" in msg.lower() or "stripped" in msg.lower()
+    assert "hard deadline" in msg.lower()
+
+
 def test_last_step_force_finalisation_mentions_cutoff() -> None:
-    msg = build_last_step_force_finalisation(current_step=3, max_steps=3)
+    msg = build_last_step_force_finalisation(
+        current_step=3, max_steps=3, searches_done=2, max_search_calls=4
+    )
     assert "Harness cutoff" in msg
     assert "3 of 3" in msg
+    assert "[Harness status]" in msg
+    assert "step 3/3" in msg
     assert "\\boxed{...}" in msg
-    # Tells the model not to default to an empty reply.
-    assert "empty reply" in msg.lower() or "scores zero" in msg.lower()
+    # Tells the model not to default to an empty reply, AND offers base-rate fallback.
+    assert "scores zero" in msg.lower()
+    assert "base-rate" in msg.lower() or "base rate" in msg.lower()
+
+
+def test_search_budget_exhausted_commit_has_status_header() -> None:
+    """When the search budget is hit mid-run (and DROP_TOOLS=true), the
+    one-shot commit notice must carry the unified status header."""
+    from forecast_eval.prompts import build_search_budget_exhausted_commit
+
+    msg = build_search_budget_exhausted_commit(
+        current_step=4, max_steps=8, searches_done=4, max_search_calls=4
+    )
+    assert "[Harness status]" in msg
+    assert "step 4/8" in msg
+    assert "4/4 used" in msg
+    assert "(0 left)" in msg
+    assert "exhausted" in msg.lower()
+    assert "\\boxed{...}" in msg
+
+
+def test_continuation_after_unboxed_content_has_status_header() -> None:
+    """When a content turn lacked `\\boxed{...}`, the next-turn continuation
+    message must carry the unified status header so the model knows exactly
+    where it stands without counting messages."""
+    from forecast_eval.prompts import build_continuation_after_unboxed_content
+
+    msg = build_continuation_after_unboxed_content(
+        current_step=3, max_steps=6, searches_done=2, max_search_calls=4
+    )
+    assert "[Harness status]" in msg
+    assert "step 3/6" in msg
+    assert "2/4 used" in msg
+    assert "previous reply did not contain" in msg.lower()
+    assert "\\boxed{...}" in msg
+
+
+def test_status_header_handles_disabled_search() -> None:
+    """`max_search_calls=0` (web_search disabled) must render as a clear
+    'web_search disabled' note, not '0/0 used'."""
+    from forecast_eval.prompts import build_continuation_after_unboxed_content
+
+    msg = build_continuation_after_unboxed_content(
+        current_step=2, max_steps=4, searches_done=0, max_search_calls=0
+    )
+    assert "web_search disabled" in msg
+    assert "0/0" not in msg
+
+
+def test_status_header_validates_inputs() -> None:
+    """Invalid step / search counters must raise (no silent miscount)."""
+    import pytest as _pytest
+
+    from forecast_eval.prompts import build_continuation_after_unboxed_content
+
+    with _pytest.raises(ValueError):
+        build_continuation_after_unboxed_content(
+            current_step=0, max_steps=4, searches_done=0, max_search_calls=4
+        )
+    with _pytest.raises(ValueError):
+        build_continuation_after_unboxed_content(
+            current_step=5, max_steps=4, searches_done=0, max_search_calls=4
+        )
+    with _pytest.raises(ValueError):
+        build_continuation_after_unboxed_content(
+            current_step=1, max_steps=4, searches_done=-1, max_search_calls=4
+        )

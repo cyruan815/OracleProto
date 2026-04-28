@@ -869,16 +869,14 @@ async def test_search_calls_tavily_error_no_detector_fields(
     assert "detector_latency_ms" not in entry
 
 
-async def test_final_answer_retry_skipped_when_already_filled(
+async def test_loop_stops_on_valid_boxed(
     templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If the loop break path already filled `final_raw` (even with malformed
-    content that fails parse_answer), the bail-out retry MUST NOT fire."""
+    """Loop exits immediately when a valid \\boxed{} answer is found, without
+    triggering the bail-out retry."""
     settings = _make_settings(monkeypatch)
-    # Single step: model goes straight to a final answer. Content is set so
-    # final_raw is non-empty even though parse_answer may or may not succeed.
     script = [
-        (_final_msg("I have decided. \\boxed{Maybe}"), "stop", {"response_id": "r0"})
+        (_final_msg("Evidence gathered. \\boxed{Yes}"), "stop", {"response_id": "r0"})
     ]
     llm = _ScriptedLLM(script)
     monkeypatch.setattr(react, "llm_chat", llm)
@@ -893,10 +891,56 @@ async def test_final_answer_retry_skipped_when_already_filled(
         run_id="test",
     )
 
+    assert result.parse_ok == 1
     assert result.final_answer_retry_used == 0
     assert result.react_steps == 1
-    # Exactly 1 LLM call — no retry.
     assert len(llm.calls) == 1
+
+
+async def test_loop_continues_when_no_valid_boxed(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A content-only reply without a valid \\boxed{} does NOT stop the loop —
+    the model gets another step to commit its answer."""
+    settings = _make_settings(monkeypatch)
+    # Step 0: content without valid boxed (Maybe is not Yes/No).
+    # Step 1: content with valid boxed — loop stops here.
+    script = [
+        (_final_msg("Thinking out loud. \\boxed{Maybe}"), "stop", {"response_id": "r0"}),
+        (_final_msg("On reflection: \\boxed{Yes}"), "stop", {"response_id": "r1"}),
+    ]
+    llm = _ScriptedLLM(script)
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    assert result.parse_ok == 1
+    assert result.react_steps == 2
+    assert len(llm.calls) == 2
+    # Step 1's call must include the unified continuation injection so that
+    # (a) the conversation stays user/assistant-alternating and (b) the model
+    # gets the live status (step 2/6, web_search 0/5 used) before deciding
+    # what to do. Replaces the legacy ad-hoc "Harness: step N of M complete"
+    # string — both messages were the same intent, but we now share the
+    # status-header format with every other harness injection.
+    step1_messages = llm.calls[1]
+    injected = [
+        m for m in step1_messages
+        if m.get("role") == "user" and "[Harness status]" in (m.get("content") or "")
+    ]
+    assert injected, "continuation injection missing from second LLM call"
+    body = injected[-1]["content"]
+    assert "step 2/6" in body  # 即将进入的 step (1-indexed)
+    assert "previous reply did not contain" in body.lower()
+    assert "\\boxed{...}" in body
 
 
 # ---- force-final-answer-near-limit-v1 ---------------------------------------
@@ -1149,6 +1193,221 @@ async def test_force_final_near_limit_supersedes_budget_exceeded(
     ]
     assert len(last_msgs) == 1
     assert result.tool_calls_count == 2  # both searches went through
+
+
+# ---- harness-status-unification regression tests ---------------------------
+
+
+_STATUS_HEADER = "[Harness status]"
+
+
+async def test_continuation_and_penultimate_do_not_double_inject(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The historical bug: step k returns content w/o `\\boxed`, harness injects
+    a step-position message AND the next iteration injects a penultimate
+    warning — two consecutive user messages with overlapping content. The
+    unified design defers the continuation reminder to the next iteration's
+    pre-step injection slot, where it loses to higher-priority injections.
+
+    Setup: REACT_MAX_STEPS=3, LOOKAHEAD=2. Step 1 returns content without
+    `\\boxed{...}`, step 2 (penultimate) must run with EXACTLY ONE harness
+    user message preceding it (the penultimate warning), not two."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="3",
+        REACT_MAX_SEARCH_CALLS="100",
+        REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT="true",
+        REACT_FORCE_FINAL_ANSWER_LOOKAHEAD="2",
+    )
+    script = [
+        # Step 1: content without parseable boxed (Maybe ≠ Yes/No).
+        (_final_msg("Pondering. \\boxed{Maybe}"), "stop", {"response_id": "r1"}),
+        # Step 2 (penultimate, remaining=2): penultimate warning fires.
+        (_tool_msg("call_2", "q2"), "tool_calls", {"response_id": "r2"}),
+        # Step 3 (last, remaining=1): hard cutoff fires.
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r3"}),
+    ]
+    llm = _ScriptedLLM(script)
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    # Inspect what the LLM saw on step 2: between the step-1 assistant turn
+    # and the step-2 LLM call there must be EXACTLY ONE harness-status user
+    # message (the penultimate warning), NOT two (penultimate + continuation).
+    step2_messages = llm.calls[1]
+    # Find the last assistant message; everything after it (and before the
+    # next assistant) is the harness pre-step injection slot.
+    last_assistant_idx = max(
+        i for i, m in enumerate(step2_messages) if m.get("role") == "assistant"
+    )
+    pre_step_users = [
+        m for m in step2_messages[last_assistant_idx + 1 :]
+        if m.get("role") == "user"
+    ]
+    assert len(pre_step_users) == 1, (
+        f"expected exactly 1 pre-step user message at penultimate, got "
+        f"{len(pre_step_users)}: {[m.get('content') for m in pre_step_users]}"
+    )
+    body = pre_step_users[0]["content"]
+    assert _STATUS_HEADER in body
+    # Must be the penultimate warning (it carries `second-to-last`), not the
+    # continuation message (which would mention "previous reply did not contain").
+    assert _PENULTIMATE_MARKER in body
+    assert "previous reply did not contain" not in body
+
+
+async def test_continuation_injection_carries_status_and_no_old_string(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The continuation injection (content w/o boxed → next turn) MUST carry
+    the unified status header and MUST NOT use the legacy "Harness: step N of
+    M complete" string anywhere in the trace."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="6",
+        REACT_MAX_SEARCH_CALLS="100",
+    )
+    script = [
+        (_final_msg("Sketching. \\boxed{Maybe}"), "stop", {"response_id": "r0"}),
+        (_final_msg("Settled. \\boxed{Yes}"), "stop", {"response_id": "r1"}),
+    ]
+    llm = _ScriptedLLM(script)
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    trace = json.loads(result.messages_trace)
+    user_bodies = [m.get("content") or "" for m in trace if m.get("role") == "user"]
+    # Legacy ad-hoc string is gone — no occurrence anywhere.
+    assert not any("Harness: step" in b and "complete" in b for b in user_bodies), (
+        "legacy step-position injection string must not appear in messages_trace"
+    )
+    # The unified continuation injection IS present and carries the status header.
+    cont = [b for b in user_bodies if "previous reply did not contain" in b.lower()]
+    assert len(cont) == 1
+    assert _STATUS_HEADER in cont[0]
+    assert "step 2/6" in cont[0]
+
+
+async def test_tool_error_carries_status(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a `web_search` tool_call hits the search budget, the tool error
+    payload must include a `status` field with the live counters so the model
+    knows its remaining budget INSIDE the tool cycle (where we cannot inject
+    a user message)."""
+    settings = _make_settings(
+        monkeypatch,
+        REACT_MAX_STEPS="6",
+        REACT_MAX_SEARCH_CALLS="2",
+        REACT_BUDGET_EXCEEDED_DROP_TOOLS="false",  # keep tools so we can hit the error path
+    )
+    script = [
+        (_tool_msg("call_1", "q1"), "tool_calls", {"response_id": "r1"}),
+        (_tool_msg("call_2", "q2"), "tool_calls", {"response_id": "r2"}),
+        # Step 3: budget already 2/2, this call hits the budget-exceeded branch.
+        (_tool_msg("call_3", "q3"), "tool_calls", {"response_id": "r3"}),
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r4"}),
+    ]
+    llm = _ScriptedLLM(
+        script,
+        prompt_seq=(101, 202, 303, 404),
+        completion_seq=(11, 22, 33, 44),
+        reasoning_seq=(1, 2, 3, 4),
+    )
+    monkeypatch.setattr(react, "llm_chat", llm)
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    trace = json.loads(result.messages_trace)
+    tool_errors = [
+        json.loads(m["content"]) for m in trace
+        if m.get("role") == "tool" and "error" in (m.get("content") or "")
+    ]
+    assert tool_errors, "expected at least one tool_error payload"
+    # The budget-exceeded error must carry both `error` and `status` slots.
+    budget_err = [e for e in tool_errors if e.get("error") == "search budget exceeded"]
+    assert budget_err, "no budget-exceeded tool_error in trace"
+    status = budget_err[0].get("status")
+    assert isinstance(status, str)
+    assert "step 3/6" in status
+    assert "2/2 used" in status
+    # The model should be told to commit \\boxed{...} from inside the tool cycle.
+    assert "\\boxed{...}" in status
+
+
+async def test_tool_error_unknown_tool_also_carries_status(
+    templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Status field must be attached to EVERY tool_error path, not just
+    'search budget exceeded' — i.e. unknown_tool / invalid_arguments /
+    missing_query all surface live budget context."""
+    settings = _make_settings(monkeypatch)
+    bad_msg = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_bad",
+                "type": "function",
+                "function": {
+                    "name": "make_coffee",  # unknown tool
+                    "arguments": json.dumps({"shots": 2}),
+                },
+            }
+        ],
+    }
+    script = [
+        (bad_msg, "tool_calls", {"response_id": "r0"}),
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r1"}),
+    ]
+    monkeypatch.setattr(react, "llm_chat", _ScriptedLLM(script))
+    monkeypatch.setattr(react, "tavily_search", _stub_tavily)
+
+    result = await react.run_react(
+        _yes_no_question(),
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    trace = json.loads(result.messages_trace)
+    tool_errors = [
+        json.loads(m["content"]) for m in trace
+        if m.get("role") == "tool"
+    ]
+    unknown = [e for e in tool_errors if "unknown tool" in (e.get("error") or "")]
+    assert unknown
+    assert "status" in unknown[0]
+    assert "step 1/" in unknown[0]["status"]
 
 
 def test_settings_rejects_lookahead_above_max_steps(monkeypatch: pytest.MonkeyPatch) -> None:

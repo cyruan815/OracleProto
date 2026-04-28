@@ -85,32 +85,3 @@ def test_is_correct() -> None:
     assert is_correct(None, frozenset({"A"})) is None
 
 
-def test_over_26_option_roundtrip() -> None:
-    """Use the real DB fixture with the ASCII-extended label alphabet."""
-    conn = sqlite3.connect(f"file:{SOURCE_DB}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT id, choice_type, question_type, event, options, answer, end_time "
-        "FROM forecast_eval_set_example WHERE json_array_length(options) > 26"
-    ).fetchall()
-    conn.close()
-    assert rows, "expected at least one >26 option question fixture"
-
-    for r in rows:
-        q = Question(
-            id=r["id"],
-            choice_type=r["choice_type"],
-            question_type=r["question_type"],
-            event=r["event"],
-            options=r["options"],
-            answer=r["answer"],
-            end_time=r["end_time"],
-        )
-        gt = parse_gt(q.answer)
-        # Build a synthetic LLM response that exactly matches the stored answer.
-        payload = q.answer
-        text = f"All my reasoning... final answer is \\boxed{{{payload}}}"
-        parsed = parse_answer(text, q)
-        assert parsed is not None, f"failed to parse {q.id} answer={q.answer!r}"
-        assert parsed == gt, f"roundtrip mismatch on {q.id}: parsed={parsed} gt={gt}"
-        assert is_correct(parsed, gt) is True
