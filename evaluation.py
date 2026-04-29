@@ -488,10 +488,10 @@ async def _run_async(
                 run_dir,
                 # composite-score-by-subtype: 把 .env 里的子题型权重透传给
                 # analysis 层; analysis 模块自身不读 .env, 由 evaluation 提供。
-                composite_weights_qtype=cfg.COMPOSITE_WEIGHTS_QTYPE,
-                composite_weights_ctype=cfg.COMPOSITE_WEIGHTS_CTYPE,
-                composite_overrides_qtype=cfg.COMPOSITE_WEIGHT_OVERRIDES_QTYPE,
-                composite_overrides_ctype=cfg.COMPOSITE_WEIGHT_OVERRIDES_CTYPE,
+                composite_weights_qtype=settings.COMPOSITE_WEIGHTS_QTYPE,
+                composite_weights_ctype=settings.COMPOSITE_WEIGHTS_CTYPE,
+                composite_overrides_qtype=settings.COMPOSITE_WEIGHT_OVERRIDES_QTYPE,
+                composite_overrides_ctype=settings.COMPOSITE_WEIGHT_OVERRIDES_CTYPE,
             )
             logger.info(
                 "[run={}] analysis written: {}",
