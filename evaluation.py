@@ -486,8 +486,8 @@ async def _run_async(
         try:
             written = analysis.run_analysis(
                 run_dir,
-                # composite-score-by-subtype: 把 .env 里的子题型权重透传给
-                # analysis 层; analysis 模块自身不读 .env, 由 evaluation 提供。
+                # composite-score-by-subtype: pass through the subtype weights from .env
+                # to the analysis layer; the analysis module does not read .env itself, evaluation supplies them.
                 composite_weights_qtype=settings.COMPOSITE_WEIGHTS_QTYPE,
                 composite_weights_ctype=settings.COMPOSITE_WEIGHTS_CTYPE,
                 composite_overrides_qtype=settings.COMPOSITE_WEIGHT_OVERRIDES_QTYPE,

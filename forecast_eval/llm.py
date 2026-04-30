@@ -65,7 +65,8 @@ def get_client(settings: Settings) -> AsyncOpenAI:
 
 
 def _is_reasoning_model(model: str, patterns: list[str]) -> bool:
-    """推理模型 slug 子串匹配. 匹配到的模型调用时会跳过 temperature / top_p."""
+    """Substring match against reasoning-model slugs. Matched models skip
+    temperature / top_p when invoked."""
     lower = model.lower()
     return any(p.lower() in lower for p in patterns if p)
 
@@ -151,13 +152,15 @@ async def chat(
     attempt = 0
     last_exc: BaseException | None = None
 
-    # 推理模型不接受自定义 temperature / top_p (o-series / deepseek-r1 / qwq 等会返回 400),
-    # 命中 pattern 时显式不传这两个字段.
+    # Reasoning models do not accept custom temperature / top_p (o-series /
+    # deepseek-r1 / qwq etc. return 400); when a pattern matches we explicitly
+    # omit these two fields.
     reasoning_patterns = getattr(settings, "LLM_REASONING_MODEL_PATTERNS", []) or []
     skip_sampling = _is_reasoning_model(model, reasoning_patterns)
-    # OpenAI o-series / GPT-5 的 /v1/chat/completions 已弃用 `max_tokens`,
-    # 必须用 `max_completion_tokens`. 由 settings.MODEL_MAX_TOKENS_PARAM 按
-    # model slug 精确覆盖, 未声明的模型保持默认 `max_tokens`.
+    # OpenAI o-series / GPT-5 deprecated `max_tokens` on /v1/chat/completions
+    # and require `max_completion_tokens` instead. settings.MODEL_MAX_TOKENS_PARAM
+    # overrides exactly per model slug; unlisted models keep the default
+    # `max_tokens`.
     max_tokens_param = (
         getattr(settings, "MODEL_MAX_TOKENS_PARAM", {}) or {}
     ).get(model, "max_tokens")

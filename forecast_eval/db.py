@@ -413,9 +413,10 @@ def redact_api_key(raw: str | None, provider: str) -> dict[str, Any]:
     }
 
 
-# 单 key 字段 (str) → 直接 redact_api_key.
-# list 字段 (TAVILY_API_KEY 升级后): 逐个 redact, 落盘形如 [{prefix, sha256_12, ...}, ...]
-# 让事后审计能看到 "本 run 用了哪几把 key" 而不泄露明文.
+# Single-key fields (str) -> directly redact_api_key.
+# List fields (after TAVILY_API_KEY upgrade): redact each one, persisted as
+# [{prefix, sha256_12, ...}, ...]. This lets post-hoc audits see "which keys
+# this run used" without exposing plaintext.
 _API_KEY_FIELDS_STR = {
     "LLM_API_KEY": "llm",
     "LEAK_DETECTOR_API_KEY": "leak_detector",
@@ -483,7 +484,7 @@ def compose_virtual_slug(real_model: str, R: int, C: int) -> str:
     `analysis/grid.py` reverses it via `parse_virtual_slug`.
 
     The `::` delimiter is used because no LLM provider slug we encounter
-    contains it (OpenRouter `openai/gpt-5`, 阿里百炼 `qwen3-max`, etc.) and
+    contains it (OpenRouter `openai/gpt-5`, Alibaba Bailian `qwen3-max`, etc.) and
     `model_slug_safe` already normalises `:` to `_` for filesystem use.
 
     Raises ValueError if `real_model` itself contains `::` (would break

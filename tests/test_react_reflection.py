@@ -55,8 +55,9 @@ def _make_settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Setting
     monkeypatch.setenv("REACT_MIN_SEARCH_CALLS", "0")
     monkeypatch.setenv("REACT_MAX_NUDGES", "2")
     monkeypatch.setenv("ENABLE_WEB_SEARCH", "true")
-    # force-final-answer-near-limit-v1 默认开; 这里关掉以让 reflection-only 行为保持
-    # byte-identical. 新机制有专属测试 (test_force_final_*).
+    # force-final-answer-near-limit-v1 is on by default; turn it off here so the
+    # reflection-only behaviour stays byte-identical. The new mechanism has its
+    # own dedicated tests (test_force_final_*).
     monkeypatch.setenv("REACT_BUDGET_AWARENESS_PROTOCOL", "false")
     monkeypatch.setenv("REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT", "false")
     for k, v in overrides.items():

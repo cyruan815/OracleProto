@@ -276,16 +276,19 @@ def _write_per_model_composite_csv(
     report: CompositeReport,
     sampling_n_by_model: dict[str, int],
 ) -> Path:
-    """每个 (model) 一行的综合得分总表。
+    """Composite-score summary table with one row per (model).
 
-    列顺序 = ``model`` / ``sampling_n`` / ``weights_kind`` / ``_SUMMARY_FIELDS``
-    剩余数据列。读这张表的下游脚本只要把"原 ``per_model_summary.csv`` 路径"
-    换成本表路径，列名一一对齐（除了多出来的 ``weights_kind``）。
+    Column order = ``model`` / ``sampling_n`` / ``weights_kind`` / the
+    remaining data columns from ``_SUMMARY_FIELDS``. Downstream scripts
+    reading this table only need to swap "the original
+    ``per_model_summary.csv`` path" for this table's path; column names
+    align one-to-one (aside from the added ``weights_kind``).
 
     ``weights_kind``:
-    * ``default`` — 该 (model) 的所有指标都使用全局默认权重；
-    * ``overridden`` — 任一指标使用了 ``COMPOSITE_WEIGHT_OVERRIDES_*``
-      中的覆盖值。
+    * ``default`` — every metric for this (model) uses the global default
+      weights;
+    * ``overridden`` — any metric uses an override value from
+      ``COMPOSITE_WEIGHT_OVERRIDES_*``.
     """
     data_fields = [
         f for f in _SUMMARY_FIELDS if f not in ("model", "sampling_n")
@@ -309,11 +312,12 @@ def _write_composite_meta_json(
     qtype_report: CompositeReport | None,
     ctype_report: CompositeReport | None,
 ) -> Path:
-    """审计跟踪: 写权重快照、每个 (model, metric) 的 buckets_used /
-    weights_used_normalized / value / bucket_values。
+    """Audit trail: write a weights snapshot plus every (model, metric)'s
+    buckets_used / weights_used_normalized / value / bucket_values.
 
-    与 CSV 同分析目录共存; 对照 CSV 任何一列, 在 JSON 里都能查到该综合值
-    实际用了哪些桶、归一化后的权重、各桶原始 slice 值。
+    Coexists with the CSVs in the same analysis directory; for any column
+    in the CSV, the JSON shows which buckets the composite actually used,
+    the normalized weights, and the raw per-bucket slice values.
     """
 
     def _serialize_report(rep: CompositeReport) -> dict[str, Any]:

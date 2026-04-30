@@ -158,7 +158,7 @@ async def test_extra_tool_rejected_pre_flight() -> None:
 
 @respx.mock
 async def test_default_uses_max_tokens_field() -> None:
-    """未在 MODEL_MAX_TOKENS_PARAM 声明的模型, 请求体仍使用 `max_tokens`."""
+    """Models not declared in MODEL_MAX_TOKENS_PARAM still use `max_tokens` in the request body."""
     route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
         return_value=httpx.Response(200, json=_success_body())
     )
@@ -176,7 +176,7 @@ async def test_default_uses_max_tokens_field() -> None:
 
 @respx.mock
 async def test_max_completion_tokens_override_per_model() -> None:
-    """声明覆盖的模型, 请求体使用 `max_completion_tokens` 而非 `max_tokens`."""
+    """Models with override declared use `max_completion_tokens` instead of `max_tokens` in the request body."""
     route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
         return_value=httpx.Response(200, json=_success_body())
     )
@@ -195,7 +195,7 @@ async def test_max_completion_tokens_override_per_model() -> None:
 
 @respx.mock
 async def test_max_tokens_param_does_not_affect_other_models() -> None:
-    """覆盖只针对声明的 slug, 其它模型保持默认 `max_tokens`."""
+    """The override applies only to the declared slug; other models keep the default `max_tokens`."""
     route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
         return_value=httpx.Response(200, json=_success_body())
     )

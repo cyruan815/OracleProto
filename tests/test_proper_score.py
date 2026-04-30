@@ -134,7 +134,7 @@ def test_mbs_single_perfect() -> None:
 
 
 def test_mbs_multi_returns_none() -> None:
-    """Spec: multi题型 MUST 不输出 MBS, CSV 列写 NULL."""
+    """Spec: multi question type MUST NOT emit MBS; CSV column written as NULL."""
     assert mbs([0.5, 0.5, 0.5], [1, 0, 1], "multi") is None
 
 
@@ -142,7 +142,7 @@ def test_mbs_multi_returns_none() -> None:
 
 
 def test_brier_index_mean_then_sqrt() -> None:
-    """Spec: 平方根 MUST 先取均值再开方, MUST NOT 每题先取根再平均."""
+    """Spec: square root MUST be taken AFTER averaging, MUST NOT take per-question root first then average."""
     bs_values = [0.04, 0.16]  # √mean = √0.10 ≈ 0.316; mean √ = (0.2+0.4)/2 = 0.3
     bi_correct = 100.0 * (1.0 - math.sqrt((0.04 + 0.16) / 2))
     bi_wrong = 100.0 * (1.0 - (math.sqrt(0.04) + math.sqrt(0.16)) / 2)
@@ -285,7 +285,7 @@ def test_aggregate_empty_returns_all_none() -> None:
 
 
 def test_per_question_scores_multi_no_dec_no_mbs() -> None:
-    """multi题型: bs_dec MUST be None; mbs MUST be None."""
+    """multi question type: bs_dec MUST be None; mbs MUST be None."""
     pq = per_question_scores_for(
         question_id="q_multi", choice_type="multi",
         probs=[0.8, 0.2, 0.6, 0.1], obs=[1, 0, 1, 0],
@@ -296,7 +296,7 @@ def test_per_question_scores_multi_no_dec_no_mbs() -> None:
 
 
 def test_per_question_scores_single_has_dec_and_mbs() -> None:
-    """single题型: bs_dec = k * bs_lab; mbs is a real number."""
+    """single question type: bs_dec = k * bs_lab; mbs is a real number."""
     pq = per_question_scores_for(
         question_id="q_single", choice_type="single",
         probs=[0.7, 0.3], obs=[1, 0],

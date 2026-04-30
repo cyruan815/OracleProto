@@ -1,42 +1,51 @@
-"""综合得分按子题型加权（composite-score-by-subtype）。
+"""Composite score weighted by subtype (composite-score-by-subtype).
 
-此模块承载 ``per_model_summary.csv`` 全部数据列在两个维度上独立做的
-"先按桶分别算 → 再按权重合成 → 缺失桶剔除并归一化"的合成逻辑。
+This module hosts the aggregation logic for every data column in
+``per_model_summary.csv``, applied independently along two dimensions:
+"compute per bucket -> aggregate by weights -> drop missing buckets and
+renormalize".
 
-## 维度
+## Dimensions
 
 * ``question_type``: ``yes_no`` / ``binary_named`` / ``multiple_choice``
 * ``choice_type``:   ``single`` / ``multi``
 
-每个维度独立做一遍合成，互不影响（``multiple_choice`` 内部既有 single 也有
-multi，两个维度并不正交，但这就是用户语义里的"两种切法"）。
+Each dimension is aggregated independently; they do not interact
+(``multiple_choice`` internally contains both single and multi, so the two
+dimensions are not orthogonal — but this is exactly what users mean by
+"two ways to slice").
 
-## 公式
+## Formula
 
-对每个 (model, dimension, metric)：
+For each (model, dimension, metric):
 
 $$
 \\text{composite}_{m} = \\frac{\\sum_{b \\in B_{\\text{valid}}} w_{m,b} \\cdot v_{m,b}}{\\sum_{b \\in B_{\\text{valid}}} w_{m,b}}
 $$
 
-其中 :math:`B_{\\text{valid}}` 是该 (model, metric) 下 slice 实测值非
-``None`` 且权重 > 0 的桶集合。全 ``None`` → composite 返 ``None``。
+where :math:`B_{\\text{valid}}` is the set of buckets under that
+(model, metric) whose slice measurement is not ``None`` and whose weight is
+> 0. All-``None`` -> composite returns ``None``.
 
-## 与 ``_SUMMARY_FIELDS`` 的对齐
+## Alignment with ``_SUMMARY_FIELDS``
 
-输出列与 ``writers._SUMMARY_FIELDS``（去掉元数据列 ``model`` /
-``sampling_n``）一一对应——这意味着读
-``per_model_composite_by_question_type.csv`` 即可直接得到"按子题型加权后
-的总表"，下游脚本只需改文件路径。
+Output columns correspond one-to-one with ``writers._SUMMARY_FIELDS``
+(minus the metadata columns ``model`` / ``sampling_n``) — meaning that
+reading ``per_model_composite_by_question_type.csv`` directly gives the
+"summary table weighted by subtype", and downstream scripts only need to
+swap the file path.
 
-## v5 离散家族的"按桶切"
+## Per-bucket slicing for the v5 discrete family
 
 ``fss`` / ``cohen_kappa`` / ``hamming_score`` / ``fleiss_kappa`` /
-``mean_entropy`` / ``vci`` / ``mvg`` 在 ``__init__.py`` 顶层是按 model 全局
-计算的（写入 ``per_model_summary.csv``），但要做按桶加权合成，必须先按桶
-切再算——本模块的 :func:`slice_v5_metrics_by_bucket` 接管这件事。其结果
-**同时**回流给 ``writers._write_slice_csv``，让 ``per_model_by_*.csv`` 这
-两张明细表也带上这些列（不破坏既有"v3 + prob"的列序，只在尾部追加）。
+``mean_entropy`` / ``vci`` / ``mvg`` are computed globally per model at the
+top of ``__init__.py`` (written into ``per_model_summary.csv``), but for
+weighted bucket aggregation they must be sliced per bucket before being
+computed — :func:`slice_v5_metrics_by_bucket` in this module takes care of
+that. Its results **also** flow back into ``writers._write_slice_csv``, so
+the two detail tables ``per_model_by_*.csv`` carry these columns as well
+(without disturbing the existing "v3 + prob" column order — they are simply
+appended at the tail).
 """
 from __future__ import annotations
 
@@ -49,8 +58,9 @@ from .flatten import SampleRow
 from .proper_score import ModelProbabilisticAggregate
 
 
-# 默认权重 (与 ``config.Settings`` 默认值同值, 在 ``run_analysis`` 未拿到
-# Settings 时作为零配置回退使用)。校验由 Settings 那一侧负责。
+# Default weights (same values as ``config.Settings`` defaults; used as a
+# zero-config fallback when ``run_analysis`` did not receive Settings).
+# Validation is handled on the Settings side.
 DEFAULT_WEIGHTS_QTYPE: dict[str, float] = {
     "yes_no": 0.15,
     "binary_named": 0.15,
@@ -60,14 +70,15 @@ DEFAULT_WEIGHTS_CTYPE: dict[str, float] = {"single": 0.40, "multi": 0.60}
 
 
 # --------------------------------------------------------------------------- #
-# 已知指标白名单
+# Known-metric allowlist
 # --------------------------------------------------------------------------- #
 
 
-# 必须与 ``writers._SUMMARY_FIELDS``（除去 ``model`` / ``sampling_n``）一致；
-# 在 ``tests/test_composite_score.py`` 里有对齐断言，防止两边漂移。指标名拼
-# 错或者用了未在白名单上的名字 → ``compute_composite`` 在入口 raise，因为
-# 这一定是用户在 ``COMPOSITE_WEIGHT_OVERRIDES_*`` 里写错了。
+# Must match ``writers._SUMMARY_FIELDS`` (excluding ``model`` /
+# ``sampling_n``); ``tests/test_composite_score.py`` has an alignment
+# assertion to prevent the two sides from drifting. A misspelled metric name
+# or one not on the allowlist -> ``compute_composite`` raises at the entry,
+# because this must be a user typo in ``COMPOSITE_WEIGHT_OVERRIDES_*``.
 KNOWN_METRICS: frozenset[str] = frozenset(
     {
         # accuracy.Aggregate.as_ordered_dict()
@@ -117,17 +128,18 @@ KNOWN_METRICS: frozenset[str] = frozenset(
 
 
 # --------------------------------------------------------------------------- #
-# v5 离散家族的"按桶切"
+# Per-bucket slicing for the v5 discrete family
 # --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
 class V5SliceResult:
-    """一个 (model, bucket) 下的 v5 离散家族 slice 结果。
+    """v5 discrete-family slice result for a single (model, bucket).
 
-    ``fss`` 携带 ``fss / fss_pe_mean`` 两列，所以保留原 ``fss(...)`` 字典；
-    ``cohen_kappa`` / ``hamming_score`` 各是单值；``consistency`` 给出
-    ``fleiss_kappa`` / ``mean_entropy`` / ``vci`` / ``mvg`` 四列。
+    ``fss`` carries the two columns ``fss / fss_pe_mean``, so the original
+    ``fss(...)`` dict is preserved; ``cohen_kappa`` / ``hamming_score`` are
+    each single values; ``consistency`` provides four columns
+    ``fleiss_kappa`` / ``mean_entropy`` / ``vci`` / ``mvg``.
     """
 
     fss_result: dict[str, Any] | None
@@ -143,11 +155,14 @@ def slice_v5_metrics_by_bucket(
     *,
     key_fn: Callable[[SampleRow], str],
 ) -> dict[str, V5SliceResult]:
-    """按 ``key_fn(sample)`` 把 v5 离散家族指标分别在每个桶上重新计算。
+    """Recompute the v5 discrete-family metrics on each bucket grouped by
+    ``key_fn(sample)``.
 
-    ``__init__.py`` 顶层会用 ``key_fn=lambda s: s.question_type`` 与
-    ``key_fn=lambda s: s.choice_type`` 各调一次。空桶（无 sample）静默
-    跳过，每桶 None 桶位由调用方在合成时按"剔除并归一化"处理。
+    The top of ``__init__.py`` invokes this once with
+    ``key_fn=lambda s: s.question_type`` and once with
+    ``key_fn=lambda s: s.choice_type``. Empty buckets (no samples) are
+    silently skipped; per-bucket None slots are handled by the caller during
+    aggregation via "drop and renormalize".
     """
     by_bucket: dict[str, list[SampleRow]] = {}
     for s in samples:
@@ -157,16 +172,18 @@ def slice_v5_metrics_by_bucket(
     for bucket, bucket_samples in by_bucket.items():
         if not bucket_samples:
             continue
-        # cohen_kappa / hamming 共用 by_q（只看本桶内的题）。
+        # cohen_kappa / hamming share by_q (looking only at questions in this bucket).
         by_q: dict[str, list[SampleRow]] = {}
         for s in bucket_samples:
             by_q.setdefault(s.question_id, []).append(s)
-        # cohen_kappa 在桶内全是 multi 时仍然有意义（per_e_q=0.5）；
-        # 在桶内全是 single 时仍然按 1/k 计算。函数自身处理 None 退化。
+        # cohen_kappa is still meaningful when the bucket is all-multi
+        # (per_e_q=0.5); when the bucket is all-single it is still computed
+        # as 1/k. The function itself handles None degeneracy.
         kappa = cohen_kappa(by_q, gt_map)
-        # hamming_score 仅对 multi 有定义（accuracy.hamming_score 内部
-        # 跳过 single），所以 yes_no / binary_named 桶下必为 None；这是
-        # 预期行为，合成时该桶被剔除。
+        # hamming_score is only defined for multi (accuracy.hamming_score
+        # internally skips single), so it must be None under the yes_no /
+        # binary_named buckets; this is the expected behavior — that bucket
+        # is dropped during aggregation.
         hamming_v = hamming_score(bucket_samples, gt_map)
         fss_result = fss(bucket_samples, gt_map)
         consistency = build_consistency_report(
@@ -182,12 +199,12 @@ def slice_v5_metrics_by_bucket(
 
 
 # --------------------------------------------------------------------------- #
-# slice → 列值
+# slice -> column values
 # --------------------------------------------------------------------------- #
 
 
 def _aggregate_to_columns(agg: Aggregate | None) -> dict[str, float | None]:
-    """``Aggregate`` → 与 ``_SUMMARY_FIELDS_V3`` 对齐的列字典（不取整）。"""
+    """``Aggregate`` -> column dict aligned with ``_SUMMARY_FIELDS_V3`` (not rounded)."""
     if agg is None:
         return {
             "eligible_samples": None,
@@ -242,8 +259,8 @@ def _aggregate_to_columns(agg: Aggregate | None) -> dict[str, float | None]:
 
 
 def _v5_slice_to_columns(res: V5SliceResult | None) -> dict[str, float | None]:
-    """``V5SliceResult`` → fss / fss_pe_mean / cohen_kappa / hamming_score /
-    fleiss_kappa / mean_entropy / vci / mvg 八列。"""
+    """``V5SliceResult`` -> the eight columns fss / fss_pe_mean / cohen_kappa /
+    hamming_score / fleiss_kappa / mean_entropy / vci / mvg."""
     if res is None:
         return {
             "fss": None,
@@ -277,8 +294,9 @@ def _v5_slice_to_columns(res: V5SliceResult | None) -> dict[str, float | None]:
 def _prob_slice_to_columns(
     agg: ModelProbabilisticAggregate | None,
 ) -> dict[str, float | None]:
-    """``ModelProbabilisticAggregate`` → bi / bi_dec / nll / mbs /
-    abi_crowd / abi_uniform / fallback_share 七列（不取整，给合成器原始值）。"""
+    """``ModelProbabilisticAggregate`` -> the seven columns bi / bi_dec /
+    nll / mbs / abi_crowd / abi_uniform / fallback_share (not rounded; raw
+    values for the aggregator)."""
     if agg is None:
         return {
             "bi": None,
@@ -306,10 +324,11 @@ def collect_bucket_values(
     v5_slice: dict[str, dict[str, V5SliceResult]],
     prob_slice: dict[str, dict[str, ModelProbabilisticAggregate]] | None,
 ) -> dict[str, dict[str, dict[str, float | None]]]:
-    """把多个 slice 来源拼成 ``{model: {metric: {bucket: value}}}``。
+    """Stitch multiple slice sources into ``{model: {metric: {bucket: value}}}``.
 
-    缺失的 (model, bucket) 被表示为 "桶位上每个指标都是 None" 而不是
-    "桶不存在"——这样合成函数可以一致地按"None 桶剔除"处理。
+    A missing (model, bucket) is represented as "every metric in that bucket
+    slot is None" rather than "the bucket does not exist" — so the aggregator
+    can consistently apply "drop None buckets".
     """
     out: dict[str, dict[str, dict[str, float | None]]] = {}
     models = set(aggregate_slice) | set(v5_slice)
@@ -340,13 +359,13 @@ def collect_bucket_values(
 
 
 # --------------------------------------------------------------------------- #
-# 合成
+# Aggregation
 # --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
 class CompositeMetricInfo:
-    """单个 (model, metric) 的合成结果及元信息。"""
+    """Aggregation result and metadata for a single (model, metric)."""
 
     value: float | None
     buckets_used: tuple[str, ...]
@@ -357,7 +376,7 @@ class CompositeMetricInfo:
 
 @dataclass(frozen=True)
 class CompositeReport:
-    """一个维度（``question_type`` 或 ``choice_type``）下的合成结果。"""
+    """Aggregation result under one dimension (``question_type`` or ``choice_type``)."""
 
     dimension: str
     weights_default: dict[str, float]
@@ -367,7 +386,7 @@ class CompositeReport:
     )
 
     def is_overridden(self, model: str) -> bool:
-        """该 (model) 行是否使用了任意 override（决定 ``weights_kind`` 列）。"""
+        """Whether this (model) row used any override (determines the ``weights_kind`` column)."""
         if not self.overrides:
             return False
         per_metric = self.per_model.get(model, {})
@@ -382,7 +401,7 @@ def _select_weights(
     weights_default: dict[str, float],
     overrides: dict[str, dict[str, float]],
 ) -> tuple[dict[str, float], str]:
-    """挑选指标对应的权重 dict 与来源标记 (``"default"`` / ``"overridden"``)。"""
+    """Pick the weight dict for the metric and the source tag (``"default"`` / ``"overridden"``)."""
     if metric in overrides and overrides[metric]:
         return overrides[metric], "overridden"
     return weights_default, "default"
@@ -392,7 +411,7 @@ def _weighted_average(
     bucket_values: dict[str, float | None],
     weights: dict[str, float],
 ) -> tuple[float | None, tuple[str, ...], dict[str, float]]:
-    """加权平均: 仅在桶值非 None 且权重 > 0 时纳入分母。"""
+    """Weighted average: a bucket is included in the denominator only when its value is not None and its weight is > 0."""
     contributors: list[tuple[str, float, float]] = []
     for bucket, value in bucket_values.items():
         if value is None:
@@ -419,10 +438,11 @@ def compute_composite(
     weights_default: dict[str, float],
     overrides: dict[str, dict[str, float]],
 ) -> CompositeReport:
-    """对每个 (model, metric) 计算加权综合值并返回 :class:`CompositeReport`。
+    """Compute the weighted composite for each (model, metric) and return a :class:`CompositeReport`.
 
-    指标名拼错（不在 :data:`KNOWN_METRICS` 内）会在这里 raise——这是设计
-    稿里"拼错指标名一定要让用户知道"的兑现点。
+    A misspelled metric name (not in :data:`KNOWN_METRICS`) raises here —
+    this is the redemption point of the design's promise that "a misspelled
+    metric name must be surfaced to the user".
     """
     if dimension not in ("question_type", "choice_type"):
         raise ValueError(

@@ -29,15 +29,13 @@ class AuthError(Exception):
 
 # v5.1 (harness-resilience): content-policy needles for HTTP 400 bodies.
 # `_body_matches` runs case-insensitive substring matching on `_error_body`,
-# so needles MUST be lowercase ASCII or already-lowercase-CJK (CJK is not
-# affected by .lower()). Update only here when a new provider's rejection
-# vocabulary appears.
+# so needles MUST be lowercase ASCII. Update only here when a new provider's
+# rejection vocabulary appears.
 #
 # Coverage:
 # - English (OpenAI / Anthropic style): content_policy / content_filter / safety
 # - Aliyun DashScope (qwen* via dashscope.aliyuncs.com): data_inspection_failed,
 #   "inappropriate content" (the canonical message body)
-# - 智谱 / 百川 / 月之暗面 / 通用国内 provider: 中文审核 token
 CONTENT_POLICY_NEEDLES: tuple[str, ...] = (
     "content_policy",
     "content filter",
@@ -47,10 +45,6 @@ CONTENT_POLICY_NEEDLES: tuple[str, ...] = (
     "data_inspection_failed",
     "inappropriate content",
     "sensitive",
-    "敏感",
-    "违规",
-    "不当内容",
-    "审核未通过",
 )
 
 
@@ -129,7 +123,7 @@ def classify(exc: BaseException) -> ErrorKind:
             # carry both `data_inspection_failed` (provider-side moderation,
             # we should not retry but ALSO should not silently look like a
             # bug-in-our-request) and a generic "invalid request" wrapper.
-            # Spec llm-integration §"Content policy 不重试" pins priority.
+            # Spec llm-integration §"Content policy: no retry" pins priority.
             if _body_matches(exc, CONTENT_POLICY_NEEDLES):
                 return ErrorKind.CONTENT_POLICY
             if _body_matches(exc, ("model_not_found", "invalid_request", "invalid request", "invalid model")):

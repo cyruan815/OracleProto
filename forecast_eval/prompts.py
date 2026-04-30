@@ -5,21 +5,29 @@ import json
 from .types import Question
 
 
-# 小写字母/符号标签在 markdown 里容易被反引号/下划线/星号吞。>26 选项时标签
-# 会落到 `[` `\` `]` `^` `_` `` ` `` `a` `b` ... 这些字符上，因此我们统一给这些
-# 非 A–Z 标签加反引号包裹，防止 LLM 看到的 prompt 里被 markdown 处理器吃掉。
+# Lowercase / symbolic labels are easily eaten by markdown (backticks /
+# underscores / asterisks). With >26 options the labels land on `[`, `\`, `]`,
+# `^`, `_`, `` ` ``, `a`, `b`, ... so we uniformly wrap any non-A-Z label in
+# backticks to prevent the markdown processor from swallowing them in the
+# prompt the LLM sees.
 _BACKTICK_SAFE_ASCII_RANGE = set(range(ord("A"), ord("Z") + 1))
 
 
-# 反思协议. 作为 user message 末尾的附加段落, 不进 dataset_metadata.prompt_reconstruction
-# (因此 prompt_templates_hash 不受影响), 但会作为 user_prompt 字段落库, 完全可复盘.
-# 设计目标: 用 prompt-engineering 把模型从 "1 次 web_search 直接答" 拉到
-# "≥3 次不同角度 + 每次反思 + 反方向自检", 主要靠协议本身驱动, 不需要硬性最低次数.
+# Reflection protocol. Appended as a tail paragraph to the user message; it is
+# NOT part of dataset_metadata.prompt_reconstruction (so prompt_templates_hash
+# is unaffected) but is persisted in the user_prompt field so the run is fully
+# reproducible.
+# Design goal: use prompt engineering to pull the model from "1 web_search and
+# answer directly" to ">=3 distinct angles + reflection after each + opposite-
+# direction self-check", driven mostly by the protocol itself rather than a
+# hard minimum count.
 #
-# v4 新增 BELIEF_PROTOCOL: 与 reflection 协议平行的尾部追加段, 要求 LLM 在
-# \\boxed{...} 之前再输出一段 <belief>...</belief> 严格 JSON, 让概率族指标
-# (Brier / NLL / MBS / ECE / 校准曲线) 能直接落地. 同样不进 prompt_templates_hash;
-# 启用条件由 Settings.BELIEF_PROTOCOL 控制, 指纹独立记录在 run_meta.belief_protocol_*.
+# v4 adds BELIEF_PROTOCOL: a tail-attached section parallel to the reflection
+# protocol, requiring the LLM to emit a strict <belief>...</belief> JSON block
+# before \\boxed{...}, so probability-family metrics (Brier / NLL / MBS / ECE /
+# calibration curves) can be computed directly. Likewise NOT included in
+# prompt_templates_hash; enabled via Settings.BELIEF_PROTOCOL with the
+# fingerprint recorded separately in run_meta.belief_protocol_*.
 REFLECTION_PROTOCOL = """\
 
 ---

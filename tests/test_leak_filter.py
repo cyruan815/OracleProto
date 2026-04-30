@@ -141,11 +141,11 @@ async def test_detect_one_drop() -> None:
 
 
 async def test_detect_one_invalid_json_retry() -> None:
-    """非合法 JSON 第一次, 合法第二次 → 最终成功."""
+    """Invalid JSON on first attempt, valid on second -> eventual success."""
     settings = _StubSettings(LEAK_DETECTOR_RETRY_MAX=2)
     client = _scripted_client(
         [
-            _envelope("I think it should keep, but..."),  # 非 JSON, 重试
+            _envelope("I think it should keep, but..."),  # not JSON, retry
             _envelope(json.dumps({"verdict": "keep", "reason": "ok"})),
         ]
     )
@@ -170,7 +170,7 @@ async def test_detect_one_invalid_verdict_retry() -> None:
 
 
 async def test_detect_one_network_retry_exhausted() -> None:
-    """三次 timeout (1 主 + 2 retry = 3 attempts) → failed:network."""
+    """Three timeouts (1 main + 2 retries = 3 attempts) -> failed:network."""
     settings = _StubSettings(LEAK_DETECTOR_RETRY_MAX=2)
     client = _scripted_client(
         [
@@ -186,10 +186,10 @@ async def test_detect_one_network_retry_exhausted() -> None:
 
 
 async def test_detect_one_auth_no_retry_no_propagate() -> None:
-    """AUTH 错误立即 fail, 不重试, AuthError MUST NOT propagate."""
+    """AUTH error fails immediately, no retry, AuthError MUST NOT propagate."""
     settings = _StubSettings(LEAK_DETECTOR_RETRY_MAX=2)
-    # 模拟 401: 用 httpx.HTTPStatusError 携带 response.status_code=401, errors.classify
-    # 会读取 status_code 判 AUTH.
+    # Simulate 401: use httpx.HTTPStatusError carrying response.status_code=401;
+    # errors.classify reads status_code to identify AUTH.
     response = httpx.Response(
         401, request=httpx.Request("POST", "https://api.detector.test/v1/x")
     )
@@ -215,9 +215,10 @@ async def test_detect_one_auth_no_retry_no_propagate() -> None:
 async def test_detect_one_handles_explicit_auth_error() -> None:
     """forecast_eval.errors.AuthError raised directly is also caught locally."""
     settings = _StubSettings(LEAK_DETECTOR_RETRY_MAX=2)
-    # 直接抛 AuthError 应被本地 catch (errors.classify 会因没 status_code 走 UNKNOWN
-    # 路径, 但我们在 leak_filter 内是用 ErrorKind.AUTH 判定 — 通过 HTTPStatusError 确认).
-    # 这里转用一个能被 classify 识别为 AUTH 的: response 401.
+    # Raising AuthError directly should be caught locally (errors.classify will
+    # take the UNKNOWN path because there's no status_code, but inside leak_filter
+    # we use ErrorKind.AUTH for the decision -- confirmed via HTTPStatusError).
+    # Switch here to one that classify can recognise as AUTH: response 401.
     response = httpx.Response(
         403, request=httpx.Request("POST", "https://api.detector.test/v1/x")
     )
@@ -265,7 +266,7 @@ def test_assert_detector_safe_passes_clean_kwargs() -> None:
 
 
 async def test_detector_request_no_tools_in_kwargs() -> None:
-    """实际调出去的 kwargs MUST NOT 含 tools / plugins / tool_choice."""
+    """The kwargs actually dispatched MUST NOT include tools / plugins / tool_choice."""
     settings = _StubSettings()
     client = _capturing_client(
         [_envelope(json.dumps({"verdict": "keep", "reason": "ok"}))]
@@ -319,7 +320,7 @@ async def test_filter_search_result_partial_drop() -> None:
         "keep",
         "drop",
     ]
-    # 部分 drop 时 answer 保留 (已知折中).
+    # On partial drop, answer is retained (known trade-off).
     assert out.answer == "some answer"
 
 
@@ -341,7 +342,7 @@ async def test_filter_search_result_all_drop_clears_answer() -> None:
 
 
 async def test_filter_search_result_fail_action_drop() -> None:
-    """FAIL_ACTION=drop: failed 条目被剔除, audit 含 failed:* verdict."""
+    """FAIL_ACTION=drop: failed entries removed, audit contains failed:* verdict."""
     settings = _StubSettings(LEAK_DETECTOR_RETRY_MAX=0, LEAK_DETECTOR_FAIL_ACTION="drop")
     client = _scripted_client(
         [
@@ -365,7 +366,7 @@ async def test_filter_search_result_fail_action_drop() -> None:
 
 
 async def test_filter_search_result_fail_action_keep() -> None:
-    """FAIL_ACTION=keep: failed 条目透传, verdict 仍记 failed:*."""
+    """FAIL_ACTION=keep: failed entries passed through, verdict still recorded as failed:*."""
     settings = _StubSettings(LEAK_DETECTOR_RETRY_MAX=0, LEAK_DETECTOR_FAIL_ACTION="keep")
     client = _scripted_client(
         [
@@ -379,13 +380,13 @@ async def test_filter_search_result_fail_action_keep() -> None:
     out = await leak_filter.filter_search_result(
         result, end_date="2026-01-17", settings=settings, client=client
     )
-    # keep + failed 透传, drop 剔除 → 剩 t0, t1.
+    # keep + failed passed through, drop removed -> remaining t0, t1.
     assert [it.title for it in out.results] == ["t0", "t1"]
     assert out.audit["detector_verdicts"][1].startswith("failed:")
 
 
 async def test_filter_search_result_concurrency_limit() -> None:
-    """CONCURRENCY=2: 5 条并发, 同时 in-flight ≤ 2."""
+    """CONCURRENCY=2: 5 concurrent items, simultaneous in-flight <= 2."""
     settings = _StubSettings(LEAK_DETECTOR_CONCURRENCY=2)
     in_flight = {"n": 0, "peak": 0}
     lock = asyncio.Lock()
@@ -411,18 +412,19 @@ async def test_filter_search_result_concurrency_limit() -> None:
 
 
 async def test_filter_search_result_question_not_leaked() -> None:
-    """detector messages MUST NOT 含 question 字段值. 用 unique 字符串验证."""
+    """detector messages MUST NOT contain the question field value. Verify with a unique string."""
     settings = _StubSettings()
     client = _capturing_client(
         [_verdict_envelope("keep"), _verdict_envelope("keep")]
     )
-    # 把 unique 字符串嵌入 item 之外的所有可能字段, 确认 detector message 不含它.
+    # Embed the unique string in every possible field outside the item, then
+    # confirm the detector message does not contain it.
     sentinel = "QUESTION_TEXT_SENTINEL_2026"
     items = [
         _make_item(title="t0", content="completely safe content"),
         _make_item(title="t1", content="completely safe content"),
     ]
-    # 故意把 sentinel 放在一个第三方变量里, 不传给 filter_search_result.
+    # Intentionally place the sentinel in a third-party variable, not passed to filter_search_result.
     _unused = sentinel  # noqa: F841 — confirms we never reference the sentinel
     result = _result_with(items)
     await leak_filter.filter_search_result(
@@ -469,10 +471,10 @@ def test_prompt_template_contains_six_principles() -> None:
 
 
 def test_detector_client_independent_of_main(monkeypatch: pytest.MonkeyPatch) -> None:
-    """get_detector_client(settings) 与 llm.get_client(settings) MUST 返回不同实例."""
+    """get_detector_client(settings) and llm.get_client(settings) MUST return different instances."""
     from forecast_eval import llm as llmmod
 
-    # 重置两个模块的单例, 避免测试相互污染.
+    # Reset both module singletons to avoid cross-test pollution.
     monkeypatch.setattr(leak_filter, "_detector_client", None)
     monkeypatch.setattr(llmmod, "_client", None)
 
@@ -495,8 +497,8 @@ def test_detector_client_independent_of_main(monkeypatch: pytest.MonkeyPatch) ->
 async def test_filter_uses_passed_settings_not_global(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """filter_search_result(..., settings=local) 时 detector 调用 MUST 使用
-    local.LEAK_DETECTOR_MODEL, 而非任何全局值.
+    """When filter_search_result(..., settings=local) is invoked, the detector
+    call MUST use local.LEAK_DETECTOR_MODEL, not any global value.
     """
     settings_a = _StubSettings(LEAK_DETECTOR_MODEL="model-A")
     settings_b = _StubSettings(LEAK_DETECTOR_MODEL="model-B")
@@ -507,7 +509,7 @@ async def test_filter_uses_passed_settings_not_global(
         result, end_date="2026-01-17", settings=settings_b, client=client
     )
     assert client.captured[0]["model"] == "model-B"
-    # settings_a 未被使用 — 防 closure-captures-global 类回归.
+    # settings_a was not used -- guards against closure-captures-global regressions.
     assert client.captured[0]["model"] != settings_a.LEAK_DETECTOR_MODEL
 
 
@@ -543,6 +545,6 @@ def test_render_user_message_uses_placeholders_for_missing_fields() -> None:
         title="t", url="u", content="c", published_date=None, raw_content=None
     )
     rendered = leak_filter._render_user_message(item, "2026-01-17")
-    assert "(unknown)" in rendered  # published_date 占位
-    assert "(empty)" in rendered  # raw_content 占位
+    assert "(unknown)" in rendered  # published_date placeholder
+    assert "(empty)" in rendered  # raw_content placeholder
     assert "None" not in rendered.split("raw_content:")[1].split("\n")[0]

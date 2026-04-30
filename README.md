@@ -43,7 +43,7 @@ conda activate forecast
 ```bash
 cp .env.example .env
 # Edit .env and fill LLM_API_KEY + TAVILY_API_KEY.
-# LLM_BASE_URL accepts any OpenAI-compatible endpoint (OpenRouter / 阿里百炼 /
+# LLM_BASE_URL accepts any OpenAI-compatible endpoint (OpenRouter / Aliyun Bailian /
 # OpenAI / DeepSeek / SiliconFlow / local vLLM — see .env.example comments).
 # Also adjust MODELS and MODEL_TRAINING_CUTOFFS for the models you want to
 # compare; every model you evaluate should have a cutoff declared so that
@@ -104,17 +104,20 @@ runs/
       per_model_summary.md          # markdown table with v5 main columns;
                                     #   probabilistic columns flagged with
                                     #   `†` and a K=5-resolution disclaimer
-      per_model_by_question_type.csv  # 现已附 v5 列 (FSS / Cohen κ / Hamming /
-                                      #   Fleiss κ / 等), 与 per_model_summary
-                                      #   列序对齐
-      per_model_by_choice_type.csv    # 同上, 按 single / multi 切
-      per_model_composite_by_question_type.csv  # 综合得分总表 (按 question_type
-                                                #   桶加权合成所有指标; 列序与
-                                                #   per_model_summary 对齐, 多
-                                                #   一列 weights_kind)
-      per_model_composite_by_choice_type.csv    # 同上, 按 single / multi 切
-      composite_meta.json             # 综合得分审计跟踪: 权重快照 + 每个
-                                      #   (model, metric) 的 buckets_used /
+      per_model_by_question_type.csv  # now includes v5 columns (FSS / Cohen κ /
+                                      #   Hamming / Fleiss κ / etc.), aligned
+                                      #   with per_model_summary column order
+      per_model_by_choice_type.csv    # same as above, sliced by single / multi
+      per_model_composite_by_question_type.csv  # composite score table (weighted
+                                                #   composition of every metric
+                                                #   across question_type buckets;
+                                                #   column order aligned with
+                                                #   per_model_summary, plus an
+                                                #   extra weights_kind column)
+      per_model_composite_by_choice_type.csv    # same as above, sliced by single / multi
+      composite_meta.json             # composite-score audit trail: weight
+                                      #   snapshot + per (model, metric):
+                                      #   buckets_used /
                                       #   weights_used_normalized / value /
                                       #   bucket_values
       per_model_by_difficulty.csv   # γ-tertile slice (low/mid/high)
@@ -175,44 +178,61 @@ runs/
 ```
 
 <!-- exam-score-metric: -->
-**`exam_score_at_n_avg`** 列（紧跟 `at_least_all_at_n` 之后）—— 考试式部分得分：题正确答案集 $G$、模型选择 $\hat S$；当 $\hat S$ 含错选时该 sample 得 0，否则得 $|\hat S \cap G| / |G|$（漏选按比例扣分）。`cutoff` 与 `error` 剔除（"未完成过程"），parse 失败计 0（"完成但答错"）；先题内取均值得 $e_q$，再题间等权求均值。与 FSS（含 chance correction、软惩罚 FP）并列存在 —— 适合"一句话解释给非论文读者"。
+**`exam_score_at_n_avg`** column (immediately following `at_least_all_at_n`) —
+exam-style partial credit: ground-truth answer set $G$, model selection
+$\hat S$; when $\hat S$ contains any wrong selection the sample scores 0,
+otherwise it scores $|\hat S \cap G| / |G|$ (missed selections are penalised
+proportionally). `cutoff` and `error` samples are excluded ("process not
+completed"), parse failures count as 0 ("completed but wrong"); first take
+the per-question mean to obtain $e_q$, then average across questions with
+equal weight. Coexists with FSS (which has chance correction and soft FP
+penalty) — suited for a "one-sentence explanation for non-paper readers".
 
 <!-- composite-score-by-subtype: -->
-### 综合得分按子题型加权（composite-score-by-subtype）
+### Composite score weighted by sub-question type (composite-score-by-subtype)
 
-`per_model_summary.csv` 把所有题型混算为单一均值；`per_model_composite_*.csv`
-则在两个维度上各做一遍"按子题型加权合成"：
+`per_model_summary.csv` mixes every question type into a single mean;
+`per_model_composite_*.csv` performs a "weighted composition by sub-question
+type" along two dimensions:
 
-* `per_model_composite_by_question_type.csv` —— 桶 = `yes_no` /
-  `binary_named` / `multiple_choice`；
-* `per_model_composite_by_choice_type.csv` —— 桶 = `single` / `multi`。
+* `per_model_composite_by_question_type.csv` — buckets = `yes_no` /
+  `binary_named` / `multiple_choice`;
+* `per_model_composite_by_choice_type.csv` — buckets = `single` / `multi`.
 
-公式（对每个 model × metric × dimension 独立）：
+Formula (independent per model × metric × dimension):
 
 $$\text{composite}_m = \frac{\sum_{b\in B_{\text{valid}}} w_{m,b} \cdot v_{m,b}}{\sum_{b\in B_{\text{valid}}} w_{m,b}}$$
 
-$B_{\text{valid}}$ 是该 (model, metric) 下子题型实测值非 None 且权重 > 0
-的桶集合——缺失桶被剔除并按比例归一化（不会被当作 0）；全 None → composite
-返 None；权重和不要求等于 1（自动归一化）。
+$B_{\text{valid}}$ is the set of buckets under that (model, metric) where the
+sub-question-type measurement is non-None and the weight is > 0 — missing
+buckets are excluded and the remaining weights are renormalised
+proportionally (they are not treated as 0); when everything is None, the
+composite returns None; weights are not required to sum to 1 (automatically
+normalised).
 
-**默认权重**（按"难题区分度高"原则）：
+**Default weights** (following the "harder questions discriminate better"
+principle):
 
-| 维度 | 桶 | 默认权重 | 难度依据 |
+| Dimension | Bucket | Default weight | Difficulty rationale |
 |---|---|---|---|
-| `question_type` | `yes_no` | 0.15 | k=2，盲猜 50%，模型间区分度低 |
-| `question_type` | `binary_named` | 0.15 | k=2，加名称识别但仍二选一 |
-| `question_type` | `multiple_choice` | 0.70 | k=2..N 跨度大，含多选，区分度最高 |
-| `choice_type` | `single` | 0.40 | 整体偏易（含 yes_no / binary_named） |
-| `choice_type` | `multi` | 0.60 | 真正的多选，几乎所有模型都很差，区分度高 |
+| `question_type` | `yes_no` | 0.15 | k=2, blind guess 50%, low discrimination between models |
+| `question_type` | `binary_named` | 0.15 | k=2, adds name recognition but still binary |
+| `question_type` | `multiple_choice` | 0.70 | k=2..N wide range, includes multi-select, highest discrimination |
+| `choice_type` | `single` | 0.40 | overall easier (includes yes_no / binary_named) |
+| `choice_type` | `multi` | 0.60 | true multi-select, almost every model performs poorly, high discrimination |
 
-在 `.env` 中通过 `COMPOSITE_WEIGHTS_QTYPE` / `COMPOSITE_WEIGHTS_CTYPE`
-覆盖；按指标独立调权请用 `COMPOSITE_WEIGHT_OVERRIDES_QTYPE` /
-`COMPOSITE_WEIGHT_OVERRIDES_CTYPE`（见 `.env.example` 注释）。任何 (model)
-行只要有任一指标命中 override，CSV 的 `weights_kind` 列就标 `overridden`。
+Override these via `COMPOSITE_WEIGHTS_QTYPE` / `COMPOSITE_WEIGHTS_CTYPE` in
+`.env`; for per-metric independent weight tuning, use
+`COMPOSITE_WEIGHT_OVERRIDES_QTYPE` /
+`COMPOSITE_WEIGHT_OVERRIDES_CTYPE` (see `.env.example` comments). Any (model)
+row whose metric hits an override has its `weights_kind` column in the CSV
+marked `overridden`.
 
-`composite_meta.json` 是审计跟踪：每个综合值实际用了哪些桶、归一化后的
-权重、每桶原始 slice 值都列在里面，方便复现/解释。原 `per_model_summary.csv`
-与 `per_model_by_*.csv` 语义不变（仍是混合后的均值 / 子题型实测明细）。
+`composite_meta.json` is the audit trail: which buckets each composite value
+actually used, the normalised weights, and the raw slice value per bucket
+are all listed there for reproducibility/explanation. The semantics of
+`per_model_summary.csv` and `per_model_by_*.csv` are unchanged (still the
+mixed mean / sub-question-type measured details).
 
 Model slug safety: `/` → `__`, any character outside `[A-Za-z0-9._-]` → `_`.
 So `openai/gpt-4o-mini` becomes `openai__gpt-4o-mini.db`.
@@ -329,7 +349,7 @@ python scripts/plot_analysis.py runs/<run_id>
 Single-value `.env` (the legacy default, e.g. `TAVILY_MAX_RESULTS=5`) is
 parsed as a length-1 list, so existing setups stay byte-equivalent
 except for the new `__r{R}__c{C}` suffix on DB filenames. See
-`DESIGN.md` "grid search via virtual slug (C 方案)" for why we encode
+`DESIGN.md` "grid search via virtual slug (option C)" for why we encode
 the grid in slug strings rather than introducing a new schema axis.
 
 ## Resume semantics
@@ -360,10 +380,10 @@ controls (`openspec/changes/harness-resilience-v1/`):
 
 Error classification (`forecast_eval/errors.py`) was also widened: HTTP 400
 bodies containing any of `data_inspection_failed`, `inappropriate content`,
-`敏感`, `违规`, `不当内容`, `审核未通过` (in addition to the legacy
-`content_policy` / `content_filter` / `safety` / `content_policy_violation`
-needles, see `errors.CONTENT_POLICY_NEEDLES`) classify as `content_policy`,
-not `bad_request`. The transient-network family now also covers
+or `sensitive` (in addition to the legacy `content_policy` / `content_filter`
+/ `safety` / `content_policy_violation` needles, see
+`errors.CONTENT_POLICY_NEEDLES`) classify as `content_policy`, not
+`bad_request`. The transient-network family now also covers
 `httpx.RemoteProtocolError`, `WriteError`, `WriteTimeout`, `PoolTimeout` —
 both the LLM client and the Tavily search client retry these instead of
 treating them as fatal.

@@ -181,7 +181,7 @@ def test_snapshot_settings_redacts_all_keys(tmp_path: Path, monkeypatch: pytest.
     snap = dbmod.snapshot_settings(s)
     blob = json.dumps(snap)
     assert s.LLM_API_KEY not in blob
-    # TAVILY_API_KEY 升级为 list[str], 每把 key 都不应出现在落盘 blob 或 repr 中.
+    # TAVILY_API_KEY upgraded to list[str]; no individual key should appear in the persisted blob or repr.
     assert isinstance(s.TAVILY_API_KEY, list)
     for raw in s.TAVILY_API_KEY:
         assert raw not in blob
@@ -572,8 +572,8 @@ def test_register_run_meta_preserves_started_at_on_resume(tmp_path: Path) -> Non
 def test_snapshot_settings_redacts_leak_detector_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """启用 leak filter 时 LEAK_DETECTOR_API_KEY 必须以 redact_api_key dict
-    形态出现在 snapshot 中, 明文 MUST NOT 出现."""
+    """When the leak filter is enabled, LEAK_DETECTOR_API_KEY MUST appear in the
+    snapshot as a redact_api_key dict; the plaintext MUST NOT appear."""
     monkeypatch.setenv("LLM_API_KEY", "sk-or-v1-ABCDEFGHIJKLMNOP0123")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-ABCDEFGHIJK0123")
     monkeypatch.setenv("MODELS", "openai/gpt-5")
@@ -598,7 +598,7 @@ def test_snapshot_settings_redacts_leak_detector_key(
 
 
 def test_register_run_meta_round_trips_detector_fingerprint(tmp_path: Path) -> None:
-    """detector 三键经 register_run_meta 持久化进 runs.config_snapshot 后 round-trip 完整."""
+    """The detector's three keys must round-trip intact after register_run_meta persists them into runs.config_snapshot."""
     conn = dbmod.connect(tmp_path / "r.db")
     dbmod.init_schema(conn, sampling_n=1)
     config_snapshot = {
@@ -626,5 +626,5 @@ def test_register_run_meta_round_trips_detector_fingerprint(tmp_path: Path) -> N
     assert cs["leak_detector_enabled"] is True
     assert cs["leak_detector_model"] == "anthropic/claude-sonnet-4.6"
     assert cs["leak_detector_prompt_hash"] == "abcdef0123456789"
-    # SCHEMA_VERSION 不动 (本提案承诺).
+    # SCHEMA_VERSION stays unchanged (a guarantee of this proposal).
     assert dbmod.SCHEMA_VERSION == 5

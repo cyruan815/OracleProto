@@ -47,7 +47,7 @@ def test_network_errors_map_to_network() -> None:
     assert classify(asyncio.TimeoutError()) is ErrorKind.NETWORK
     # v5.1 (harness-resilience): the new transient-network family. These were
     # previously dropping into UNKNOWN, which never retries — see the spec
-    # llm-integration §"网络/超时错误分层退避" RemoteProtocolError scenario.
+    # llm-integration §"network/timeout error tiered backoff" RemoteProtocolError scenario.
     assert classify(httpx.WriteTimeout("slow", request=req)) is ErrorKind.NETWORK
     assert classify(httpx.WriteError("write blew up", request=req)) is ErrorKind.NETWORK
     assert classify(httpx.PoolTimeout("pool exhausted")) is ErrorKind.NETWORK
@@ -67,8 +67,10 @@ def test_content_policy_aliyun_data_inspection_failed() -> None:
     assert classify(_http_error(400, body)) is ErrorKind.CONTENT_POLICY
 
 
-def test_content_policy_chinese_audit_token() -> None:
-    body = '{"error":{"message":"该请求审核未通过, 含敏感内容"}}'
+def test_content_policy_sensitive_token() -> None:
+    """A 400 body whose message just mentions `sensitive` content should still
+    classify as CONTENT_POLICY rather than falling through to BAD_REQUEST."""
+    body = '{"error":{"message":"Request rejected: sensitive content detected"}}'
     assert classify(_http_error(400, body)) is ErrorKind.CONTENT_POLICY
 
 
@@ -79,12 +81,12 @@ def test_bad_request_invalid_request_still_falls_through() -> None:
     assert classify(_http_error(400, body)) is ErrorKind.BAD_REQUEST
 
 
-def test_content_policy_needles_constant_includes_aliyun_and_chinese() -> None:
+def test_content_policy_needles_constant_includes_aliyun() -> None:
     """The constant is the single source of truth — readers grep this list to
-    add new providers, so guard that the new entries actually landed."""
+    add new providers, so guard that the Aliyun-style entries actually landed."""
     assert "data_inspection_failed" in CONTENT_POLICY_NEEDLES
-    assert "审核未通过" in CONTENT_POLICY_NEEDLES
-    assert "敏感" in CONTENT_POLICY_NEEDLES
+    assert "inappropriate content" in CONTENT_POLICY_NEEDLES
+    assert "sensitive" in CONTENT_POLICY_NEEDLES
 
 
 def test_status_codes_classification() -> None:

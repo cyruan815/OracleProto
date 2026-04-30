@@ -233,8 +233,9 @@ async def run_react(
     effective_max_search_calls = (
         int(settings.REACT_MAX_SEARCH_CALLS) if settings.ENABLE_WEB_SEARCH else 0
     )
-    # ENABLE_WEB_SEARCH=false → LLM 看不到任何 tool schema, 循环会在首轮直接返回
-    # content 并 break, Tavily 完全不会被调用. 此时也禁用 nudge — 没有搜索可以再做.
+    # ENABLE_WEB_SEARCH=false -> the LLM sees no tool schema at all; the loop
+    # returns content on the first turn and breaks, and Tavily is never called.
+    # Nudges are also disabled in this case — there are no more searches to make.
     tool_schemas: list[dict[str, Any]] = (
         [WEB_SEARCH_SCHEMA] if settings.ENABLE_WEB_SEARCH else []
     )

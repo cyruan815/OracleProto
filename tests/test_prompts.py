@@ -139,10 +139,11 @@ def test_reflection_protocol_appended_when_provided(templates: dict[str, str]) -
     plain = render_user_prompt(q, templates)
     with_protocol = render_user_prompt(q, templates, reflection_protocol=REFLECTION_PROTOCOL)
 
-    # 协议必须以原 prompt 为前缀, 即只在末尾追加, 不修改原模板任何字符.
+    # The protocol must use the original prompt as a prefix, only appending to
+    # the end, never modifying any characters of the original template.
     assert with_protocol.startswith(plain)
     assert with_protocol != plain
-    # 关键反思要素必须出现在协议里.
+    # Key reflection elements must appear in the protocol.
     for marker in (
         "Forecasting Protocol",
         "Decompose",
@@ -176,13 +177,15 @@ def test_nudge_message_mentions_counts_and_new_angle() -> None:
         max_search_calls=4,
         min_required=3,
     )
-    # 必须客观陈述事实, 不泄露 end_date 等内部信息, 同时要求 LLM 换角度而非重复.
+    # Must state facts objectively, must not leak internal info like end_date,
+    # and must direct the LLM to switch angles rather than repeat.
     assert "1" in msg
     assert "3" in msg
     assert "NEW angle" in msg or "new angle" in msg.lower()
     assert "end_date" not in msg
     assert "training cutoff" not in msg.lower()
-    # 统一 status header 必须出现, 让 LLM 知道当前步数 / 搜索预算位置.
+    # The unified status header must appear so the LLM knows the current step
+    # count / search budget position.
     assert "[Harness status]" in msg
     assert "step 2/6" in msg
     assert "1/4 used" in msg
@@ -342,7 +345,8 @@ def test_penultimate_warning_mentions_budget_state() -> None:
     msg = build_penultimate_step_warning(
         current_step=2, max_steps=3, searches_done=1, max_search_calls=4
     )
-    # 统一 status header 提供步号与搜索预算 (e.g. "step 2/3 ... web_search 1/4 used")
+    # The unified status header surfaces the step number and search budget
+    # (e.g. "step 2/3 ... web_search 1/4 used")
     assert "[Harness status]" in msg
     assert "step 2/3" in msg
     assert "1/4 used" in msg

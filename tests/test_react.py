@@ -64,8 +64,9 @@ def _make_settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Setting
     monkeypatch.setenv("REACT_MIN_SEARCH_CALLS", "0")
     monkeypatch.setenv("REACT_MAX_NUDGES", "0")
     monkeypatch.setenv("ENABLE_WEB_SEARCH", "true")
-    # force-final-answer-near-limit-v1 默认开; 这里关掉以让 v3/v4/v5.1 历史测试保持
-    # byte-identical 行为. 新机制有专属测试 (test_force_final_*).
+    # force-final-answer-near-limit-v1 is on by default; turn it off here so the
+    # legacy v3/v4/v5.1 tests keep byte-identical behaviour. The new mechanism
+    # has its own dedicated tests (test_force_final_*).
     monkeypatch.setenv("REACT_BUDGET_AWARENESS_PROTOCOL", "false")
     monkeypatch.setenv("REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT", "false")
     for k, v in overrides.items():
@@ -732,14 +733,15 @@ async def test_final_answer_retry_still_empty(
 async def test_search_calls_includes_detector_audit(
     templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """启用 leak filter 时 search_calls entry MUST 含 detector_* 5 字段;
-    n_results = audit.n_results_kept (向后兼容旧分析脚本)."""
+    """When the leak filter is enabled, the search_calls entry MUST contain
+    the 5 detector_* fields; n_results = audit.n_results_kept (backwards
+    compatible with legacy analysis scripts)."""
     settings = _make_settings(monkeypatch)
 
     async def stub_tavily_with_audit(query: str, end_date: str, *args, **kwargs):
         from forecast_eval.search import SearchResult, SearchResultItem
 
-        # 模拟 leak_filter 已经裁剪后返回的 SearchResult: 5 raw → 3 kept.
+        # Simulate a SearchResult that leak_filter has already trimmed: 5 raw -> 3 kept.
         kept_items = [
             SearchResultItem(
                 title=f"t{i}",
@@ -789,22 +791,23 @@ async def test_search_calls_includes_detector_audit(
     calls = json.loads(result.search_calls)
     assert len(calls) == 1
     entry = calls[0]
-    assert entry["n_results"] == 3  # = n_results_kept (向后兼容)
+    assert entry["n_results"] == 3  # = n_results_kept (backwards compatible)
     assert entry["n_results_raw"] == 5
     assert entry["n_results_kept"] == 3
     assert entry["detector_verdicts"] == ["keep", "drop", "keep", "drop", "keep"]
     assert entry["detector_latency_ms"] == 123
     assert entry["detector_error_kind"] is None
-    # published_dates 长度 == n_results_raw, 与 detector_verdicts 一一对应.
+    # published_dates length == n_results_raw, one-to-one with detector_verdicts.
     assert len(entry["published_dates"]) == 5
 
 
 async def test_search_calls_no_audit_when_disabled(
     templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """关闭开关 (audit=None) → search_calls entry 仅含旧 4 字段."""
+    """Switch off (audit=None) -> search_calls entry contains only the 4 legacy fields."""
     settings = _make_settings(monkeypatch)
-    # _stub_tavily 返回的 SearchResult.audit 默认为 None — 这就是关闭开关时的形态.
+    # _stub_tavily returns a SearchResult whose audit defaults to None -- this
+    # is exactly the shape produced when the switch is off.
     script = [
         (_tool_msg("call_1", "evidence"), "tool_calls", {"response_id": "r0"}),
         (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r1"}),
@@ -831,7 +834,7 @@ async def test_search_calls_no_audit_when_disabled(
 async def test_search_calls_tavily_error_no_detector_fields(
     templates: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Tavily 失败 → entry 仅含 5 个旧字段 + error_kind, 不含 detector 字段."""
+    """Tavily failure -> entry contains only the 5 legacy fields + error_kind, no detector fields."""
     settings = _make_settings(monkeypatch)
 
     async def failing_tavily(query: str, end_date: str, *args, **kwargs):
@@ -938,7 +941,7 @@ async def test_loop_continues_when_no_valid_boxed(
     ]
     assert injected, "continuation injection missing from second LLM call"
     body = injected[-1]["content"]
-    assert "step 2/6" in body  # 即将进入的 step (1-indexed)
+    assert "step 2/6" in body  # the step about to be entered (1-indexed)
     assert "previous reply did not contain" in body.lower()
     assert "\\boxed{...}" in body
 

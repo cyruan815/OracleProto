@@ -88,7 +88,7 @@ def _call_init_model_db(
 def test_init_model_db_injects_detector_fingerprint_when_enabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """启用 leak filter 时 config_snapshot 含 detector 三键."""
+    """When the leak filter is enabled, config_snapshot contains the detector's three keys."""
     _settings_env(
         monkeypatch,
         tmp_path,
@@ -106,14 +106,14 @@ def test_init_model_db_injects_detector_fingerprint_when_enabled(
     assert cs["leak_detector_model"] == "anthropic/claude-sonnet-4.6"
     prompt_hash = cs["leak_detector_prompt_hash"]
     assert isinstance(prompt_hash, str) and len(prompt_hash) == 16
-    # prompt hash 与 leak_filter._compute_prompt_hash() 一致.
+    # prompt hash matches leak_filter._compute_prompt_hash().
     assert prompt_hash == leak_filter._compute_prompt_hash()
 
 
 def test_init_model_db_disabled_writes_default_values(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """关闭开关时三键仍出现, 但值是默认 (False / "" / "")."""
+    """When the toggle is off, the three keys still appear, but with default values (False / "" / "")."""
     _settings_env(monkeypatch, tmp_path, ENABLE_SEARCH_LEAK_FILTER="false")
     settings = Settings(_env_file=None)
     capture: dict[str, Any] = {}
@@ -128,7 +128,7 @@ def test_init_model_db_disabled_writes_default_values(
 def test_init_model_db_does_not_change_register_signature(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Detector 三键通过 config_snapshot dict 注入, 不改 register_run_meta 签名."""
+    """The detector's three keys are injected via the config_snapshot dict without changing the register_run_meta signature."""
     _settings_env(monkeypatch, tmp_path, ENABLE_SEARCH_LEAK_FILTER="false")
     settings = Settings(_env_file=None)
     capture: dict[str, Any] = {}
@@ -142,7 +142,7 @@ def test_init_model_db_does_not_change_register_signature(
 def test_init_model_db_writes_redacted_detector_key_to_snapshot(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """LEAK_DETECTOR_API_KEY 在 snapshot 中以 redact_api_key dict 形态出现, 明文不在."""
+    """LEAK_DETECTOR_API_KEY appears in the snapshot as a redact_api_key dict; the plaintext is absent."""
     _settings_env(
         monkeypatch,
         tmp_path,
@@ -164,7 +164,7 @@ def test_init_model_db_writes_redacted_detector_key_to_snapshot(
 def test_cell_local_settings_carries_leak_detector_fields(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Grid dispatcher 派生的 cell-local Settings MUST 透传所有 LEAK_DETECTOR_* 字段."""
+    """Cell-local Settings derived by the grid dispatcher MUST pass through all LEAK_DETECTOR_* fields."""
     _settings_env(
         monkeypatch,
         tmp_path,
@@ -198,23 +198,23 @@ def test_cell_local_settings_carries_leak_detector_fields(
 def test_other_fingerprints_unaffected_by_leak_filter_toggle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """切换 leak filter 开关, 其它指纹 (prompt / source / metadata) 字节级不变."""
-    # 第一次: 关闭 leak filter
+    """Toggling the leak filter switch leaves other fingerprints (prompt / source / metadata) byte-identical."""
+    # First pass: disable the leak filter
     _settings_env(monkeypatch, tmp_path, ENABLE_SEARCH_LEAK_FILTER="false")
     s_off = Settings(_env_file=None)
 
-    # 第二次: 开启
+    # Second pass: enable
     monkeypatch.setenv("ENABLE_SEARCH_LEAK_FILTER", "true")
     monkeypatch.setenv("LEAK_DETECTOR_API_KEY", "sk-detector-real-key-1234")
     monkeypatch.setenv("LEAK_DETECTOR_MODEL", "anthropic/claude-sonnet-4.6")
     s_on = Settings(_env_file=None)
 
-    # snapshot_settings 对其它字段保持稳定 (不影响主 LLM / Tavily 指纹).
+    # snapshot_settings stays stable for other fields (does not affect the main LLM / Tavily fingerprint).
     snap_off = dbmod.snapshot_settings(s_off)
     snap_on = dbmod.snapshot_settings(s_on)
-    # MODELS / MODEL_TRAINING_CUTOFFS / TAVILY_* 字段全部一致.
+    # MODELS / MODEL_TRAINING_CUTOFFS / TAVILY_* fields are all equal.
     assert snap_off["MODELS"] == snap_on["MODELS"]
     assert snap_off["TAVILY_INCLUDE_RAW_CONTENT"] == snap_on["TAVILY_INCLUDE_RAW_CONTENT"]
     assert snap_off["TAVILY_RAW_CONTENT_MAX_CHARS"] == snap_on["TAVILY_RAW_CONTENT_MAX_CHARS"]
-    # 仅 ENABLE_SEARCH_LEAK_FILTER + LEAK_DETECTOR_* 字段不同.
+    # Only the ENABLE_SEARCH_LEAK_FILTER + LEAK_DETECTOR_* fields differ.
     assert snap_off["ENABLE_SEARCH_LEAK_FILTER"] != snap_on["ENABLE_SEARCH_LEAK_FILTER"]

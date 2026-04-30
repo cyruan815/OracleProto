@@ -32,7 +32,8 @@ from forecast_eval.tools import (
 
 @dataclass
 class _StubSettings:
-    # 升级后 settings.TAVILY_API_KEY 是 list[str] (CSV 多 key); 测试 stub 沿用同语义.
+    # After the upgrade, settings.TAVILY_API_KEY is list[str] (CSV multi-key);
+    # the test stub follows the same semantics.
     TAVILY_API_KEY: list[str] = field(default_factory=lambda: ["tvly-TEST"])
     TAVILY_KEY_COOLDOWN_S: float = 60.0
     TAVILY_MAX_RESULTS: int = 5
@@ -43,7 +44,8 @@ class _StubSettings:
     SEARCH_RETRY_MAX: int = 3
     SEARCH_BACKOFF_S: list[int] = None  # type: ignore[assignment]
     LLM_TIMEOUT_S: int = 30
-    # search-leak-filter-v1: 默认关闭, 走非-detector 路径; 单测里需要时显式开启.
+    # search-leak-filter-v1: off by default, take the non-detector path; tests
+    # explicitly enable it when needed.
     ENABLE_SEARCH_LEAK_FILTER: bool = False
 
     def __post_init__(self) -> None:
@@ -53,9 +55,11 @@ class _StubSettings:
 
 @pytest.fixture(autouse=True)
 def _reset_pool_cache() -> None:
-    """每个测试独立的 pool cache, 避免一个测试拉黑 key 串到下个测试.
+    """Each test gets its own pool cache, preventing key blacklisting in one
+    test from leaking into the next.
 
-    模块级 cache 在 prod 跨 grid cell 共享是 feature; 在测试隔离中是 bug 源.
+    The module-level cache being shared across grid cells is a feature in prod;
+    in test isolation it's a bug source.
     """
     reset_pool_cache()
 
@@ -121,12 +125,12 @@ def test_payload_default_uses_bool_false_and_omits_answer() -> None:
     p = _build_request_payload(
         query="q", end_date="2026-01-17", settings=settings, api_key="tvly-PAYLOAD"
     )
-    # api_key 来自调用方注入的池, 而非 settings.TAVILY_API_KEY[0].
+    # api_key comes from the caller-injected pool, not settings.TAVILY_API_KEY[0].
     assert p["api_key"] == "tvly-PAYLOAD"
     assert p["search_depth"] == "basic"
-    # "false" 字符串需映射到 JSON bool false (Tavily 协议: bool | "markdown" | "text")
+    # The "false" string must map to JSON bool false (Tavily protocol: bool | "markdown" | "text")
     assert p["include_raw_content"] is False
-    # include_answer 默认关闭时整字段不应进入 payload (Tavily 默认即 false)
+    # When include_answer is off by default, the field must not appear in the payload (Tavily default is false)
     assert "include_answer" not in p
 
 
@@ -167,7 +171,7 @@ def test_payload_emits_include_answer_when_enabled(answer_mode: str) -> None:
 
 def test_truncate_raw_content_under_limit_returns_intact() -> None:
     assert _truncate_raw_content("hello", 10) == "hello"
-    assert _truncate_raw_content("hello", 5) == "hello"  # 等长不截断
+    assert _truncate_raw_content("hello", 5) == "hello"  # equal length, no truncation
 
 
 def test_truncate_raw_content_over_limit_appends_marker() -> None:
@@ -224,7 +228,7 @@ async def test_tavily_search_success_injects_end_date() -> None:
     assert body["max_results"] == 5
     assert body["search_depth"] == "basic"
     assert body["include_raw_content"] == "markdown"
-    assert "include_answer" not in body  # default false → 不发送
+    assert "include_answer" not in body  # default false -> not sent
 
     assert result.ok
     assert result.answer == "Team A won."
@@ -241,7 +245,7 @@ async def test_tavily_search_success_injects_end_date() -> None:
     items = payload["results"]
     assert items[0]["score"] == 0.71
     assert items[0]["raw_content"].startswith("## Heading")
-    # 第二条没 score / raw_content / published_date, 不应作为 null 字段进入 payload
+    # The second item lacks score / raw_content / published_date and must not appear as null fields in the payload
     assert "score" not in items[1]
     assert "raw_content" not in items[1]
     assert "published_date" not in items[1]
@@ -393,7 +397,7 @@ def test_payload_omits_optional_fields_when_none() -> None:
         results=[SearchResultItem(title="t", url="u", content="c")],
     )
     p = r.to_llm_payload()
-    # answer=None → 整个 answer 字段不应出现
+    # answer=None -> the entire answer field must not appear
     assert "answer" not in p
     item = p["results"][0]
     assert "score" not in item
@@ -416,11 +420,12 @@ def _key_state(pool: TavilyKeyPool, key: str):
 
 
 async def test_pool_least_used_balances_load() -> None:
-    # 强制 offset=0 以让计数从 0,0,0 开始, 测试 least-used 选择是否对称.
+    # Force offset=0 so counts start at 0,0,0; tests that least-used selection is symmetric.
     pool = TavilyKeyPool.from_keys(
         ["k-a", "k-b", "k-c"], rng=random.Random(0), cooldown_s=10.0
     )
-    # 抹掉随机起点, 让初始计数都是 0 — 测试 least-used 决策本身.
+    # Erase the random starting point so initial counts are all 0 -- tests the
+    # least-used decision itself.
     for st in pool.states:
         st.used = 0
 
@@ -428,12 +433,13 @@ async def test_pool_least_used_balances_load() -> None:
     for _ in range(9):
         k = await pool.acquire()
         counts[k] += 1
-    # 9 / 3 keys → 每把 key 各 3 次 (least-used + 顺序 tie-breaker 决定均衡).
+    # 9 / 3 keys -> each key 3 times (least-used + sequential tie-breaker determines balance).
     assert counts == {"k-a": 3, "k-b": 3, "k-c": 3}
 
 
 async def test_pool_random_starting_offset_rotates_first_key() -> None:
-    # 不同种子应给出不同的初始用量分布 (起点偏移生效).
+    # Different seeds should produce different initial usage distributions
+    # (starting offset works).
     seeds = [1, 2, 3, 4, 5, 6, 7, 8]
     first_keys = []
     for seed in seeds:
@@ -441,7 +447,8 @@ async def test_pool_random_starting_offset_rotates_first_key() -> None:
             ["k-a", "k-b", "k-c", "k-d"], rng=random.Random(seed), cooldown_s=10.0
         )
         first_keys.append(await pool.acquire())
-    # 不要求每个 seed 都不同, 但至少不应 8 次都命中 keys[0] (那就是没随机).
+    # Don't require each seed to differ, but at least shouldn't hit keys[0] all
+    # 8 times (that would mean no randomness).
     assert len(set(first_keys)) >= 2
 
 
@@ -451,11 +458,11 @@ async def test_pool_auth_failure_blacklists_permanently() -> None:
     )
     for st in pool.states:
         st.used = 0
-    bad = await pool.acquire()  # k-a (顺序 tie-breaker)
+    bad = await pool.acquire()  # k-a (sequential tie-breaker)
     await pool.report_failure(bad, "auth")
     assert _key_state(pool, bad).blacklisted is True
 
-    # 接下来无论 acquire 多少次都不会再返回 bad.
+    # No matter how many times we acquire afterwards, bad will never be returned.
     for _ in range(10):
         k = await pool.acquire()
         assert k != bad
@@ -473,12 +480,13 @@ async def test_pool_rate_limit_cooldown_then_recover() -> None:
 
     rate_limited = await pool.acquire()  # k-a
     await pool.report_failure(rate_limited, "rate_limit")
-    # cooldown 内不应再返回该 key.
+    # During cooldown, this key must not be returned again.
     for _ in range(5):
         k = await pool.acquire()
         assert k != rate_limited
 
-    # cooldown 过后应恢复 (least-used 选择会优先回到它, 因为另一把 key 已用了 6 次).
+    # After cooldown, the key should recover (least-used selection prefers it
+    # because the other key has already been used 6 times).
     fake_now[0] += 31.0
     saw_recovered = False
     for _ in range(20):
@@ -486,7 +494,7 @@ async def test_pool_rate_limit_cooldown_then_recover() -> None:
         if k == rate_limited:
             saw_recovered = True
             break
-    assert saw_recovered, "key 未在 cooldown 后恢复"
+    assert saw_recovered, "key did not recover after cooldown"
 
 
 async def test_pool_all_blacklisted_raises() -> None:
@@ -500,7 +508,7 @@ async def test_pool_all_blacklisted_raises() -> None:
 async def test_pool_other_failure_does_not_blacklist() -> None:
     pool = TavilyKeyPool.from_keys(["k-a"], rng=random.Random(0))
     await pool.report_failure("k-a", "other")
-    # 5xx / 网络错不应拉黑 key — 重试还能拿到它.
+    # 5xx / network errors must not blacklist a key -- retries can still acquire it.
     k = await pool.acquire()
     assert k == "k-a"
 
@@ -531,7 +539,7 @@ async def test_tavily_search_distributes_across_multiple_keys() -> None:
     pool = TavilyKeyPool.from_keys(
         list(settings.TAVILY_API_KEY), rng=random.Random(0), cooldown_s=10.0
     )
-    # 抹掉随机起点, 让 6 次调用稳定切成 2/2/2.
+    # Erase the random starting point so the 6 calls split stably into 2/2/2.
     for st in pool.states:
         st.used = 0
 
@@ -560,7 +568,7 @@ async def test_tavily_search_401_blacklists_then_uses_other_key() -> None:
         ["tvly-BAD", "tvly-GOOD"], rng=random.Random(0), cooldown_s=10.0
     )
     for st in pool.states:
-        st.used = 0  # tie-breaker → 先选 tvly-BAD
+        st.used = 0  # tie-breaker -> tvly-BAD picked first
 
     settings = _StubSettings(
         TAVILY_API_KEY=["tvly-BAD", "tvly-GOOD"], SEARCH_RETRY_MAX=2
@@ -568,11 +576,12 @@ async def test_tavily_search_401_blacklists_then_uses_other_key() -> None:
     result = await tavily_search("q", "2026-01-17", settings, pool=pool)
     assert result.ok
     assert result.answer == "ok"
-    # 第一次 401 不算网络重试, 立刻换 key 再试; 共 2 次请求.
+    # The first 401 doesn't count as a network retry; switch keys and retry
+    # immediately; 2 requests in total.
     assert seen == ["tvly-BAD", "tvly-GOOD"]
     assert _key_state(pool, "tvly-BAD").blacklisted is True
 
-    # 之后再调用应直接走 tvly-GOOD, 不再尝试拉黑的 key.
+    # Subsequent calls should go straight to tvly-GOOD, never trying the blacklisted key.
     seen.clear()
     result2 = await tavily_search("q2", "2026-01-17", settings, pool=pool)
     assert result2.ok
@@ -601,9 +610,9 @@ async def test_tavily_search_429_cools_down_then_uses_other_key() -> None:
     settings = _StubSettings(TAVILY_API_KEY=["tvly-FULL", "tvly-OK"])
     result = await tavily_search("q", "2026-01-17", settings, pool=pool)
     assert result.ok
-    # 429 不计网络重试, 立即换到 tvly-OK 成功.
+    # 429 doesn't count as a network retry; switch immediately to tvly-OK and succeed.
     assert seen == ["tvly-FULL", "tvly-OK"]
-    # tvly-FULL 应处于 cooldown.
+    # tvly-FULL should be in cooldown.
     assert _key_state(pool, "tvly-FULL").cooldown_until > pool._now()
 
 
@@ -619,14 +628,14 @@ async def test_tavily_search_all_keys_exhausted_returns_error() -> None:
     result = await tavily_search("q", "2026-01-17", settings, pool=pool)
     assert not result.ok
     assert result.error_kind == "tavily_error"
-    # 两把 key 都应被永久拉黑.
+    # Both keys should be permanently blacklisted.
     for st in pool.states:
         assert st.blacklisted is True
 
 
 @respx.mock
 async def test_tavily_search_5xx_uses_network_retry_does_not_blacklist() -> None:
-    """5xx 仍走 SEARCH_BACKOFF_S 重试, key 不拉黑 (服务器问题, 非 key 问题)."""
+    """5xx still uses SEARCH_BACKOFF_S retry, key not blacklisted (server issue, not a key issue)."""
     route = respx.post(TAVILY_ENDPOINT).mock(
         side_effect=[
             httpx.Response(503, text="down"),
@@ -701,8 +710,8 @@ def _five_results_payload() -> dict:
 async def test_tavily_search_with_leak_filter_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """启用 leak filter: 5 条 + verdicts [keep,drop,keep,keep,drop] → 返回 3 条;
-    result.audit 含 5 字段."""
+    """Leak filter enabled: 5 items + verdicts [keep,drop,keep,keep,drop] ->
+    returns 3 items; result.audit contains 5 fields."""
     respx.post(TAVILY_ENDPOINT).mock(
         return_value=httpx.Response(200, json=_five_results_payload())
     )
@@ -712,8 +721,8 @@ async def test_tavily_search_with_leak_filter_enabled(
     assert result.ok
     assert len(result.results) == 3
     assert [r.title for r in result.results] == ["t0", "t2", "t3"]
-    # audit 字段齐全: 五个 spec 字段 + published_dates_raw (供 react 写入
-    # search_calls.published_dates 用, 长度 == n_results_raw).
+    # Full audit fields: the five spec fields + published_dates_raw (used by
+    # react to write search_calls.published_dates, length == n_results_raw).
     assert result.audit is not None
     assert {
         "n_results_raw",
@@ -726,28 +735,28 @@ async def test_tavily_search_with_leak_filter_enabled(
     assert len(result.audit["published_dates_raw"]) == 5
     assert result.audit["n_results_raw"] == 5
     assert result.audit["n_results_kept"] == 3
-    # detector 收到的 cutoff_date 与 Tavily end_date 同源.
+    # The cutoff_date the detector receives shares the same source as Tavily's end_date.
     assert all(c[1] == "2026-01-17" for c in state["calls"])
 
 
 @respx.mock
 async def test_tavily_search_with_leak_filter_disabled() -> None:
-    """开关关闭: 字节级与本提案前一致, audit is None, detector 不被调用."""
+    """Switch off: byte-identical to the pre-proposal behaviour; audit is None; detector is not called."""
     respx.post(TAVILY_ENDPOINT).mock(
         return_value=httpx.Response(200, json=_five_results_payload())
     )
     settings = _DetectorStubSettings(ENABLE_SEARCH_LEAK_FILTER=False)
     result = await tavily_search("q", "2026-01-17", settings)
     assert result.ok
-    assert len(result.results) == 5  # 原始数量, 未经 detector 裁剪
-    assert result.audit is None  # 开关关闭则 audit 缺省
+    assert len(result.results) == 5  # original count, not trimmed by detector
+    assert result.audit is None  # audit defaults to None when the switch is off
 
 
 @respx.mock
 async def test_tavily_search_failed_skips_detector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tavily 重试耗尽 → leak_filter 不被调用, error_kind=tavily_error."""
+    """Tavily retries exhausted -> leak_filter is not called, error_kind=tavily_error."""
     from forecast_eval import leak_filter
 
     respx.post(TAVILY_ENDPOINT).mock(return_value=httpx.Response(503, text="down"))
@@ -770,7 +779,7 @@ async def test_tavily_search_failed_skips_detector(
 async def test_tavily_search_all_dropped_no_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """5 条全 drop → ok=True, results=[], answer=None (answer 由 drop 内容合成)."""
+    """All 5 dropped -> ok=True, results=[], answer=None (answer is synthesised from dropped content)."""
     respx.post(TAVILY_ENDPOINT).mock(
         return_value=httpx.Response(200, json=_five_results_payload())
     )
@@ -788,7 +797,7 @@ async def test_tavily_search_all_dropped_no_error(
 async def test_tavily_search_partial_drop_keeps_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """部分 drop → answer 保留 (已知折中, 见 spec)."""
+    """Partial drop -> answer retained (known trade-off, see spec)."""
     respx.post(TAVILY_ENDPOINT).mock(
         return_value=httpx.Response(200, json=_five_results_payload())
     )
@@ -800,7 +809,7 @@ async def test_tavily_search_partial_drop_keeps_answer(
 
 
 def test_to_llm_payload_excludes_audit() -> None:
-    """to_llm_payload() MUST 不输出 audit 字段, 防止它进入主 LLM 可见路径."""
+    """to_llm_payload() MUST NOT emit the audit field, preventing it from reaching the main LLM-visible path."""
     r = SearchResult(
         query="q",
         end_date="2026-01-17",
@@ -816,6 +825,6 @@ def test_to_llm_payload_excludes_audit() -> None:
     )
     payload = r.to_llm_payload()
     assert "audit" not in payload
-    # 同时检查 results 内的每一项也不含 audit (defensive).
+    # Also check that every item inside results lacks audit (defensive).
     for item in payload["results"]:
         assert "audit" not in item

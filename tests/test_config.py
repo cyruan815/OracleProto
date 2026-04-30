@@ -7,7 +7,7 @@ from forecast_eval.config import Settings
 
 
 def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """填齐主 LLM / Tavily 必填字段, 让其它字段独立测试."""
+    """Fill in the required main LLM / Tavily fields so other fields can be tested independently."""
     monkeypatch.setenv("LLM_API_KEY", "sk-or-v1-ABCDEFGHIJKLMNOP0123")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-ABCDEFGHIJK0123")
     monkeypatch.setenv("MODELS", "openai/gpt-5")
@@ -19,11 +19,11 @@ def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
 def test_leak_filter_enabled_requires_api_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """ENABLE_SEARCH_LEAK_FILTER=true 时缺 LEAK_DETECTOR_API_KEY 必须启动失败."""
+    """When ENABLE_SEARCH_LEAK_FILTER=true, missing LEAK_DETECTOR_API_KEY must fail startup."""
     _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("ENABLE_SEARCH_LEAK_FILTER", "true")
     monkeypatch.setenv("LEAK_DETECTOR_MODEL", "anthropic/claude-sonnet-4.6")
-    # LEAK_DETECTOR_API_KEY 未设
+    # LEAK_DETECTOR_API_KEY not set
     with pytest.raises(ValueError, match="LEAK_DETECTOR_API_KEY"):
         Settings(_env_file=None)
 
@@ -34,7 +34,7 @@ def test_leak_filter_enabled_requires_model(
     _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("ENABLE_SEARCH_LEAK_FILTER", "true")
     monkeypatch.setenv("LEAK_DETECTOR_API_KEY", "sk-detector-real-key-1234")
-    # LEAK_DETECTOR_MODEL 未设
+    # LEAK_DETECTOR_MODEL not set
     with pytest.raises(ValueError, match="LEAK_DETECTOR_MODEL"):
         Settings(_env_file=None)
 
@@ -53,7 +53,7 @@ def test_leak_filter_enabled_rejects_placeholder_api_key(
 def test_leak_filter_disabled_skips_validation(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """ENABLE_SEARCH_LEAK_FILTER=false 时即使 LEAK_DETECTOR_* 全空也应启动成功."""
+    """When ENABLE_SEARCH_LEAK_FILTER=false, startup should succeed even if all LEAK_DETECTOR_* are empty."""
     _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("ENABLE_SEARCH_LEAK_FILTER", "false")
     s = Settings(_env_file=None)
@@ -68,7 +68,7 @@ def test_leak_filter_disabled_skips_validation(
 def test_leak_detector_repr_redacts_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """repr(settings) MUST 把 LEAK_DETECTOR_API_KEY 显示为字面量 '<redacted>'."""
+    """repr(settings) MUST display LEAK_DETECTOR_API_KEY as the literal '<redacted>'."""
     _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("ENABLE_SEARCH_LEAK_FILTER", "true")
     monkeypatch.setenv("LEAK_DETECTOR_API_KEY", "sk-detector-supersecret-123456")
@@ -77,7 +77,7 @@ def test_leak_detector_repr_redacts_key(
     blob = repr(s)
     assert "sk-detector-supersecret-123456" not in blob
     assert "<redacted>" in blob
-    # __repr__ 现有路径靠后缀替换, detector key 与 LLM_API_KEY 一并被处理.
+    # __repr__ existing path uses suffix replacement, the detector key is handled alongside LLM_API_KEY.
     assert "sk-or-v1-ABCDEFGHIJKLMNOP0123" not in blob
 
 
@@ -105,7 +105,7 @@ def test_leak_detector_model_no_online_suffix(
 def test_leak_filter_requires_web_search(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """ENABLE_WEB_SEARCH=false + ENABLE_SEARCH_LEAK_FILTER=true 互斥, 必须启动失败."""
+    """ENABLE_WEB_SEARCH=false + ENABLE_SEARCH_LEAK_FILTER=true are mutually exclusive, must fail startup."""
     _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("ENABLE_WEB_SEARCH", "false")
     monkeypatch.setenv("ENABLE_SEARCH_LEAK_FILTER", "true")

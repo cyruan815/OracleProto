@@ -1,16 +1,16 @@
-"""composite-score-by-subtype 单元测试。
+"""composite-score-by-subtype unit tests.
 
-覆盖：
-* 默认权重数值正确（手算对一个 model + metric）；
-* override 起作用（同时其他指标走默认）；
-* 某桶 None → 被剔除并按比例归一化；
-* 全 None → composite = None；
-* 权重和 != 1（如 60/40）→ 正确归一化；
-* 权重某桶为 0 → 该桶被剔除（与 None 同效）；
-* CSV 列与 ``per_model_summary.csv`` 一一对齐；
-* 不在 ``KNOWN_METRICS`` 内的 override metric 名 → ``compute_composite`` raise；
-* 配置非法值 → ``Settings`` 启动期 raise；
-* 端到端: 用 fixture run 跑 ``run_analysis``，断言三个新文件都生成且合理。
+Coverage:
+* Default weights produce correct values (hand-computed for a single model + metric);
+* Overrides take effect (while other metrics still use defaults);
+* A bucket with None is dropped and the rest are renormalized;
+* All None -> composite = None;
+* Weights summing to != 1 (e.g. 60/40) are normalized correctly;
+* A bucket with weight 0 is dropped (equivalent to None);
+* CSV columns line up with ``per_model_summary.csv``;
+* An override metric name not in ``KNOWN_METRICS`` causes ``compute_composite`` to raise;
+* Invalid config values cause ``Settings`` to raise at startup;
+* End-to-end: run ``run_analysis`` against a fixture run and assert that all three new files are generated and sane.
 """
 from __future__ import annotations
 
@@ -36,14 +36,14 @@ from forecast_eval.config import Settings
 
 
 # --------------------------------------------------------------------------- #
-# 纯函数: compute_composite
+# Pure function: compute_composite
 # --------------------------------------------------------------------------- #
 
 
 def _make_bucket_values(
     metric: str, by_bucket: dict[str, float | None]
 ) -> dict[str, dict[str, dict[str, float | None]]]:
-    """构造 ``{model: {metric: {bucket: value}}}``，单 model 单 metric 简化版。"""
+    """Build ``{model: {metric: {bucket: value}}}``, simplified to a single model + single metric."""
     return {"m1": {metric: dict(by_bucket)}}
 
 
@@ -80,7 +80,7 @@ def test_overrides_apply_to_one_metric_only() -> None:
             },
         }
     }
-    overrides = {"fss": {"multiple_choice": 1.0}}  # 只关心多选
+    overrides = {"fss": {"multiple_choice": 1.0}}  # only consider multiple choice
     rep = compute_composite(
         dimension="question_type",
         bucket_values_per_model=bv,
@@ -88,7 +88,7 @@ def test_overrides_apply_to_one_metric_only() -> None:
         overrides=overrides,
     )
     fss_info = rep.per_model["m1"]["fss"]
-    assert fss_info.value == pytest.approx(0.0)  # 只看多选 = 0
+    assert fss_info.value == pytest.approx(0.0)  # multi-choice only = 0
     assert fss_info.weights_kind == "overridden"
     assert fss_info.buckets_used == ("multiple_choice",)
 
@@ -99,7 +99,7 @@ def test_overrides_apply_to_one_metric_only() -> None:
 
 
 def test_none_bucket_dropped_and_renormalized() -> None:
-    """binary_named=None 时, 该桶被剔除, 剩余 yes_no + mc 重新归一化。"""
+    """When binary_named=None, that bucket is dropped and the remaining yes_no + mc are renormalized."""
     bv = _make_bucket_values(
         "fss",
         {"yes_no": 0.8, "binary_named": None, "multiple_choice": 0.4},
@@ -114,9 +114,9 @@ def test_none_bucket_dropped_and_renormalized() -> None:
     expected = (0.15 * 0.8 + 0.70 * 0.4) / (0.15 + 0.70)
     assert info.value == pytest.approx(expected)
     assert tuple(sorted(info.buckets_used)) == ("multiple_choice", "yes_no")
-    # 归一化权重和应为 1.0
+    # Normalized weights should sum to 1.0
     assert sum(info.weights_used_normalized.values()) == pytest.approx(1.0)
-    # 各桶归一化权重
+    # Normalized weight per bucket
     assert info.weights_used_normalized["yes_no"] == pytest.approx(
         0.15 / 0.85
     )
@@ -142,12 +142,12 @@ def test_all_none_yields_none() -> None:
 
 
 def test_unnormalized_weights_still_correct() -> None:
-    """权重和 != 1 时也要正确归一化。"""
+    """Weights summing to != 1 must still be normalized correctly."""
     bv = _make_bucket_values("fss", {"single": 0.5, "multi": 0.0})
     rep = compute_composite(
         dimension="choice_type",
         bucket_values_per_model=bv,
-        weights_default={"single": 60.0, "multi": 40.0},  # 非归一化
+        weights_default={"single": 60.0, "multi": 40.0},  # unnormalized
         overrides={},
     )
     info = rep.per_model["m1"]["fss"]
@@ -156,7 +156,7 @@ def test_unnormalized_weights_still_correct() -> None:
 
 
 def test_zero_weight_bucket_excluded() -> None:
-    """权重 0 的桶等同 None, 不参与合成。"""
+    """A bucket with weight 0 behaves like None and does not participate in composition."""
     bv = _make_bucket_values("fss", {"single": 0.5, "multi": 0.9})
     rep = compute_composite(
         dimension="choice_type",
@@ -182,13 +182,13 @@ def test_unknown_metric_in_override_raises() -> None:
 
 
 def test_known_metrics_align_with_summary_fields() -> None:
-    """``KNOWN_METRICS`` 必须与 ``_SUMMARY_FIELDS`` 去掉元数据列后一致。"""
+    """``KNOWN_METRICS`` must equal ``_SUMMARY_FIELDS`` minus the metadata columns."""
     summary_data = {f for f in _SUMMARY_FIELDS if f not in ("model", "sampling_n")}
     assert KNOWN_METRICS == summary_data
 
 
 # --------------------------------------------------------------------------- #
-# Settings 启动期校验
+# Settings startup-time validation
 # --------------------------------------------------------------------------- #
 
 
@@ -255,7 +255,7 @@ def test_settings_rejects_invalid_composite_config(
 
 
 # --------------------------------------------------------------------------- #
-# 端到端: run_analysis 写文件
+# End-to-end: run_analysis file output
 # --------------------------------------------------------------------------- #
 
 
@@ -317,7 +317,7 @@ def _sample_dict(
 
 
 def _build_fixture_run(tmp_path: Path) -> Path:
-    """两个模型, K=3。Model A 单选都对、多选两对一错; Model B 全错。"""
+    """Two models, K=3. Model A: all single-choice correct, multi-choice two right one wrong; Model B: all wrong."""
     run_dir = tmp_path / "run1"
     db_dir = run_dir / "db"
     db_dir.mkdir(parents=True)
@@ -369,7 +369,7 @@ def _build_fixture_run(tmp_path: Path) -> Path:
 
     conn_b = _make_conn(db_dir / "m__b.db", "m/b")
     for qid, wrong_letters in [
-        ("q1", ["B"]),  # 全错
+        ("q1", ["B"]),  # all wrong
         ("q2", ["A"]),
     ]:
         for i in range(3):
@@ -414,8 +414,8 @@ def test_run_analysis_writes_composite_files(tmp_path: Path) -> None:
 
 
 def test_composite_csv_columns_match_summary(tmp_path: Path) -> None:
-    """``per_model_composite_*.csv`` 列序 = ``model + sampling_n + weights_kind +
-    [_SUMMARY_FIELDS 数据列]``。"""
+    """``per_model_composite_*.csv`` column order = ``model + sampling_n + weights_kind +
+    [_SUMMARY_FIELDS data columns]``."""
     run_dir = _build_fixture_run(tmp_path)
     analysis.run_analysis(run_dir)
     expected_data = [
@@ -441,13 +441,13 @@ def test_composite_meta_records_used_buckets(tmp_path: Path) -> None:
     qtype_section = meta["question_type"]
     assert qtype_section["weights_default"] == DEFAULT_WEIGHTS_QTYPE
 
-    # m/a 的 fss 在三个 qtype 桶都有数据 → buckets_used 应为全 3 桶
+    # m/a's fss has data in all three qtype buckets -> buckets_used should be all 3 buckets
     info = qtype_section["per_model"]["m/a"]["fss"]
     assert sorted(info["buckets_used"]) == sorted(DEFAULT_WEIGHTS_QTYPE)
-    # 归一化权重和 = 1
+    # Normalized weights sum to 1
     total = sum(info["weights_used_normalized"].values())
     assert abs(total - 1.0) < 1e-9
-    # weights_kind 默认
+    # weights_kind default
     assert info["weights_kind"] == "default"
 
 
@@ -457,7 +457,7 @@ def test_composite_overrides_propagate_to_csv(tmp_path: Path) -> None:
         run_dir,
         composite_overrides_qtype={"fss": {"multiple_choice": 1.0}},
     )
-    # composite csv 的 weights_kind 列应为 overridden（任一指标命中 override）
+    # The weights_kind column in the composite csv should be overridden (any metric hitting an override)
     with (
         run_dir / "analysis" / "per_model_composite_by_question_type.csv"
     ).open() as f:
@@ -471,15 +471,15 @@ def test_composite_overrides_propagate_to_csv(tmp_path: Path) -> None:
     fss_info = meta["question_type"]["per_model"]["m/a"]["fss"]
     assert fss_info["weights_kind"] == "overridden"
     assert fss_info["buckets_used"] == ["multiple_choice"]
-    # 其他指标仍是 default
+    # Other metrics remain default
     pass_info = meta["question_type"]["per_model"]["m/a"]["pass_at_1_avg"]
     assert pass_info["weights_kind"] == "default"
 
 
 def test_slice_csv_now_carries_v5_columns(tmp_path: Path) -> None:
-    """既有 ``per_model_by_question_type.csv`` / ``per_model_by_choice_type.csv``
-    现在应该带 v5 列 (FSS / Cohen κ / Hamming / Fleiss κ / mean_entropy /
-    VCI / MVG); 至少一行该有非 NULL 值。"""
+    """The existing ``per_model_by_question_type.csv`` / ``per_model_by_choice_type.csv``
+    should now carry v5 columns (FSS / Cohen κ / Hamming / Fleiss κ / mean_entropy /
+    VCI / MVG); at least one row should have non-NULL values."""
     run_dir = _build_fixture_run(tmp_path)
     analysis.run_analysis(run_dir)
     for fname in (
@@ -490,7 +490,7 @@ def test_slice_csv_now_carries_v5_columns(tmp_path: Path) -> None:
         with path.open() as f:
             rows = list(csv.DictReader(f))
         assert rows, f"{fname} empty"
-        # 至少一行 fss 非空
+        # at least one row has non-empty fss
         fss_seen = any(r.get("fss") not in ("", None) for r in rows)
         assert fss_seen, f"{fname} has no fss values"
 

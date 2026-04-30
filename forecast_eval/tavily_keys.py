@@ -1,16 +1,18 @@
 """Round-robin pool over multiple Tavily API keys.
 
 Goals:
-- 在一次 run 内尽量平均分配调用量 (least-used 选择).
-- key 配额耗尽 / 失效时自动跳过, 不阻塞其他 key.
-- 跨 run 公平性: 构造时按随机偏移轮换初始计数, 避免每次 run 都先烧 keys[0].
+- Distribute call volume as evenly as possible within a single run (least-used selection).
+- Skip keys automatically when quota is exhausted / invalidated, without blocking other keys.
+- Cross-run fairness: rotate initial counts by a random offset at construction, avoiding always
+  burning keys[0] first.
 
 Failure handling:
-- "auth" (401/403)        — 永久拉黑, 该 key 本次 process 不再使用.
-- "rate_limit" (429/配额)  — 临时拉黑 cooldown_s 秒.
-- "other"                  — 不拉黑, 由 search.py 的 backoff 重试逻辑处理.
+- "auth" (401/403)        - permanent blacklist; the key is not used again in this process.
+- "rate_limit" (429/quota) - temporary blacklist for cooldown_s seconds.
+- "other"                  - no blacklist; handled by search.py backoff retry logic.
 
-并发安全靠单一 asyncio.Lock; 临界区只有 O(N) 字典操作, N 通常 <10.
+Concurrency safety relies on a single asyncio.Lock; critical sections only do O(N) dict operations,
+N is typically <10.
 """
 from __future__ import annotations
 
@@ -27,17 +29,17 @@ FailureKind = Literal["auth", "rate_limit", "other"]
 
 
 class AllKeysExhausted(RuntimeError):
-    """池中所有 key 当前都不可用 (永久拉黑或仍在 cooldown).
+    """All keys in the pool are currently unavailable (permanently blacklisted or still in cooldown).
 
-    `tavily_search` 捕获后落到 SearchResult.error_kind="tavily_error", 不抛到
-    ReAct 循环外, 让 LLM 仍能看到 tool_result 并继续。
+    `tavily_search` catches this and falls through to SearchResult.error_kind="tavily_error", not
+    propagating outside the ReAct loop, so the LLM still sees a tool_result and can continue.
     """
 
 
 @dataclass
 class _KeyState:
     key: str
-    used: int = 0          # 累计 acquire 计数 (含初始随机偏移)
+    used: int = 0          # cumulative acquire count (including initial random offset)
     blacklisted: bool = False
     cooldown_until: float = 0.0  # monotonic timestamp
 
@@ -46,13 +48,15 @@ class _KeyState:
 class TavilyKeyPool:
     """Least-used key picker with cooldown + permanent blacklist.
 
-    构造请走 `from_keys` (默认开启随机起点偏移); 直接构造仅供测试注入确定性状态.
+    Construct via `from_keys` (random starting offset enabled by default); direct construction is
+    only for tests injecting deterministic state.
     """
 
     states: list[_KeyState]
     cooldown_s: float = 60.0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # 注入式时钟, 测试可替换为可控函数; 默认 monotonic 避免系统时间跳变.
+    # Injectable clock; tests can replace it with a controllable function. Default monotonic avoids
+    # system-time jumps.
     _now: callable = time.monotonic  # type: ignore[assignment]
 
     @classmethod
@@ -65,7 +69,8 @@ class TavilyKeyPool:
     ) -> "TavilyKeyPool":
         if not keys:
             raise ValueError("TavilyKeyPool requires at least one key")
-        # 去重保持顺序: 用户多写一份等价 key 不应在选择阶段乘上权重.
+        # Dedupe while preserving order: writing the same equivalent key twice should not
+        # multiply its weight at selection time.
         seen: set[str] = set()
         deduped: list[str] = []
         for k in keys:
@@ -76,9 +81,10 @@ class TavilyKeyPool:
             deduped.append(k)
 
         states = [_KeyState(key=k) for k in deduped]
-        # 随机起点: 给每个 key 一个 [0, len) 内的初始 used 偏移, 让 least-used
-        # 选择天然从随机位置开始; 多 run 之间通过 rng 的 seed 自然解相关.
-        # 偏移用 len(states) 而非更大值, 保证初始计数差距小于一轮调用.
+        # Random starting point: give each key an initial used offset in [0, len) so least-used
+        # selection naturally starts from a random position; cross-run decorrelation comes from the
+        # rng seed. Offset uses len(states) rather than a larger value to ensure initial count
+        # differences are smaller than one round of calls.
         n = len(states)
         if n > 1:
             r = rng or random.Random()
@@ -94,8 +100,9 @@ class TavilyKeyPool:
     async def acquire(self) -> str:
         """Return the healthiest least-used key, or raise AllKeysExhausted.
 
-        Healthy = 未永久拉黑且 cooldown 已过. Tie-breaker: 同 used 取 states 顺序
-        的第一个 (deterministic, 便于调试; 跨 run 公平性靠初始 offset).
+        Healthy = not permanently blacklisted and cooldown has elapsed. Tie-breaker: with equal used,
+        take the first in states order (deterministic, easy to debug; cross-run fairness relies on
+        the initial offset).
         """
         async with self._lock:
             now = self._now()
@@ -113,15 +120,15 @@ class TavilyKeyPool:
             return best.key
 
     async def report_ok(self, key: str) -> None:
-        # 成功路径无需修改状态; 计数已在 acquire 阶段加. 这里留个 hook 以备
-        # 未来引入 EWMA 或 success counter.
+        # Success path requires no state mutation; counter was incremented during acquire.
+        # Leaving a hook here in case EWMA or a success counter is introduced later.
         return None
 
     async def report_failure(self, key: str, kind: FailureKind) -> None:
         async with self._lock:
             st = self._find(key)
             if st is None:
-                # key 不在池里 (理论上不可能, 防御性 log).
+                # key not in the pool (theoretically impossible; defensive log).
                 logger.warning("TavilyKeyPool: report_failure for unknown key {}", _short(key))
                 return
             if kind == "auth":
@@ -137,7 +144,7 @@ class TavilyKeyPool:
                     _short(key),
                     self.cooldown_s,
                 )
-            # "other": 网络/5xx 不拉黑, 由 search.py backoff 处理.
+            # "other": network / 5xx are not blacklisted; handled by search.py backoff.
 
     def _find(self, key: str) -> _KeyState | None:
         for st in self.states:
@@ -176,19 +183,19 @@ def _short(key: str) -> str:
 
 
 # ---------- Process-wide pool cache ----------
-# Grid dispatcher 用 settings.model_copy() 创建 cell-local 子视图; 子视图的
-# TAVILY_API_KEY 列表内容与父 settings 相同, 但 model_copy 会复制为新 list 实例.
-# 这里把池按 tuple(keys) 复用, 让所有 cell + 所有 worker 共享同一个 pool,
-# 用量计数才会真正聚合 (而不是每个 cell 独立从 0 开始统计).
+# Grid dispatcher uses settings.model_copy() to create cell-local sub-views; the sub-view's
+# TAVILY_API_KEY list contents are the same as the parent settings, but model_copy clones it as a
+# new list instance. We reuse the pool by tuple(keys) so all cells + all workers share a single pool;
+# usage counts then truly aggregate (rather than each cell starting independently from 0).
 _pool_cache: dict[tuple[str, ...], TavilyKeyPool] = {}
 
 
 def get_pool(keys: list[str], cooldown_s: float) -> TavilyKeyPool:
     """Return the process-wide pool for `keys`, creating it on first use.
 
-    Cache key 只依赖 `tuple(keys)` — cooldown_s 在同一 process 内一般不会变;
-    若变了, 取首次调用时的值 (再起 process 即可刷新). 这是有意的简化,
-    与 grid model_copy 的不可变语义一致.
+    Cache key depends only on `tuple(keys)` - cooldown_s generally does not change within the same
+    process; if it does, the value at first call is taken (restart the process to refresh). This is
+    an intentional simplification, consistent with grid model_copy's immutable semantics.
     """
     cache_key = tuple(keys)
     pool = _pool_cache.get(cache_key)

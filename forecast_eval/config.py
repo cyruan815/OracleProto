@@ -13,9 +13,10 @@ _PLACEHOLDER_TOKENS = {"REPLACE_ME", "CHANGEME", "PUT_YOUR_KEY_HERE"}
 _RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{4}$")
 _SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# composite-score-by-subtype: 子题型分桶常量。`question_type` 来自 questions
-# 表 CHECK 约束 (`yes_no` / `binary_named` / `multiple_choice`); `choice_type`
-# 同表 (`single` / `multi`)。校验使用 frozenset 即可，不需要枚举类。
+# composite-score-by-subtype: subtype bucket constants. `question_type` comes
+# from the questions table CHECK constraint (`yes_no` / `binary_named` / `multiple_choice`);
+# `choice_type` same table (`single` / `multi`). A frozenset is sufficient for validation;
+# an enum class is not needed.
 COMPOSITE_QTYPE_BUCKETS: frozenset[str] = frozenset(
     {"yes_no", "binary_named", "multiple_choice"}
 )
@@ -37,10 +38,11 @@ def _parse_csv_int(raw: str | list[Any] | None) -> list[int]:
 def _parse_weights_dict(
     raw: str | dict[str, Any] | None, *, allowed_buckets: frozenset[str], field_name: str
 ) -> dict[str, float]:
-    """解析 ``"yes_no=0.15,binary_named=0.15,multiple_choice=0.70"`` 形式的权重映射。
+    """Parse a weight mapping of the form ``"yes_no=0.15,binary_named=0.15,multiple_choice=0.70"``.
 
-    校验：桶名必须 ∈ ``allowed_buckets``、权重必须可解析为 float、权重 ≥ 0。
-    缺失的桶视为 0（即"该桶不参与合成"），但要求至少一个桶权重 > 0。
+    Validation: bucket names must be in ``allowed_buckets``, weights must parse as float, weights >= 0.
+    Missing buckets are treated as 0 (i.e., "the bucket does not participate in synthesis"),
+    but at least one bucket weight must be > 0.
     """
     if raw is None or raw == "":
         return {}
@@ -91,18 +93,19 @@ def _parse_overrides_dict(
     allowed_buckets: frozenset[str],
     field_name: str,
 ) -> dict[str, dict[str, float]]:
-    """解析 ``"fss=yes_no=0.05,binary_named=0.05,multiple_choice=0.90;cohen_kappa=..."``
-    形式的按指标权重覆盖。
+    """Parse per-metric weight overrides of the form
+    ``"fss=yes_no=0.05,binary_named=0.05,multiple_choice=0.90;cohen_kappa=..."``.
 
-    分号分隔不同指标，逗号分隔同指标内的桶；每段沿用
-    :func:`_parse_weights_dict` 的语义（含至少一个 > 0 校验）。指标名拼写错误
-    （不在已知指标白名单内）由 ``forecast_eval.analysis.composite`` 在运行时
-    raise，本函数不做该层校验，避免 config 模块反向 import analysis。
+    Semicolons separate different metrics, commas separate buckets within the same metric;
+    each segment follows :func:`_parse_weights_dict` semantics (including the at-least-one > 0 check).
+    Misspelled metric names (not in the known-metric whitelist) are raised at runtime by
+    ``forecast_eval.analysis.composite``; this function does not perform that layer of validation,
+    to avoid the config module reverse-importing analysis.
     """
     if raw is None or raw == "":
         return {}
     if isinstance(raw, dict):
-        # 直接传入 dict：值可以是 "k=v,k=v" 字符串或已解析的 dict
+        # dict passed in directly: values can be a "k=v,k=v" string or an already-parsed dict
         out: dict[str, dict[str, float]] = {}
         for metric, sub in raw.items():
             metric_name = str(metric).strip()
@@ -214,16 +217,16 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM (任意 OpenAI-compatible endpoint)
+    # LLM (any OpenAI-compatible endpoint)
     LLM_API_KEY: str
     LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     MODELS: Annotated[list[str], NoDecode] = Field(default_factory=list)
     MODEL_TRAINING_CUTOFFS: Annotated[dict[str, date], NoDecode] = Field(default_factory=dict)
     LLM_MAX_TOKENS: int = 12000
-    # 部分 provider (例如 OpenAI 官方 o-series / GPT-5 的 /v1/chat/completions)
-    # 已弃用 `max_tokens`, 改用 `max_completion_tokens`. 这里按 model slug 覆盖
-    # 实际请求体里使用的字段名; 未声明的模型默认仍使用 `max_tokens`.
-    # 格式: "<model_slug>=max_completion_tokens" 多组用逗号分隔.
+    # Some providers (e.g., OpenAI official o-series / GPT-5 on /v1/chat/completions)
+    # have deprecated `max_tokens` in favor of `max_completion_tokens`. This overrides per
+    # model slug the field name actually used in the request body; undeclared models still default to `max_tokens`.
+    # Format: "<model_slug>=max_completion_tokens" with multiple entries comma-separated.
     MODEL_MAX_TOKENS_PARAM: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
     LLM_TIMEOUT_S: int = 240
     LLM_TEMPERATURE: float = 0.7
@@ -233,8 +236,8 @@ class Settings(BaseSettings):
     LLM_BACKOFF_NETWORK_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [2, 5, 15, 30, 60])
     LLM_BACKOFF_RATE_LIMIT_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [10, 30, 60, 120, 300])
     LLM_BACKOFF_SERVER_5XX_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [5, 15, 30, 60, 120])
-    # 推理类模型 slug 子串列表: 匹配到的模型调用时将不传 temperature / top_p
-    # (o-series / deepseek-r1 / qwq 等推理模型不接受自定义采样参数, 会直接报 400)
+    # List of reasoning-model slug substrings: matched models omit temperature / top_p in calls
+    # (reasoning models such as o-series / deepseek-r1 / qwq do not accept custom sampling parameters and return 400)
     LLM_REASONING_MODEL_PATTERNS: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["o1", "o3", "o4", "r1", "qwq"]
     )
@@ -243,14 +246,14 @@ class Settings(BaseSettings):
     # schema at all — Tavily is never hit and TAVILY_API_KEY becomes optional.
     ENABLE_WEB_SEARCH: bool = True
 
-    # Tavily — 详见 .env.example 中各字段注释
-    # 支持单 key 或 CSV 多 key (`TAVILY_API_KEY=tvly-aaa,tvly-bbb`). 多 key 时
-    # 由 forecast_eval.tavily_keys.TavilyKeyPool 做 least-used 调度 + 失败熔断,
-    # 同一 process 内所有 grid cell 通过模块级 cache 共享同一个池实例 (cache
-    # key = tuple(TAVILY_API_KEY)), 因此用量计数跨 cell 累加而非按 cell 分开.
+    # Tavily - see field comments in .env.example for details
+    # Supports a single key or CSV multi-key (`TAVILY_API_KEY=tvly-aaa,tvly-bbb`). With multiple keys,
+    # forecast_eval.tavily_keys.TavilyKeyPool performs least-used scheduling + failure circuit breaker,
+    # and all grid cells within the same process share a single pool instance via module-level cache
+    # (cache key = tuple(TAVILY_API_KEY)), so usage counts accumulate across cells rather than per-cell.
     TAVILY_API_KEY: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    # 单个 key 命中 429 / 配额超限时, 临时拉黑的秒数. 0 = 不拉黑 (仅靠 acquire
-    # 顺序避开). 401/403 走永久拉黑, 不受此参数影响.
+    # Seconds to temporarily blacklist a single key when it hits 429 / quota-exceeded. 0 = no blacklist
+    # (rely on acquire order alone). 401/403 goes through permanent blacklist, unaffected by this parameter.
     TAVILY_KEY_COOLDOWN_S: float = 60.0
     # Grid-scannable: list of cell-local R values, parsed from CSV in .env.
     # Single-value envs (`TAVILY_MAX_RESULTS=5`) parse to `[5]`; multi-value
@@ -259,13 +262,13 @@ class Settings(BaseSettings):
     # `model_copy(update={"TAVILY_MAX_RESULTS": R})` before being handed to
     # `tavily_search`, so the Tavily request body always sees a single int.
     TAVILY_MAX_RESULTS: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [5])
-    # basic | advanced (Tavily 官方 search_depth)
+    # basic | advanced (Tavily official search_depth)
     TAVILY_SEARCH_DEPTH: str = "basic"
-    # false | markdown | text (旧版 bool 'true' 兼容映射到 'markdown')
+    # false | markdown | text (legacy bool 'true' compatibility maps to 'markdown')
     TAVILY_INCLUDE_RAW_CONTENT: str = "markdown"
-    # 单结果 raw_content 截断长度; 0 = 不截断
+    # Single-result raw_content truncation length; 0 = no truncation
     TAVILY_RAW_CONTENT_MAX_CHARS: int = 8000
-    # false | basic | advanced (Tavily 内部 LLM 速答, 默认关闭以免污染评测)
+    # false | basic | advanced (Tavily internal LLM quick answer, off by default to avoid polluting evaluation)
     TAVILY_INCLUDE_ANSWER: str = "false"
     TAVILY_END_DATE_OFFSET_DAYS: int = -1
     SEARCH_MAX_CONCURRENCY: int = 5
@@ -278,84 +281,87 @@ class Settings(BaseSettings):
     # contract as TAVILY_MAX_RESULTS — dispatcher derives per-cell sub-views
     # carrying a single int; runner / react never see the list form.
     REACT_MAX_SEARCH_CALLS: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [8])
-    # 反思协议总开关: 启用后 user prompt 末尾追加多步推理脚手架, 显著提升搜索 + 反思深度.
-    # 不会写入 prompt_templates (因此 prompt_templates_hash 保持不变), 但会作为 user message
-    # 实际文本落入每个 sample 的 user_prompt 字段, 同时通过 config_snapshot 记入 run_meta.
+    # Master switch for reflection protocol: when enabled, multi-step reasoning scaffolding is appended
+    # at the end of the user prompt, significantly improving search + reflection depth.
+    # Not written to prompt_templates (so prompt_templates_hash remains unchanged), but the actual user message
+    # text lands in each sample's user_prompt field and is also recorded in run_meta via config_snapshot.
     REACT_REFLECTION_PROTOCOL: bool = True
-    # 软性最低搜索次数: LLM 试图给最终答案但累计 web_search < min 时, 注入一条 user nudge
-    # 让它继续检索. 0 = 关闭 (默认; 主要靠反思协议自然驱动). >0 = 开启兜底 floor.
+    # Soft minimum search count: when the LLM tries to give a final answer but cumulative web_search < min,
+    # inject a user nudge asking it to continue retrieval. 0 = disabled (default; rely on reflection protocol
+    # to drive naturally). >0 = enable fallback floor.
     REACT_MIN_SEARCH_CALLS: int = 0
-    # nudge 最多注入几次, 防止 LLM 与系统互相 nudge 死循环. REACT_MAX_STEPS 仍是硬天花板.
+    # Max number of nudges to inject, preventing infinite nudge loops between LLM and system. REACT_MAX_STEPS is still the hard ceiling.
     REACT_MAX_NUDGES: int = 2
-    # v5.1 harness-resilience 开关. 见 openspec/changes/harness-resilience-v1.
-    # REACT_FINAL_ANSWER_RETRY=True: 循环正常结束但 final_raw=="" 时, 用 tools=[] 再调一次 LLM.
-    #   默认 False — 已被 force-final-answer-near-limit-v1 (循环内最后一步硬切 tools=[]) 覆盖,
-    #   保留为可选的循环外应急兜底. 启用会多花一步 LLM 预算 (react_steps + 1).
-    # REACT_BUDGET_EXCEEDED_DROP_TOOLS=True (默认): 一旦累计 web_search >= REACT_MAX_SEARCH_CALLS,
-    #   之后每轮都以 tools=[] 调用 LLM, 让模型只能输出 content (而非反复撞 budget exceeded).
+    # v5.1 harness-resilience switches. See openspec/changes/harness-resilience-v1.
+    # REACT_FINAL_ANSWER_RETRY=True: when the loop ends normally but final_raw=="", call LLM once more with tools=[].
+    #   Default False - superseded by force-final-answer-near-limit-v1 (last-step hard switch to tools=[] within the loop),
+    #   kept as an optional out-of-loop emergency backstop. Enabling costs one extra LLM step (react_steps + 1).
+    # REACT_BUDGET_EXCEEDED_DROP_TOOLS=True (default): once cumulative web_search >= REACT_MAX_SEARCH_CALLS,
+    #   subsequent rounds call the LLM with tools=[], forcing it to output content only (rather than repeatedly hitting budget exceeded).
     REACT_FINAL_ANSWER_RETRY: bool = False
     REACT_BUDGET_EXCEEDED_DROP_TOOLS: bool = True
 
-    # force-final-answer-near-limit-v1: prompt 层面把"步数即将耗尽"的事实前置, 与
-    # REACT_FINAL_ANSWER_RETRY (事后兜底) 互补.
-    # REACT_BUDGET_AWARENESS_PROTOCOL=True: 在 user prompt 末尾追加预算意识段, 告知模型
-    #   总步数 + 总搜索次数, 引导其留最后一步给 \boxed{...} 答案.
-    # REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=True: 在循环临近上限时主动注入 user message:
-    #   - 倒数第 (REACT_FORCE_FINAL_ANSWER_LOOKAHEAD) 步至倒数第二步: 注入软提醒, 仍允许 tool_calls.
-    #   - 最后一步: 注入硬收尾文案 + tools=[], 强制 content-only 输出 \boxed{...}.
-    # REACT_FORCE_FINAL_ANSWER_LOOKAHEAD: int = 多少步开始干预 (>= 1, <= REACT_MAX_STEPS).
-    #   = 1: 只在最后一步硬切, 无软提醒. = 2 (默认): 倒数第二步软提醒 + 最后一步硬切.
+    # force-final-answer-near-limit-v1: front-loads "running out of steps" at the prompt layer,
+    # complementary to REACT_FINAL_ANSWER_RETRY (post-hoc backstop).
+    # REACT_BUDGET_AWARENESS_PROTOCOL=True: append a budget-awareness section at the end of the user prompt,
+    #   informing the model of total steps + total searches, guiding it to reserve the last step for the \boxed{...} answer.
+    # REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=True: actively inject user messages as the loop nears the limit:
+    #   - Step (N - REACT_FORCE_FINAL_ANSWER_LOOKAHEAD) through second-to-last: inject soft reminder, tool_calls still allowed.
+    #   - Last step: inject hard wrap-up text + tools=[], forcing content-only output of \boxed{...}.
+    # REACT_FORCE_FINAL_ANSWER_LOOKAHEAD: int = how many steps before the limit to start intervening (>= 1, <= REACT_MAX_STEPS).
+    #   = 1: hard switch only on the last step, no soft reminder. = 2 (default): soft reminder at second-to-last + hard switch on last.
     REACT_BUDGET_AWARENESS_PROTOCOL: bool = True
     REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT: bool = True
     REACT_FORCE_FINAL_ANSWER_LOOKAHEAD: int = 2
 
-    # 网格搜索锚点 (可选): 当 .env 配置多值 R / C 时, paper 主图固定 R = GRID_DEFAULT_R
-    # 画 BI vs C 曲线; 类似地 GRID_DEFAULT_C 控制 BI vs R 曲线的 C 锚点. 未设置时
-    # plot_analysis.py 默认取列表第一个值. 必须 ∈ 对应列表 (启动期校验).
+    # Grid search anchors (optional): when .env is configured with multi-value R / C, the paper main figure
+    # pins R = GRID_DEFAULT_R to draw the BI vs C curve; similarly GRID_DEFAULT_C controls the C anchor for
+    # the BI vs R curve. When unset, plot_analysis.py defaults to the first value of each list.
+    # Must belong to the corresponding list (validated at startup).
     GRID_DEFAULT_R: int | None = None
     GRID_DEFAULT_C: int | None = None
 
-    # 结构化置信度协议总开关 (v4). 启用后在 user prompt 末尾追加 belief 协议段
-    # (位置在 reflection 协议之后), 要求 LLM 在 \\boxed{...} 之前输出一段
-    # <belief>...</belief> JSON, 携带 probabilities / confidence / key_evidence /
-    # counterevidence / decision_rule. 与 reflection 协议互相独立, 不进
-    # prompt_templates_hash, 由 run_meta.belief_protocol_text/_hash 记录指纹.
-    # 默认关闭以保 v3 行为字节级一致; 启用前先在候选模型上 pilot 解析率.
+    # Master switch for the structured confidence protocol (v4). When enabled, a belief protocol section
+    # is appended at the end of the user prompt (positioned after the reflection protocol), requiring the
+    # LLM to emit a <belief>...</belief> JSON before \\boxed{...}, carrying probabilities / confidence /
+    # key_evidence / counterevidence / decision_rule. Independent of the reflection protocol; does not enter
+    # prompt_templates_hash; fingerprinted via run_meta.belief_protocol_text/_hash.
+    # Off by default to preserve v3 behavior byte-for-byte; pilot parse rate on candidate models before enabling.
     BELIEF_PROTOCOL: bool = False
 
     # -------- Search leak filter (Stage 2 detector, search-leak-filter-v1) --------
-    # 总开关: True 时 tavily_search 返回前每条 result 经独立 LLM (detector) 审核,
-    # verdict=drop 整条剔除; False 时字节级回退到本提案前. 默认开启 (默认严苛).
-    # 启用要求 LEAK_DETECTOR_API_KEY / LEAK_DETECTOR_MODEL 必须配齐, 且
-    # ENABLE_WEB_SEARCH 必须同时为 True (否则 detector 路径死代码).
+    # Master switch: when True, every result from tavily_search is audited by an independent LLM (detector)
+    # before return; verdict=drop removes the entire item. When False, byte-for-byte revert to pre-proposal behavior.
+    # Enabled by default (default-strict). Requires LEAK_DETECTOR_API_KEY / LEAK_DETECTOR_MODEL to be filled in,
+    # and ENABLE_WEB_SEARCH must also be True (otherwise the detector path is dead code).
     ENABLE_SEARCH_LEAK_FILTER: bool = True
-    # detector 自有 OpenAI-compatible endpoint 配置, 与 LLM_* 完全解耦, 允许
-    # detector 选用比被评测模型更高级的模型做严苛判断.
+    # Detector's own OpenAI-compatible endpoint config, fully decoupled from LLM_*, allowing the detector
+    # to use a more advanced model than the evaluated models for strict judgment.
     LEAK_DETECTOR_API_KEY: str = ""
-    # 留空时由 leak_filter 在 client 初始化阶段回填 LLM_BASE_URL.
+    # When empty, leak_filter back-fills LLM_BASE_URL during client initialization.
     LEAK_DETECTOR_BASE_URL: str = ""
-    # detector 模型 slug. 不允许 :online 后缀 (provider-native browsing 防护).
+    # Detector model slug. ":online" suffix is not allowed (provider-native browsing protection).
     LEAK_DETECTOR_MODEL: str = ""
     LEAK_DETECTOR_TIMEOUT_S: int = 60
     LEAK_DETECTOR_TEMPERATURE: float = 0.0
     LEAK_DETECTOR_MAX_TOKENS: int = 512
     LEAK_DETECTOR_RETRY_MAX: int = 3
     LEAK_DETECTOR_BACKOFF_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [2, 5, 15])
-    # drop = 失败条目剔除 (默认, fail-closed); keep = 失败条目透传 (escape hatch).
+    # drop = remove failed items (default, fail-closed); keep = pass through failed items (escape hatch).
     LEAK_DETECTOR_FAIL_ACTION: str = "drop"
     LEAK_DETECTOR_CONCURRENCY: int = 5
-    # 人工版本号; sha256(prompt_template) 自动算 hash, 这个是给人读的标签.
+    # Manual version label; sha256(prompt_template) is auto-hashed; this is a human-readable label.
     LEAK_DETECTOR_PROMPT_VERSION: str = "v1"
 
     # -------- Composite score weights (composite-score-by-subtype) --------
-    # 综合得分按子题型加权: 对所有指标 (per_model_summary 全部列) 在两个维度
-    # 上独立做"先按桶分别算 → 再按权重合成 → 缺失桶剔除并归一化"的合成。
-    # 写出 runs/{run_id}/analysis/per_model_composite_by_question_type.csv
-    # 与 .../per_model_composite_by_choice_type.csv. 旧 per_model_summary.csv
-    # 与 per_model_by_question_type.csv 保持原"全部题混算"语义不变。
+    # Composite score weighted by subtype: for all metrics (all columns of per_model_summary) on two dimensions
+    # independently perform "compute per bucket first -> synthesize by weight -> exclude missing buckets and renormalize".
+    # Writes runs/{run_id}/analysis/per_model_composite_by_question_type.csv
+    # and .../per_model_composite_by_choice_type.csv. The legacy per_model_summary.csv and
+    # per_model_by_question_type.csv keep their original "all questions mixed" semantics unchanged.
     #
-    # 默认权重按"难题区分度高"原则: yes_no/binary_named 各 0.15、
-    # multiple_choice 0.70; single 0.40、multi 0.60.
+    # Default weights follow the "hard questions discriminate more" principle: yes_no/binary_named at 0.15 each,
+    # multiple_choice at 0.70; single 0.40, multi 0.60.
     COMPOSITE_WEIGHTS_QTYPE: Annotated[dict[str, float], NoDecode] = Field(
         default_factory=lambda: {
             "yes_no": 0.15,
@@ -366,9 +372,9 @@ class Settings(BaseSettings):
     COMPOSITE_WEIGHTS_CTYPE: Annotated[dict[str, float], NoDecode] = Field(
         default_factory=lambda: {"single": 0.40, "multi": 0.60}
     )
-    # 按指标覆盖: 形如 ``"fss=yes_no=0.05,binary_named=0.05,multiple_choice=0.90;
-    # cohen_kappa=..."``. 缺省走全局默认; 指标名拼写错误 (不在 _SUMMARY_FIELDS
-    # + 概率族白名单内) 由 analysis.composite 运行时 raise.
+    # Per-metric overrides: of the form ``"fss=yes_no=0.05,binary_named=0.05,multiple_choice=0.90;
+    # cohen_kappa=..."``. Defaults fall back to the global defaults; misspelled metric names (not in
+    # _SUMMARY_FIELDS + probability-family whitelist) are raised at runtime by analysis.composite.
     COMPOSITE_WEIGHT_OVERRIDES_QTYPE: Annotated[
         dict[str, dict[str, float]], NoDecode
     ] = Field(default_factory=dict)
@@ -406,8 +412,8 @@ class Settings(BaseSettings):
     @field_validator("TAVILY_API_KEY", mode="before")
     @classmethod
     def _parse_tavily_keys(cls, v: Any) -> list[str]:
-        # 单值 (`tvly-xxx`) 解析为 length-1 list, CSV 多值展开. 空值返回 []
-        # 让 _post_validate 统一根据 ENABLE_WEB_SEARCH 决定是否要求非空.
+        # Single value (`tvly-xxx`) parses to a length-1 list, CSV multi-value expands. Empty returns []
+        # so _post_validate uniformly decides whether to require non-empty based on ENABLE_WEB_SEARCH.
         return _parse_csv(v)
 
     @field_validator(
@@ -481,8 +487,8 @@ class Settings(BaseSettings):
     @field_validator("COMPOSITE_WEIGHTS_QTYPE", mode="before")
     @classmethod
     def _parse_composite_weights_qtype(cls, v: Any) -> dict[str, float]:
-        # 空字符串视为 "走默认 dict" — pydantic field default_factory 已经
-        # 提供了完整的默认权重，这里只在用户显式设置时解析。
+        # Empty string is treated as "use default dict" - pydantic field default_factory already
+        # provides the complete default weights; we only parse when the user explicitly sets a value.
         if v is None or v == "":
             return {
                 "yes_no": 0.15,
@@ -531,7 +537,7 @@ class Settings(BaseSettings):
     @field_validator("TAVILY_INCLUDE_RAW_CONTENT", mode="before")
     @classmethod
     def _parse_include_raw_content(cls, v: Any) -> str:
-        # 兼容旧布尔值: True → "markdown", False → "false"
+        # Compatibility for legacy bool values: True -> "markdown", False -> "false"
         if isinstance(v, bool):
             return "markdown" if v else "false"
         s = str(v).strip().lower()
@@ -606,8 +612,8 @@ class Settings(BaseSettings):
                     f"MODELS entry {slug!r} must not contain '::' — that delimiter is "
                     "reserved for grid-search virtual slugs (compose_virtual_slug)"
                 )
-        # LLM_API_KEY 是普通字符串; TAVILY_API_KEY 现已升级为 list[str]
-        # (CSV 多 key 支持), 需要逐个 placeholder 校验.
+        # LLM_API_KEY is a plain string; TAVILY_API_KEY is now upgraded to list[str]
+        # (CSV multi-key support), so each placeholder must be validated individually.
         if not self.LLM_API_KEY:
             raise ValueError("LLM_API_KEY must not be empty")
         if any(tok in self.LLM_API_KEY for tok in _PLACEHOLDER_TOKENS):
@@ -665,8 +671,8 @@ class Settings(BaseSettings):
             )
         if self.REACT_MAX_NUDGES < 0:
             raise ValueError("REACT_MAX_NUDGES must be >= 0")
-        # v5.1 harness-resilience 开关: pydantic 已校验 bool 类型; 这里只做防御性 type guard,
-        # 防止测试通过 model_copy(update={...}) 把任意值塞进来.
+        # v5.1 harness-resilience switches: pydantic has already validated the bool type; this is just
+        # a defensive type guard to prevent tests from injecting arbitrary values via model_copy(update={...}).
         if not isinstance(self.REACT_FINAL_ANSWER_RETRY, bool):
             raise ValueError(
                 f"REACT_FINAL_ANSWER_RETRY must be bool; got {type(self.REACT_FINAL_ANSWER_RETRY).__name__}"
@@ -676,7 +682,7 @@ class Settings(BaseSettings):
                 f"REACT_BUDGET_EXCEEDED_DROP_TOOLS must be bool; got "
                 f"{type(self.REACT_BUDGET_EXCEEDED_DROP_TOOLS).__name__}"
             )
-        # force-final-answer-near-limit-v1 三件套校验.
+        # force-final-answer-near-limit-v1 triple-set validation.
         if not isinstance(self.REACT_BUDGET_AWARENESS_PROTOCOL, bool):
             raise ValueError(
                 f"REACT_BUDGET_AWARENESS_PROTOCOL must be bool; got "
@@ -712,7 +718,7 @@ class Settings(BaseSettings):
                 f"GRID_DEFAULT_C={self.GRID_DEFAULT_C} not in REACT_MAX_SEARCH_CALLS "
                 f"={self.REACT_MAX_SEARCH_CALLS}; pick one of the configured cells"
             )
-        # search-leak-filter-v1 启动校验
+        # search-leak-filter-v1 startup validation
         if self.LEAK_DETECTOR_FAIL_ACTION not in ("drop", "keep"):
             raise ValueError(
                 f"LEAK_DETECTOR_FAIL_ACTION must be one of {{drop, keep}}; "
@@ -769,9 +775,9 @@ class Settings(BaseSettings):
                     "LEAK_DETECTOR_MODEL still holds a placeholder token; "
                     "fill a real model slug in .env"
                 )
-        # composite-score-by-subtype 后置校验: field_validator (mode=before) 不会
-        # 处理 default_factory 直接产生的 dict, 也不会处理 model_copy(update=...)
-        # 注入的值, 这里再走一遍以挡住代码内构造的 Settings.
+        # composite-score-by-subtype post-validation: field_validator (mode=before) does not handle
+        # dicts produced directly by default_factory, nor values injected via model_copy(update=...);
+        # we run through again here to guard against in-code-constructed Settings.
         for bucket, weight in self.COMPOSITE_WEIGHTS_QTYPE.items():
             if bucket not in COMPOSITE_QTYPE_BUCKETS:
                 raise ValueError(

@@ -42,7 +42,7 @@ from .errors import AuthError, ErrorKind, classify, should_retry
 from .search import SearchResult, SearchResultItem
 
 
-# ---- Prompt template (D5 六原则) ---------------------------------------------
+# ---- Prompt template (D5 six principles) ---------------------------------------------
 
 # Six explicit constraints required by the spec (search-leak-filter-v1):
 #   1. cutoff_date placeholder rendered as ISO 8601

@@ -12,8 +12,9 @@ from .tavily_keys import AllKeysExhausted, TavilyKeyPool, get_pool
 
 
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
-# Tavily 用 401 / 403 表示 key 无效或权限问题 (永久拉黑); 429 / 配额相关返回
-# 也走 429 (临时 cooldown). 其他状态码归到 "other" (网络/服务器错误).
+# Tavily uses 401 / 403 to signal an invalid key or permission issue (permanent
+# blacklist); 429 / quota-related responses also use 429 (temporary cooldown).
+# Other status codes fall into "other" (network / server errors).
 _AUTH_STATUS = frozenset({401, 403})
 _RATE_LIMIT_STATUS = frozenset({429})
 
@@ -24,10 +25,12 @@ class SearchResultItem:
     url: str
     content: str
     published_date: str | None = None
-    # Tavily 返回的相关性 score (0-1, 越大越相关). 缺失时为 None.
+    # Relevance score returned by Tavily (0-1, higher is more relevant). None
+    # when missing.
     score: float | None = None
-    # 完整页面正文 (markdown / text). include_raw_content="false" 时 Tavily 不返回, 保持 None.
-    # 长度上限由 settings.TAVILY_RAW_CONTENT_MAX_CHARS 在 _parse_tavily_response 处截断.
+    # Full page body (markdown / text). Tavily does not return this when
+    # include_raw_content="false"; left as None. The length cap is enforced by
+    # settings.TAVILY_RAW_CONTENT_MAX_CHARS at _parse_tavily_response.
     raw_content: str | None = None
 
 
@@ -52,9 +55,10 @@ class SearchResult:
     def to_llm_payload(self) -> dict[str, Any]:
         """Compact payload handed back to the LLM.
 
-        可选字段 (published_date / score / raw_content / answer) 仅在非 None 时输出,
-        避免 LLM 看到一堆 null 占位降低判断信号. error 路径保留 answer=None 以便
-        消费方一眼区分成功/失败.
+        Optional fields (published_date / score / raw_content / answer) are
+        only emitted when non-None, to avoid the LLM seeing a pile of null
+        placeholders that dilute the judgment signal. The error path keeps
+        answer=None so consumers can tell success / failure apart at a glance.
         """
         if self.error_kind is not None:
             return {
@@ -84,7 +88,8 @@ class SearchResult:
 
 
 def _truncate_raw_content(text: str | None, max_chars: int) -> str | None:
-    """`max_chars=0` 表示不截断; 命中阈值时追加省略提示."""
+    """`max_chars=0` means no truncation; appends a truncation hint when the
+    threshold is hit."""
     if text is None:
         return None
     if max_chars <= 0 or len(text) <= max_chars:
@@ -132,14 +137,16 @@ def _build_request_payload(
     settings: Settings,
     api_key: str,
 ) -> dict[str, Any]:
-    """组装 Tavily 请求体. 把 enum 字符串映射到 Tavily 协议接受的类型,
-    且 include_answer="false" 时整个字段不发送 (Tavily 默认即 false).
+    """Assemble the Tavily request body. Maps enum strings to the types the
+    Tavily protocol accepts, and omits the include_answer field entirely when
+    set to "false" (Tavily's default is already false).
 
-    `api_key` 由调用方从 TavilyKeyPool 取出 (而非读 settings.TAVILY_API_KEY,
-    后者已升级为 list[str]); 这样每次请求都能换 key 实现轮换 + 熔断.
+    `api_key` is supplied by the caller from TavilyKeyPool (rather than read
+    from settings.TAVILY_API_KEY, which has been upgraded to list[str]); this
+    lets each request swap keys to enable rotation + circuit breaking.
     """
     raw_setting = settings.TAVILY_INCLUDE_RAW_CONTENT
-    # Tavily 的 include_raw_content 接受 bool | "markdown" | "text"
+    # Tavily's include_raw_content accepts bool | "markdown" | "text"
     raw_param: bool | str = False if raw_setting == "false" else raw_setting
 
     payload: dict[str, Any] = {
@@ -183,15 +190,19 @@ async def tavily_search(
     """Call Tavily /search with the given `end_date` injected by the caller.
 
     Multi-key behaviour:
-    - 每次尝试前从 `pool` (默认按 settings.TAVILY_API_KEY 走 process-wide cache)
-      acquire 一把 least-used 健康 key.
-    - 401/403 → 该 key 永久拉黑, **不算网络重试**, 立即换 key 再试 (no sleep).
-    - 429 → 该 key 临时 cooldown, 同样立即换 key 再试.
-    - 5xx / 网络 / bad-JSON → 计入 `SEARCH_RETRY_MAX` 网络重试配额, 按
-      `SEARCH_BACKOFF_S` sleep 后再试 (key 不拉黑).
-    - 所有 key 都不可用 (AllKeysExhausted) → 立即返回错误, 不再轮转.
+    - Before each attempt, acquire a least-used healthy key from `pool` (by
+      default a process-wide cache keyed on settings.TAVILY_API_KEY).
+    - 401/403 -> permanently blacklist that key, **does NOT count as a network
+      retry**, immediately swap key and try again (no sleep).
+    - 429 -> temporarily cool down that key, also immediately swap key and
+      try again.
+    - 5xx / network / bad-JSON -> consumes the `SEARCH_RETRY_MAX` network-retry
+      quota, sleeps per `SEARCH_BACKOFF_S` then retries (key not blacklisted).
+    - All keys unavailable (AllKeysExhausted) -> return the error immediately,
+      no further rotation.
 
-    返回值仍是 `SearchResult` (不抛异常), 让 ReAct 循环能把 tool_result 喂回 LLM.
+    The return value is still a `SearchResult` (does not raise), so the ReAct
+    loop can feed tool_result back into the LLM.
     """
     owns_client = client is None
     if owns_client:
@@ -203,8 +214,9 @@ async def tavily_search(
     sequence = list(settings.SEARCH_BACKOFF_S)
     max_attempts = max(1, int(settings.SEARCH_RETRY_MAX))
     n_keys = max(1, len(pool.states))
-    # 硬上限防 cooldown_s=0 / 全部 key 持续返回 429 时的死循环;
-    # 正常路径靠 AllKeysExhausted 或 max_attempts 退出.
+    # Hard ceiling to guard against an infinite loop when cooldown_s=0 or all
+    # keys keep returning 429; the normal path exits via AllKeysExhausted or
+    # max_attempts.
     hard_limit = max_attempts + n_keys
     last_error_kind: str | None = None
     last_error_message: str | None = None
@@ -257,7 +269,8 @@ async def tavily_search(
                     try:
                         data = resp.json()
                     except ValueError as e:
-                        # 200 但非 JSON: 不是 key 问题, 走网络重试配额; 不拉黑 key.
+                        # 200 but not JSON: not a key problem, consumes the
+                        # network-retry quota; key is not blacklisted.
                         await pool.report_ok(api_key)
                         last_error_kind = "bad_response"
                         last_error_message = f"Tavily returned non-JSON body: {e}"
@@ -286,7 +299,8 @@ async def tavily_search(
                     last_error_kind = "auth"
                     last_error_message = f"HTTP {status}: {resp.text[:500]}"
                     logger.debug("tavily auth error iter={} status={}", total_iterations, status)
-                    # 不算网络重试, 也不 sleep — 直接换 key 重试.
+                    # Does not count as a network retry, no sleep — just swap
+                    # key and retry.
                 elif status in _RATE_LIMIT_STATUS:
                     await pool.report_failure(api_key, "rate_limit")
                     last_error_kind = "rate_limit"
@@ -294,9 +308,10 @@ async def tavily_search(
                     logger.debug(
                         "tavily rate limit iter={} status={}", total_iterations, status
                     )
-                    # 同上: 不计 attempt, 不 sleep.
+                    # Same as above: does not count as an attempt, no sleep.
                 else:
-                    # 5xx / 其他 4xx: 视作服务端瞬时故障, 不拉黑 key, 走网络重试.
+                    # 5xx / other 4xx: treat as a transient server fault, do
+                    # not blacklist the key, consume the network-retry quota.
                     await pool.report_failure(api_key, "other")
                     last_error_kind = "http_error"
                     last_error_message = f"HTTP {status}: {resp.text[:500]}"
@@ -313,7 +328,8 @@ async def tavily_search(
                 wait_s = float(sequence[idx]) if idx < len(sequence) else 0.0
                 if wait_s > 0:
                     await asyncio.sleep(wait_s)
-            # 否则 (auth / rate_limit): 直接进入下一次循环换 key, 不 sleep.
+            # Otherwise (auth / rate_limit): fall through to the next loop
+            # iteration to swap key, no sleep.
     finally:
         if owns_client:
             await client.aclose()

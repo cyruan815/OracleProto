@@ -1,59 +1,79 @@
-# Forecast Evaluation — 项目整体框架
+# Forecast Evaluation — Project Framework
 
-## 1. 项目目标
+## 1. Project goal
 
-基于 `forecast_eval_set_example.db` 数据集，评测 LLM 在**预测类单选/多选题**上的能力。
+Evaluate the LLM's ability on **forecasting-style single/multi-choice
+questions** based on the `forecast_eval_set_example.db` dataset.
 
-核心特色：通过自研 `web_search` Tool 限制 LLM 的信息获取边界——**只允许 LLM 搜索到每道题 `end_time`（事件解决日期）之前的信息**，以此模拟"在题目时间点预测未来"的真实场景，避免信息泄露。
+Core distinguishing feature: the in-house `web_search` tool restricts the
+LLM's information-acquisition boundary — **the LLM is only allowed to find
+information published before each question's `end_time` (the event
+resolution date)** — simulating the "predict the future at the question's
+point in time" scenario and preventing information leakage.
 
-> 重要限制：工具级时间截断只约束**工具搜索**这一条信息通路；模型参数记忆、provider 内置 browsing、搜索结果 snippet/缓存等泄漏源不可能被 Tool 层阻断。完整威胁模型与缓解手段见 §3.8。
+> Important caveat: tool-level time cutoff constrains only the **tool-search**
+> information channel; leakage sources like the model's parametric memory,
+> provider built-in browsing, and search-result snippets/caches cannot be
+> blocked by the tool layer. The complete threat model and mitigations are
+> in §3.8.
 
-- 评测 319 道题（`yes_no` 93 + `binary_named` 11 + `multiple_choice` 215），其中 285 道单选 + 34 道多选
-- 通过 OpenRouter 的 OpenAI-compatible API 同时评测多个模型
-- LLM 以 ReAct + Tool Use 模式与 `web_search` 工具交互
-- 评测结果写入独立的 `results.db`，后续分析独立进行
+- 319 questions (`yes_no` 93 + `binary_named` 11 + `multiple_choice` 215),
+  including 285 single-select + 34 multi-select
+- Evaluates multiple models concurrently via OpenRouter's OpenAI-compatible
+  API
+- The LLM interacts with the `web_search` tool in ReAct + Tool Use mode
+- Evaluation results are written into independent `results.db` files, with
+  analysis performed independently afterwards
 
 ---
 
-## 2. 数据源
+## 2. Data source
 
-### 2.1 原数据库 `forecast_eval_set_example.db`（只读）
+### 2.1 Source database `forecast_eval_set_example.db` (read-only)
 
-> 注：仓库自带的示例数据集文件名是 `forecast_eval_set_example.db`，主表名是
-> `forecast_eval_set_example`。两者均通过 `.env` 的 `SOURCE_DB` / `SOURCE_TABLE`
-> 参数可配置；自带数据集时只要保持 7 列 schema 与 `dataset_metadata` 结构一致即可。
-> `SOURCE_TABLE` 仅接受 SQLite 合法标识符 `[A-Za-z_][A-Za-z0-9_]*`，启动时校验。
+> Note: the example dataset file shipped with the repo is named
+> `forecast_eval_set_example.db`, and its main table is named
+> `forecast_eval_set_example`. Both are configurable via `.env`'s
+> `SOURCE_DB` / `SOURCE_TABLE` parameters; with a custom dataset, just keep
+> the 7-column schema and `dataset_metadata` structure consistent.
+> `SOURCE_TABLE` only accepts SQLite-legal identifiers
+> `[A-Za-z_][A-Za-z0-9_]*` and is validated at startup.
 
-主表 `forecast_eval_set_example`，**319 行 × 7 列**：
+Main table `forecast_eval_set_example`, **319 rows × 7 columns**:
 
-| 字段            | 类型    | 说明                                                                                                                          |
+| Field           | Type    | Description                                                                                                                          |
 | --------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `id`            | TEXT PK | 题目唯一 ID（来自 HuggingFace 源）                                                                                            |
-| `choice_type`   | TEXT    | `single` \| `multi`，依据 `answer` 字母个数（1 个 → `single`，>1 → `multi`）                                                  |
-| `question_type` | TEXT    | `yes_no` \| `binary_named` \| `multiple_choice`，决定走哪套 prompt 模板                                                       |
-| `event`         | TEXT    | 事件描述（**不含**选项、**不含**角色设定、**不含**格式要求）                                                                  |
-| `options`       | TEXT    | JSON array of strings。`yes_no`=`["Yes","No"]`；`binary_named`=两个实体名；`multiple_choice`=按 A/B/C... 顺序的标签            |
-| `answer`        | TEXT    | 字母编码：单选 `'A'`；多选 `'A, B'`（逗号 + 空格分隔）。字母 ↔ 选项索引规则见 §3.7                                            |
-| `end_time`      | TEXT    | 事件解决日期（Asia/Shanghai），`YYYY-MM-DD` 格式                                                                              |
+| `id`            | TEXT PK | Unique question ID (sourced from HuggingFace)                                                                            |
+| `choice_type`   | TEXT    | `single` \| `multi`, based on the letter count in `answer` (1 → `single`, >1 → `multi`)                                                  |
+| `question_type` | TEXT    | `yes_no` \| `binary_named` \| `multiple_choice`, determining which prompt template set to use                                                       |
+| `event`         | TEXT    | Event description (**without** options, **without** role-setting, **without** format requirements)                                                                  |
+| `options`       | TEXT    | JSON array of strings. `yes_no`=`["Yes","No"]`; `binary_named`=two entity names; `multiple_choice`=labels in A/B/C... order            |
+| `answer`        | TEXT    | Letter encoding: single-select `'A'`; multi-select `'A, B'` (comma + space separated). Letter ↔ option-index rule in §3.7                                            |
+| `end_time`      | TEXT    | Event resolution date (Asia/Shanghai), `YYYY-MM-DD` format                                                                              |
 
-索引（示例数据集自带；自带数据集请按 `idx_<table>_<column>` 命名以保持一致）：
-`idx_forecast_eval_set_example_choice_type` / `idx_forecast_eval_set_example_question_type` / `idx_forecast_eval_set_example_end_time`。
+Indexes (shipped with the example dataset; for custom datasets, follow the
+`idx_<table>_<column>` naming for consistency):
+`idx_forecast_eval_set_example_choice_type` /
+`idx_forecast_eval_set_example_question_type` /
+`idx_forecast_eval_set_example_end_time`.
 
-辅表 `dataset_metadata`（一行），含 `features_json`，记录所有 prompt 模板、列说明、转换日志。
+Auxiliary table `dataset_metadata` (single row), contains `features_json`,
+recording all prompt templates, column descriptions, and conversion logs.
 
-### 2.2 题量分布
+### 2.2 Question count distribution
 
-| question_type / choice_type | single | multi | 合计 |
+| question_type / choice_type | single | multi | total |
 | --------------------------- | -----: | ----: | ---: |
 | `yes_no`                    |     93 |     0 |   93 |
 | `binary_named`              |     11 |     0 |   11 |
 | `multiple_choice`           |    181 |    34 |  215 |
-| **合计**                    |  **285** | **34** | **319** |
+| **total**                   |  **285** | **34** | **319** |
 
-时间范围：`2026-01-15` ~ `2026-04-14`。
-`multiple_choice` 选项数量范围：3 ~ 35（>26 时字母进入 ASCII 续接，详见 §3.7）。
+Time range: `2026-01-15` ~ `2026-04-14`.
+`multiple_choice` option count range: 3 ~ 35 (when > 26, letters enter the
+ASCII continuation, see §3.7).
 
-### 2.3 样例
+### 2.3 Examples
 
 `yes_no`：
 ```
@@ -81,24 +101,28 @@ answer:   "A"
 end_time: "2026-01-27"
 ```
 
-`multiple_choice`（multi）：
+`multiple_choice` (multi):
 ```
 event:    "Oscars 2026: Achievement in Casting Nominations"
-options:  [<12 个候选名单条目>]
+options:  [<12 nominee list entries>]
 answer:   "A, B, D, E"
 end_time: "2026-01-22"
 ```
 
-> 关键约定：`event` 字段**不含**选项与格式要求；这些都在调用时由模板拼接（§3.6）。
-> `dataset_metadata.features_json.prompt_reconstruction` 已经把所有模板和拼接规则保存好，loader 读出即可使用，**不要硬编码到代码里**。
+> Key convention: the `event` field **does not contain** options or format
+> requirements; those are spliced in at call time by the template (§3.6).
+> `dataset_metadata.features_json.prompt_reconstruction` already stores all
+> templates and concatenation rules — the loader reads them out and uses
+> them, **do not hard-code them in source**.
 
 ---
 
-## 3. 核心设计理念
+## 3. Core design principles
 
-### 3.1 LLM 看不到 `end_date`（最重要的安全边界）
+### 3.1 The LLM does not see `end_date` (the most important safety boundary)
 
-`web_search` Tool 向 LLM 暴露的 schema **只有 `query` 一个参数**：
+The schema the `web_search` tool exposes to the LLM has **only the
+`query` parameter**:
 
 ```python
 {
@@ -117,59 +141,80 @@ end_time: "2026-01-22"
 }
 ```
 
-真正调用 Tavily 时，`end_date` 参数**由 Tool 实现层从当前题目的 `end_time` 硬编码注入**，LLM 无法感知、无法绕过。
+When Tavily is actually called, the `end_date` parameter **is hard-coded
+and injected by the tool implementation layer from the current question's
+`end_time`** — the LLM cannot perceive it and cannot bypass it.
 
 ```python
 def web_search(query: str, question_end_time: str) -> dict:
-    end_date = (date.fromisoformat(question_end_time)        # 已是 YYYY-MM-DD
+    end_date = (date.fromisoformat(question_end_time)        # already YYYY-MM-DD
                 + timedelta(days=TAVILY_END_DATE_OFFSET_DAYS)).isoformat()
     return tavily_client.search(query=query, end_date=end_date, ...)
 ```
 
-### 3.2 严格时间截断：`end_date = end_time - 1 day`
+### 3.2 Strict time cutoff: `end_date = end_time - 1 day`
 
-`end_time` 已经是 `YYYY-MM-DD` 粒度。为避免"事件当天信息泄露"（很多赛事/新闻在当天就出结果），默认 `TAVILY_END_DATE_OFFSET_DAYS=-1`（推荐的严格默认值；数值越小越保守）：
+`end_time` is already at `YYYY-MM-DD` granularity. To avoid "same-day
+information leakage" (many events/news are resolved the same day), the
+default is `TAVILY_END_DATE_OFFSET_DAYS=-1` (the recommended strict
+default; smaller values are more conservative):
 
 ```
 question.end_time = 2026-01-18
 → Tavily end_date = 2026-01-17
 ```
 
-可在 `.env` 改为 `0`（当天可见，更宽松）或 `-2`、`-3`（更保守）。项目统一以 `-1` 为基准，所有报表默认在 `-1` 下比较。
+This can be changed in `.env` to `0` (same day visible, more lenient) or
+`-2`, `-3` (more conservative). The project uses `-1` uniformly as the
+baseline, and all reports default to comparison under `-1`.
 
-### 3.3 原数据只读，每次 run 独立成目录、每个模型独立成 DB
+### 3.3 Source data is read-only; each run gets its own directory; each model gets its own DB
 
-`forecast_eval_set_example.db` 不动。每次 `python evaluation.py` 启动都会在 `RUNS_ROOT`
-(默认 `./runs`) 下创建一个独立的 `{run_id}/` 子目录，内部结构：
+`forecast_eval_set_example.db` is never touched. Every invocation of
+`python evaluation.py` creates an independent `{run_id}/` subdirectory
+under `RUNS_ROOT` (default `./runs`), with the following structure:
 
 ```
 {run_id}/
-  manifest.json     # run 级元信息 (run_id, sampling_n, models, filters, hashes...)
-  db/<model_slug>.db  # 每个参评模型一个 sqlite 文件, 内部自带 questions + prompt_templates 副本
-  analysis/         # 跑完后由 forecast_eval.analysis 生成的 CSV / MD / JSON
+  manifest.json     # run-level metadata (run_id, sampling_n, models, filters, hashes...)
+  db/<model_slug>.db  # one sqlite per evaluated model, self-contains questions + prompt_templates copies
+  analysis/         # CSV / MD / JSON generated by forecast_eval.analysis after the run
   logs/{run_id}.log
 ```
 
-DB 层只存**原始记录**，不做任何聚合/统计。pass@1、pass_any@N、majority 等指标
-由后置的 `analysis/` 过程单独计算并写回磁盘（详见 §5 / §11）。
+The DB layer stores **raw records only** and performs no aggregation /
+statistics. Metrics like pass@1, pass_any@N, majority, etc. are computed
+separately by the post-hoc `analysis/` process and written back to disk
+(see §5 / §11).
 
-### 3.4 严格匹配评分（字母集合层面）
+### 3.4 Strict-match scoring (at the letter-set level)
 
-判分**完全在字母集合层面**进行，与各题型的输出形态无关：
+Scoring happens **entirely at the letter-set level**, independent of each
+question type's output form:
 
-- 数据库 `answer` 字段是字母逗号串（`'A'` / `'A, B'`），split 后变成 `frozenset({'A'})` / `frozenset({'A','B'})`
-- LLM 输出的 `\boxed{...}` 经 parser 按 `question_type` 归一为同样的 `frozenset[str]`（详见 §3.7）
-- `frozenset == frozenset` 即对，漏选/多选/顺序无关都按"严格相等"算
+- The DB `answer` field is a comma-separated letter string (`'A'` / `'A,
+  B'`), split into `frozenset({'A'})` / `frozenset({'A','B'})`
+- The LLM's `\boxed{...}` output is normalised by the parser per
+  `question_type` into the same `frozenset[str]` (see §3.7)
+- `frozenset == frozenset` is correct; missed selections / extra
+  selections / ordering are all scored as "strict equality"
 
-### 3.5 Parse 失败不是 error
+### 3.5 Parse failure is not an error
 
-LLM 没输出 `\boxed{...}`、或输出 "I cannot predict the future" 之类的软性拒绝，**不走 retry 路径**，而是记 `parse_ok=0`, `correct=NULL`，单独统计 refusal rate 作为模型能力的一个维度。
+When the LLM does not output `\boxed{...}` or outputs a soft refusal like
+"I cannot predict the future", **the retry path is not taken**; instead
+`parse_ok=0`, `correct=NULL` is recorded, and the refusal rate is
+separately accumulated as one dimension of model capability.
 
-### 3.6 提示词拼接（user message assembly）
+### 3.6 Prompt assembly (user message assembly)
 
-源数据库**只存原料**（`event` / `options` / `question_type` / `end_time`）。系统每次起 sample 时，从 `dataset_metadata.features_json.prompt_reconstruction` 读模板，按 `question_type` 拼一条完整 user message 喂给 LLM。
+The source DB **stores only raw material** (`event` / `options` /
+`question_type` / `end_time`). When the system spawns a sample, it reads
+the template from `dataset_metadata.features_json.prompt_reconstruction`
+and assembles a complete user message per `question_type` to feed to the
+LLM.
 
-模板（`prompt_template`，存于 metadata）：
+Template (`prompt_template`, stored in metadata):
 ```
 {agent_role} The event to be predicted: "{event} (resolved around {end_time} (GMT+8)).{outcomes_block}"
 
@@ -178,105 +223,141 @@ IMPORTANT: Your final answer MUST end with this exact format:
 {guidance}
 ```
 
-各 slot 渲染规则：
+Per-slot rendering rules:
 
-| slot              | 渲染逻辑                                                                                                       |
+| slot              | Rendering logic                                                                                                       |
 | ----------------- | -------------------------------------------------------------------------------------------------------------- |
-| `agent_role`      | 常量 `"You are an agent that can predict future events."`，原样填入                                            |
-| `event`           | `<SOURCE_TABLE>.event` 原文                                                                                    |
-| `end_time`        | `<SOURCE_TABLE>.end_time` 原文（`YYYY-MM-DD`）                                                                 |
-| `outcomes_block`  | `yes_no` / `binary_named` → **空字符串**（选项已隐含在 `output_format` 中）<br>`multiple_choice` → `"\n" + "A. <options[0]>\nB. <options[1]>\n..."`，字母按 §3.7 索引→字母规则生成 |
-| `output_format`   | 三选一（按 `question_type`）：`yes_no_output_format` / `binary_named_output_format` / `multiple_choice_output_format`。**`binary_named` 模板含 `<options[0]>` / `<options[1]>` 占位符，拼接时必须替换为实际两个实体名** |
-| `guidance`        | 常量 `"Do not use any other format. Do not refuse to make a prediction. ..."`，原样填入                       |
+| `agent_role`      | constant `"You are an agent that can predict future events."`, inserted as-is                                            |
+| `event`           | `<SOURCE_TABLE>.event` original text                                                                                    |
+| `end_time`        | `<SOURCE_TABLE>.end_time` original text (`YYYY-MM-DD`)                                                                 |
+| `outcomes_block`  | `yes_no` / `binary_named` → **empty string** (the options are already implicit in `output_format`)<br>`multiple_choice` → `"\n" + "A. <options[0]>\nB. <options[1]>\n..."`, with letters generated via the §3.7 index→letter rule |
+| `output_format`   | one of three (per `question_type`): `yes_no_output_format` / `binary_named_output_format` / `multiple_choice_output_format`. **The `binary_named` template contains `<options[0]>` / `<options[1]>` placeholders, which must be replaced with the actual two entity names during assembly** |
+| `guidance`        | constant `"Do not use any other format. Do not refuse to make a prediction. ..."`, inserted as-is                       |
 
-三种 `output_format` 长什么样：
-- `yes_no` —— 要求 `\boxed{Yes}` 或 `\boxed{No}`
-- `binary_named` —— 模板含占位符，渲染后形如 `\boxed{Golden Knights} or \boxed{Kings}`
-- `multiple_choice` —— 要求 `\boxed{A}` 或 `\boxed{B, C}`，附带 example
+Shape of the three `output_format`s:
+- `yes_no` — requires `\boxed{Yes}` or `\boxed{No}`
+- `binary_named` — template contains placeholders; after rendering looks like `\boxed{Golden Knights} or \boxed{Kings}`
+- `multiple_choice` — requires `\boxed{A}` or `\boxed{B, C}`, with an example attached
 
-`system` / `user` 角色怎么切由 runner 决定（参考 §10 的简化方案：整体作为单条 user message，最忠实模板）。
+How the `system` / `user` roles are split is decided by the runner (see
+§10's simplified approach: as a single user message in its entirety —
+the most faithful to the template).
 
-### 3.7 答案编码与解码（letter ↔ label）
+### 3.7 Answer encoding and decoding (letter ↔ label)
 
-数据库统一用**字母**作为 canonical answer，但 LLM 输出的形态因 `question_type` 而异：
+The DB uniformly uses **letters** as the canonical answer, but the LLM's
+output form varies by `question_type`:
 
-| question_type      | LLM 输出（`\boxed{}` 内）                       | parser 归一目标                                                    |
+| question_type      | LLM output (inside `\boxed{}`)                       | Parser normalisation target                                                    |
 | ------------------ | ------------------------------------------------ | ------------------------------------------------------------------ |
-| `yes_no`           | `Yes` / `No`（大小写不敏感）                    | `frozenset({"A"})` / `frozenset({"B"})` —— `Yes`=A, `No`=B          |
-| `binary_named`     | `options` 中的某一个（精确匹配，trim+大小写不敏感）| 在 `options` 列表中查 index → 字母 → frozenset                     |
-| `multiple_choice`  | 一个或多个字母，逗号或空格分隔（`A` / `B, C` / `B,C`） | 直接 split → frozenset[str]                                        |
+| `yes_no`           | `Yes` / `No` (case-insensitive)                    | `frozenset({"A"})` / `frozenset({"B"})` — `Yes`=A, `No`=B          |
+| `binary_named`     | one of the entries in `options` (exact match, trim + case-insensitive)| look up the index in the `options` list → letter → frozenset                     |
+| `multiple_choice`  | one or more letters, comma- or space-separated (`A` / `B, C` / `B,C`) | split directly → frozenset[str]                                        |
 
-字母 ↔ index 规则（支持 multiple_choice 多达 35 个选项）：
+Letter ↔ index rule (supports up to 35 options for multiple_choice):
 ```
 index = ord(letter) - ord('A')
 A=0, B=1, ..., Z=25
 [ =26, \ =27, ] =28, ^ =29, _ =30, ` =31, a =32, b =33, c =34, ...
 ```
 
-逆向（拼 prompt 时 index → letter）：`letter = chr(ord('A') + index)`。
+Reverse (when assembling the prompt, index → letter):
+`letter = chr(ord('A') + index)`.
 
-> ⚠️ **源数据兼容模式警告**：数据库中共 4 道 `multiple_choice` 超过 26 个选项、且其中 3 道真值落在 `[ \ ] ^ _ ` ` ` a b c ...` 这类非字母符号上。这种 ASCII 续接标签对 LLM 非常不友好（反引号、下划线会被 markdown/代码块吞；小写 `a` 与大写 `A` 并存极易混淆）。**我们保留这一方案只为与源数据字母编码保持一一映射**，便于字母集合评分。
+> ⚠️ **Source-data compatibility-mode warning**: the DB has 4
+> `multiple_choice` questions with > 26 options, of which 3 have
+> ground-truth answers landing on non-letter symbols like `[ \ ] ^ _ `
+> ` ` a b c ...`. These ASCII-continuation labels are extremely
+> unfriendly to LLMs (backticks and underscores get swallowed by
+> markdown/code blocks; lowercase `a` and uppercase `A` coexist and are
+> easily confused). **We keep this scheme only to preserve a one-to-one
+> mapping with the source-data letter encoding**, for letter-set
+> scoring.
 >
-> 必做防护：
-> 1. `prompts.render_user_prompt` 在生成 >26 选项 `outcomes_block` 时，显式在每条前加引号或转义标签（如 `` `[` ``、`` `\` `` 用反引号/引号包裹），避免在 markdown 中渲染丢失
-> 2. `parser.parse_answer` 必须对 >26 选项的 `multiple_choice` 做 round-trip 单元测试（label→letter→label）
-> 3. 在日志/报表中并行记录 letters 与对应 labels，便于人工复核
+> Mandatory defences:
+> 1. `prompts.render_user_prompt` must explicitly quote or escape labels
+>    when generating the `outcomes_block` for > 26 options (e.g. wrap
+>    `` `[` ``, `` `\` `` in backticks/quotes), to avoid being lost in
+>    markdown rendering.
+> 2. `parser.parse_answer` must have a round-trip unit test
+>    (label→letter→label) for `multiple_choice` with > 26 options.
+> 3. Logs/reports record letters and corresponding labels in parallel
+>    for manual review.
 >
-> 未来如确认 LLM 表现被标签方案拖累，再评估迁移到 `AA/AB` 或 `A01/A02` 的稳定标签方案。
+> If we later confirm LLM performance is dragged down by the labelling
+> scheme, evaluate migration to a stable labelling scheme like `AA/AB`
+> or `A01/A02`.
 
-真值反查（`answer` letters → labels，便于显示或日志）：
+Ground-truth reverse lookup (`answer` letters → labels, for display or
+logging):
 ```python
 opts    = json.loads(row["options"])
 letters = [t.strip() for t in row["answer"].split(",")]
 labels  = [opts[ord(L) - ord('A')] for L in letters]
 ```
 
-### 3.8 泄漏边界与威胁模型
+### 3.8 Leak boundary and threat model
 
-本项目只能严格控制**工具搜索**这一条信息通路。完整泄漏面与本项目的缓解策略：
+This project can strictly control only the **tool-search** information
+channel. The full leakage surface and the project's mitigation strategy:
 
-| 泄漏源                            | 是否可控 | 缓解手段                                                                                          |
+| Leakage source                            | Controllable? | Mitigation                                                                                          |
 | --------------------------------- | -------- | ------------------------------------------------------------------------------------------------- |
-| Tool 搜索内容（Tavily 返回正文）  | ✅ 可控   | `end_date = end_time + TAVILY_END_DATE_OFFSET_DAYS` 由 Tool 实现层注入，LLM 无法感知（§3.1 / §3.2） |
-| Provider 内置 browsing / web tool | ✅ 可控   | **强制禁止**：`llm.chat` 只挂 `WEB_SEARCH_SCHEMA`，不开启任何 provider-native browsing / retrieval plugin；OpenRouter 路由时不传 `:online` 后缀、不传 `plugins` 字段 |
-| 模型参数记忆（训练数据）          | ⚠️ 部分可控 | 详见 §3.9：按模型训练截止日期过滤早于截止日期的题                                                  |
-| 搜索结果 snippet 里的"未来泄漏"   | ⚠️ 部分可控 | Tavily 的 `end_date` 过滤已在 publish date 层面截断；v5.2 起再叠一层 detector LLM 逐条审核内容（`search-leak-filter-v1`），verdict=drop 整条剔除 |
-| 题目文字本身的时间线索（如年份）  | ❌ 不可控 | 属于题目固有信息，不干预                                                                          |
-| LLM 训练后出现的外部知识回流      | ❌ 不可控 | 接受此偏差                                                                                        |
+| Tool search content (Tavily returned content)  | ✅ Controllable   | `end_date = end_time + TAVILY_END_DATE_OFFSET_DAYS` injected by the tool implementation layer, invisible to the LLM (§3.1 / §3.2) |
+| Provider built-in browsing / web tool | ✅ Controllable   | **Forcibly forbidden**: `llm.chat` attaches only `WEB_SEARCH_SCHEMA`, with no provider-native browsing / retrieval plugin enabled; OpenRouter routing does not pass the `:online` suffix or the `plugins` field |
+| Model parametric memory (training data)          | ⚠️ Partially controllable | See §3.9: filter questions earlier than the model's training cutoff                                                  |
+| "Future leakage" in search-result snippets   | ⚠️ Partially controllable | Tavily's `end_date` filter already cuts off at the publish-date layer; v5.2 onwards adds a detector LLM auditing each item (`search-leak-filter-v1`), with verdict=drop removing the entry entirely |
+| Time clues in the question text itself (e.g. year)  | ❌ Uncontrollable | inherent to the question text, no intervention                                                                          |
+| External knowledge backflow appearing after LLM training      | ❌ Uncontrollable | accept this bias                                                                                        |
 
-代码层强约束：
-- `llm.chat` 调用中 `tools=[WEB_SEARCH_SCHEMA]` 是唯一允许的 tool schema，**不得**添加任何 provider-native browsing/online 开关
-- 若某 provider 强制附加内置工具且无法禁用，在 README 与报表中显式标注"该模型不适用严格评测"
+Code-layer hard constraints:
+- In `llm.chat` calls, `tools=[WEB_SEARCH_SCHEMA]` is the only allowed
+  tool schema; **no** provider-native browsing/online switch may be
+  added.
+- If a provider forcibly attaches a built-in tool that cannot be
+  disabled, explicitly mark "this model is unsuitable for strict
+  evaluation" in the README and reports.
 
-### 3.9 按模型训练截止日期过滤题目
+### 3.9 Filtering questions by model training cutoff date
 
-**动机**：如果题目 `end_time` 早于某模型的训练截止日期，模型很可能已经在训练语料里"见过答案"，这类样本无法反映"预测未来"能力，必须从该模型的评测集中剔除。
+**Motivation**: if a question's `end_time` is earlier than a model's
+training cutoff date, the model very likely has "seen the answer" in its
+training corpus; such samples cannot reflect the "predict the future"
+ability and must be removed from that model's evaluation set.
 
-**机制**：
-- `.env` 中配置 `MODEL_TRAINING_CUTOFFS`，为每个模型声明训练截止日期（`YYYY-MM-DD`）
-- 任务队列生成阶段，对每个 `(question, model)` 做过滤：
+**Mechanism**:
+- Configure `MODEL_TRAINING_CUTOFFS` in `.env`, declaring a training
+  cutoff date (`YYYY-MM-DD`) for each model
+- During task-queue generation, filter each `(question, model)`:
   ```
-  cutoff = MODEL_TRAINING_CUTOFFS.get(model)   # None = 未声明, 不过滤
+  cutoff = MODEL_TRAINING_CUTOFFS.get(model)   # None = not declared, no filtering
   if cutoff is not None and question.end_time <= cutoff:
-      # 跳过该模型下所有 sample_idx
+      # skip all sample_idx for this model
   ```
-- 被过滤的 `(question, model, sample_idx)` **仍记一行**到 `run_results`，字段：
+- Filtered `(question, model, sample_idx)` **still records a row** into
+  `run_results`, with fields:
   - `error = "skipped_training_cutoff"`
   - `parse_ok = 0`, `correct = NULL`
-  - `final_answer_raw = NULL`, `messages_trace = NULL`, `search_calls = NULL`
-  - 数值字段置 0
-- 目的：报表能清楚展示"每个模型被剔除了多少题、剩多少题可比"，且 resume 时不会重试该行
+  - `final_answer_raw = NULL`, `messages_trace = NULL`,
+    `search_calls = NULL`
+  - numeric fields set to 0
+- Purpose: reports can clearly show "how many questions were filtered
+  out per model, and how many remain comparable", and resume will not
+  retry the row
 
-**Resume 语义细化**（见 §5.3）：
-- `error IS NULL` → 正常完成
-- `error = "skipped_training_cutoff"` → 主动剔除，**不重试**
-- 其他 `error`（`network` / `server_5xx` / `bad_request` / `content_policy`）→ 按 §9 分别处理
+**Resume semantics refinement** (see §5.3):
+- `error IS NULL` → completed normally
+- `error = "skipped_training_cutoff"` → actively excluded, **no retry**
+- other `error` values (`network` / `server_5xx` / `bad_request` /
+  `content_policy`) → handled per §9
 
-用户未声明某模型的 cutoff 时，该模型不做过滤。建议在 `.env` 中对每个参评模型都显式给出 cutoff，以保证公平。
+When a user does not declare a cutoff for a model, that model is not
+filtered. We recommend explicitly giving a cutoff for every model under
+evaluation in `.env` to ensure fairness.
 
 ---
 
-## 4. 整体流程
+## 4. End-to-end pipeline
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -297,22 +378,24 @@ labels  = [opts[ord(L) - ord('A')] for L in letters]
                           │  forecast_eval_set_example.db            │
                           │    → results.db.questions        │
                           │    → results.db.prompt_templates │
-                          │  (按 filters 过滤)               │
+                          │  (filtered by filters)           │
                           └──────────────────────────────────┘
                                       │
                                       ▼
                           ┌────────────────────────┐
                           │  3. Resume Check       │
-                          │  已完成 (run_id,       │
+                          │  skip completed        │
+                          │  (run_id,              │
                           │  question_id, model,   │
-                          │  sample_idx) 跳过      │
+                          │  sample_idx)           │
                           └────────────────────────┘
                                       │
                                       ▼
                  ┌────────────────────────────────────────┐
                  │  4. Task Queue                         │
-                 │  笛卡尔积: questions × models × N      │
-                 │  asyncio.Semaphore 控制并发            │
+                 │  Cartesian product: questions ×        │
+                 │  models × N                            │
+                 │  asyncio.Semaphore for concurrency     │
                  └────────────────────────────────────────┘
                                       │
                       ┌───────────────┼───────────────┐
@@ -348,20 +431,22 @@ labels  = [opts[ord(L) - ord('A')] for L in letters]
                       │  └──────────────────────┘  │
                       │                            │
                       │  loop ≤ REACT_MAX_STEPS    │
-                      │  且 ≤ REACT_MAX_SEARCH_CALLS│
+                      │  and ≤ REACT_MAX_SEARCH_CALLS│
                       └──────────┬─────────────────┘
                                  │
                                  ▼
                       ┌────────────────────────┐
                       │  5. Parse \boxed{...}  │
-                      │  按 question_type 归一  │
+                      │  Normalise per         │
+                      │  question_type         │
                       │  → frozenset[str]      │
                       └──────────┬─────────────┘
                                  │
                                  ▼
                       ┌────────────────────────┐
                       │  6. Score (frozenset   │
-                      │  字母集合严格相等)     │
+                      │  letter-set strict     │
+                      │  equality)             │
                       └──────────┬─────────────┘
                                  │
                                  ▼
@@ -374,72 +459,75 @@ labels  = [opts[ord(L) - ord('A')] for L in letters]
                                  ▼
                       ┌────────────────────────┐
                       │  8. Done (results.db)  │
-                      │  后续分析独立进行      │
+                      │  Subsequent analysis   │
+                      │  runs independently    │
                       └────────────────────────┘
 ```
 
 ---
 
-## 5. 数据库设计 (`runs/{run_id}/db/<model_slug>.db`)
+## 5. Database design (`runs/{run_id}/db/<model_slug>.db`)
 
-每个 run × model 对应**一个独立的 sqlite 文件**。文件内部自带
-`questions` / `prompt_templates` 副本，便于单文件独立复盘。聚合/统计**不落库**，
-跑完由 `forecast_eval.analysis` 另写到 `analysis/` 目录。
+Each run × model corresponds to **one independent sqlite file**. The file
+self-contains copies of `questions` / `prompt_templates`, so a single
+file can be replayed independently. Aggregations/statistics are **not
+persisted**; after the run finishes, `forecast_eval.analysis` writes them
+separately into the `analysis/` directory.
 
 ### 5.1 schema
 
 ```sql
--- ⓪ schema 版本表
+-- ⓪ schema version table
 CREATE TABLE schema_version (
     version    INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
 );
 
--- ① 源题库副本 (每个 model DB 各存一份, 便于自包含分发)
+-- ① source-question copy (each model DB stores its own copy, for self-contained distribution)
 CREATE TABLE questions (
     id            TEXT PRIMARY KEY,
     choice_type   TEXT NOT NULL CHECK (choice_type IN ('single','multi')),
     question_type TEXT NOT NULL CHECK (question_type IN ('yes_no','binary_named','multiple_choice')),
     event         TEXT NOT NULL,
     options       TEXT NOT NULL,             -- JSON array
-    answer        TEXT NOT NULL,             -- 字母逗号串: 'A' / 'A, B'
+    answer        TEXT NOT NULL,             -- comma-separated letters: 'A' / 'A, B'
     end_time      TEXT NOT NULL,             -- YYYY-MM-DD
     imported_at   TEXT NOT NULL
 );
 CREATE INDEX idx_questions_choice_type   ON questions(choice_type);
 CREATE INDEX idx_questions_question_type ON questions(question_type);
 
--- ② prompt 模板副本
+-- ② prompt-templates copy
 CREATE TABLE prompt_templates (
     key         TEXT PRIMARY KEY,
     value       TEXT NOT NULL,
     imported_at TEXT NOT NULL
 );
 
--- ③ 该 DB 对应的 (run, model) 唯一元信息, 只有一行
+-- ③ unique (run, model) metadata for this DB; single row
 CREATE TABLE run_meta (
     run_id                TEXT PRIMARY KEY,
     model                 TEXT NOT NULL,
     sampling_n            INTEGER NOT NULL,
-    config_snapshot       TEXT NOT NULL,   -- 脱敏后的 .env JSON
+    config_snapshot       TEXT NOT NULL,   -- redacted .env JSON
     filters_snapshot      TEXT NOT NULL,   -- {"question_types":..., "choice_types":..., "question_ids":[...], "question_count":N}
     source_db_hash        TEXT NOT NULL,
     metadata_hash         TEXT NOT NULL,
     prompt_templates_hash TEXT NOT NULL,
-    reflection_protocol_text TEXT,         -- prompts.REFLECTION_PROTOCOL 全文; REACT_REFLECTION_PROTOCOL=false 时为 NULL
-    reflection_protocol_hash TEXT,         -- sha256(reflection_protocol_text)[:16]; 同上, 关时 NULL
-    belief_protocol_text   TEXT,           -- v4. prompts.BELIEF_PROTOCOL 全文; BELIEF_PROTOCOL=false 时为 NULL
-    belief_protocol_hash   TEXT,           -- v4. sha256(belief_protocol_text)[:16]; 同上, 关时 NULL
-    training_cutoff       TEXT,            -- 该模型的 cutoff (YYYY-MM-DD), 未声明时为 NULL
+    reflection_protocol_text TEXT,         -- full text of prompts.REFLECTION_PROTOCOL; NULL when REACT_REFLECTION_PROTOCOL=false
+    reflection_protocol_hash TEXT,         -- sha256(reflection_protocol_text)[:16]; same as above, NULL when off
+    belief_protocol_text   TEXT,           -- v4. full text of prompts.BELIEF_PROTOCOL; NULL when BELIEF_PROTOCOL=false
+    belief_protocol_hash   TEXT,           -- v4. sha256(belief_protocol_text)[:16]; same as above, NULL when off
+    training_cutoff       TEXT,            -- this model's cutoff (YYYY-MM-DD), NULL when not declared
     started_at            TEXT NOT NULL,
     finished_at           TEXT
 );
 
--- ④ 宽表: 每个问题一行, 每个 sample 一组 s{i}_* 列
--- 动态生成 14 × SAMPLING_N 列; 下方仅列示 SAMPLING_N=3 的形状
+-- ④ wide table: one row per question, one s{i}_* column group per sample
+-- dynamically generates 14 × SAMPLING_N columns; the shape below is for SAMPLING_N=3 only
 CREATE TABLE run_results (
     question_id TEXT PRIMARY KEY,
-    user_prompt TEXT,                      -- 所有 sample 共用 (COALESCE 写入, 首样本胜出)
+    user_prompt TEXT,                      -- shared across all samples (COALESCE-written, first sample wins)
 
     s0_final_answer_letters TEXT,
     s0_final_answer_raw     TEXT,
@@ -455,165 +543,189 @@ CREATE TABLE run_results (
     s0_search_calls         TEXT,
     s0_error                TEXT,
     s0_created_at           TEXT,
-    -- v3 新增观测列 (schema_version=3): 单步指标 + 终态信封
+    -- v3 newly added observation columns (schema_version=3): per-step metrics + final-state envelope
     s0_finish_reason        TEXT,
     s0_nudges_used          INTEGER,
-    s0_step_metrics         TEXT,          -- JSON 数组, 每元素一个 step 快照, 见 §5.2
-    s0_response_id          TEXT,          -- ChatCompletion.id (最后一轮)
-    s0_system_fingerprint   TEXT,          -- ChatCompletion.system_fingerprint (最后一轮)
-    s0_service_tier         TEXT,          -- ChatCompletion.service_tier (最后一轮)
-    -- v4 新增观测列 (schema_version=4): belief 协议结构化输出
-    s0_belief_final         TEXT,          -- 末步 Belief.probabilities 的 JSON ({letter: float}); 解析失败为 NULL
-    s0_belief_trace         TEXT,          -- 每步 belief 摘要 JSON 数组 [{step, p, confidence, delta_reason}|null, ...]
-    s0_belief_parse_ok      INTEGER,       -- 末步 belief 是否合法解析 (0/1); 与 parse_ok 独立
+    s0_step_metrics         TEXT,          -- JSON array, one step snapshot per element, see §5.2
+    s0_response_id          TEXT,          -- ChatCompletion.id (last round)
+    s0_system_fingerprint   TEXT,          -- ChatCompletion.system_fingerprint (last round)
+    s0_service_tier         TEXT,          -- ChatCompletion.service_tier (last round)
+    -- v4 newly added observation columns (schema_version=4): structured belief-protocol output
+    s0_belief_final         TEXT,          -- final-step Belief.probabilities as JSON ({letter: float}); NULL when parse fails
+    s0_belief_trace         TEXT,          -- per-step belief summary JSON array [{step, p, confidence, delta_reason}|null, ...]
+    s0_belief_parse_ok      INTEGER,       -- whether the final-step belief parsed legally (0/1); independent of parse_ok
 
-    -- ...相同的 s1_* / s2_* 字段组...
+    -- ...same s1_* / s2_* field groups...
 
     FOREIGN KEY (question_id) REFERENCES questions(id)
 );
 CREATE INDEX idx_run_results_question ON run_results(question_id);
 ```
 
-> **schema_version 3 升级说明**：v2 → v3 由 `forecast_eval.db._migrate_v2_to_v3` 通过
-> `ALTER TABLE … ADD COLUMN` 完成（`run_results` 加 6 × N 个 `s{i}_*` 列、`run_meta`
-> 加 2 列、并 INSERT `(3, utcnow_iso())` 进 `schema_version`）。SQLite 的 ADD COLUMN
-> 仅写表元数据，O(1) 完成；老行的新列默认 NULL。续跑路径上首次打开旧 DB 自动迁移。
+> **schema_version 3 upgrade notes**: v2 → v3 is performed by
+> `forecast_eval.db._migrate_v2_to_v3` via `ALTER TABLE … ADD COLUMN`
+> (`run_results` adds 6 × N `s{i}_*` columns, `run_meta` adds 2 columns,
+> and INSERT `(3, utcnow_iso())` into `schema_version`). SQLite's ADD
+> COLUMN only writes table metadata, completing in O(1); new columns on
+> old rows default to NULL. On the resume path, the first time an old
+> DB is opened it is auto-migrated.
 >
-> **schema_version 4 升级说明**：v3 → v4 由 `forecast_eval.db._migrate_v3_to_v4` 通过
-> `ALTER TABLE … ADD COLUMN` 完成（`run_results` 加 3 × N 个 `s{i}_*` belief 列、
-> `run_meta` 加 2 列、并 INSERT `(4, utcnow_iso())` 进 `schema_version`）。`init_schema`
-> 链式调用 v2→v3→v4，幂等。`Settings.BELIEF_PROTOCOL=false` 时所有 belief 列写 NULL，
-> 既有 accuracy 指标输出零变化。完整设计见 `ANALYSIS_DESIGN_v4.md`。
+> **schema_version 4 upgrade notes**: v3 → v4 is performed by
+> `forecast_eval.db._migrate_v3_to_v4` via `ALTER TABLE … ADD COLUMN`
+> (`run_results` adds 3 × N `s{i}_*` belief columns, `run_meta` adds 2
+> columns, and INSERT `(4, utcnow_iso())` into `schema_version`).
+> `init_schema` calls v2→v3→v4 in chain, idempotent. When
+> `Settings.BELIEF_PROTOCOL=false`, all belief columns write NULL and
+> the existing accuracy metrics output zero changes. Full design in
+> `ANALYSIS_DESIGN_v4.md`.
 
-连接初始化 PRAGMA（所有 sqlite3 连接都执行一遍）：
+Connection-init PRAGMA (executed on every sqlite3 connection):
 ```sql
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
-PRAGMA synchronous = NORMAL;     -- WAL 下足够安全且更快
-PRAGMA busy_timeout = 5000;      -- 多 reader 场景下避免 SQLITE_BUSY
+PRAGMA synchronous = NORMAL;     -- safe enough under WAL and faster
+PRAGMA busy_timeout = 5000;      -- avoid SQLITE_BUSY in multi-reader scenarios
 ```
 
-### 5.2 字段写入约定
+### 5.2 Field write conventions
 
-| 字段                          | 来源                                                                                                    |
+| Field                          | Source                                                                                                    |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `s{i}_final_answer_letters`   | `parser.parse_answer(final_raw, q)` 返回的 `frozenset[str]`，写入前 `sorted()` + `json.dumps`           |
-| `s{i}_final_answer_raw`       | LLM 最后一条 assistant message 的 `content` 全文                                                        |
-| `s{i}_correct`                | `frozenset == frozenset` → `int`；parse 失败或无法判分时 `NULL`                                         |
+| `s{i}_final_answer_letters`   | `frozenset[str]` returned by `parser.parse_answer(final_raw, q)`, written after `sorted()` + `json.dumps`           |
+| `s{i}_final_answer_raw`       | the full `content` text of the LLM's last assistant message                                                        |
+| `s{i}_correct`                | `frozenset == frozenset` → `int`; `NULL` when parse fails or scoring is impossible                                         |
 | `s{i}_parse_ok`               | `final_answer_letters is not None`                                                                      |
-| `user_prompt`                 | `prompts.render_user_prompt(q, templates)` 的返回值；每个问题渲染一次，首样本写入后 COALESCE 保留       |
-| `s{i}_messages_trace`         | 完整 `messages` 列表 JSON；`WRITE_MESSAGES_TRACE=false` 时 NULL                                         |
-| `s{i}_search_calls`           | 每次 `web_search` 调用的元数据 list（query / end_date / n_results / published_dates；启用 leak filter 时再叠 `n_results_raw / n_results_kept / detector_verdicts / detector_latency_ms / detector_error_kind` 五字段，详见 `search-leak-filter-v1`） |
-| `s{i}_error`                  | retry 用尽后的错误分类码；正常完成（含 refusal / parse fail）为 NULL                                    |
-| `s{i}_created_at`             | 写入时刻的 UTC ISO-8601；作为"该 sample 槽是否被填过"的唯一信号                                         |
-| `s{i}_finish_reason`          | 最后一轮 `ChatCompletion.choices[0].finish_reason`（`stop` / `tool_calls` / `length` / `content_filter` …）；error 行（never reached LLM）写 NULL |
-| `s{i}_nudges_used`            | 该样本中"strict floor 未达标 → reminder 注入"的次数计数；上限受 `REACT_MAX_NUDGES` 限制；error 行写 0    |
-| `s{i}_step_metrics`           | 每个 ReAct 轮的 JSON 数组；元素键 `step / prompt / completion / reasoning / latency_ms / finish_reason / n_tool_calls`，`latency_ms` 为该轮 `llm.chat` 的 `time.monotonic()` 墙时（仅 LLM 调用，不含 search） |
-| `s{i}_response_id`            | 最后一轮 `ChatCompletion.id`（provider 唯一 ID，便于追溯 / 申诉）                                        |
-| `s{i}_system_fingerprint`     | 最后一轮 `ChatCompletion.system_fingerprint`（provider 提供时；用于检测 provider 端模型路由变更）        |
-| `s{i}_service_tier`           | 最后一轮 `ChatCompletion.service_tier`（OpenAI 等返回的实际 tier，例：`default` / `scale` / `flex`）     |
-| `s{i}_belief_final`           | v4. 最末步 `parser.parse_belief(content, q)` 返回的 `Belief.probabilities` 序列化为 JSON（`{letter: float}`）；解析失败或 `BELIEF_PROTOCOL=false` 时 NULL |
-| `s{i}_belief_trace`           | v4. 整个循环每步的 belief 摘要 JSON 数组，元素键 `step / p / confidence / delta_reason`；中间步解析失败的元素为 `null`；全部步骤都失败时整列 NULL |
-| `s{i}_belief_parse_ok`        | v4. 末步 belief 是否合法解析（0/1）；与 `parse_ok` **独立**，belief 失败 MUST NOT 影响 boxed 路径的 `parse_ok` / `correct`；error / cutoff 行写 0 |
+| `user_prompt`                 | the return value of `prompts.render_user_prompt(q, templates)`; rendered once per question, retained via COALESCE after the first sample writes       |
+| `s{i}_messages_trace`         | full `messages` list as JSON; NULL when `WRITE_MESSAGES_TRACE=false`                                         |
+| `s{i}_search_calls`           | metadata list for each `web_search` call (query / end_date / n_results / published_dates; when leak filter is enabled, additionally `n_results_raw / n_results_kept / detector_verdicts / detector_latency_ms / detector_error_kind` — see `search-leak-filter-v1`) |
+| `s{i}_error`                  | error classification code after retries are exhausted; NULL on normal completion (including refusal / parse fail)                                    |
+| `s{i}_created_at`             | UTC ISO-8601 at write time; the unique signal for "whether this sample slot has been filled"                                         |
+| `s{i}_finish_reason`          | the last round's `ChatCompletion.choices[0].finish_reason` (`stop` / `tool_calls` / `length` / `content_filter` …); NULL for error rows (never reached LLM) |
+| `s{i}_nudges_used`            | count of "strict floor not met → reminder injected" within this sample; capped by `REACT_MAX_NUDGES`; 0 for error rows    |
+| `s{i}_step_metrics`           | a JSON array of each ReAct round; element keys `step / prompt / completion / reasoning / latency_ms / finish_reason / n_tool_calls`; `latency_ms` is `time.monotonic()` wall time around that round's `llm.chat` (LLM call only, not search) |
+| `s{i}_response_id`            | last round's `ChatCompletion.id` (provider-unique ID, useful for tracing / appeals)                                        |
+| `s{i}_system_fingerprint`     | last round's `ChatCompletion.system_fingerprint` (when the provider supplies it; used to detect provider-side model-routing changes)        |
+| `s{i}_service_tier`           | last round's `ChatCompletion.service_tier` (the actual tier returned by OpenAI etc., e.g. `default` / `scale` / `flex`)     |
+| `s{i}_belief_final`           | v4. JSON-serialised `Belief.probabilities` (`{letter: float}`) returned by `parser.parse_belief(content, q)` at the final step; NULL when parsing fails or `BELIEF_PROTOCOL=false` |
+| `s{i}_belief_trace`           | v4. JSON array of belief summaries for every loop step; element keys `step / p / confidence / delta_reason`; `null` for elements where intermediate-step parsing fails; whole column NULL when every step fails |
+| `s{i}_belief_parse_ok`        | v4. whether the final-step belief parses legally (0/1); **independent** of `parse_ok` — belief failure MUST NOT affect the boxed path's `parse_ok` / `correct`; written 0 for error / cutoff rows |
 
-> 5 个新增字段（`finish_reason` / `response_id` / `system_fingerprint` / `service_tier`
-> / `step_metrics`）只反映**最后一次** `llm.chat` 的封装；中间步骤的 finish_reason
-> 进 `step_metrics`，envelope（response_id 等）按 OpenAI ChatCompletion 顶层语义、
-> 每轮独立，目前不全部入库以控制宽表列爆炸。
+> The 5 newly added fields (`finish_reason` / `response_id` /
+> `system_fingerprint` / `service_tier` / `step_metrics`) reflect only
+> the **last** `llm.chat` envelope; the finish_reason of intermediate
+> steps goes into `step_metrics`; envelopes (response_id etc.) are
+> per-round per OpenAI ChatCompletion top-level semantics and are
+> currently not all persisted, to control wide-table column blow-up.
 >
-> `run_meta.reflection_protocol_text` / `reflection_protocol_hash` 与
-> `prompt_templates_hash` **独立分离**：前者只刻 `prompts.REFLECTION_PROTOCOL`
-> 的内容指纹（开/关 + 文本变更皆敏感），便于跨 run 区分"反思协议是否启用 / 是否
-> 改版"，而不会污染主模板的内容指纹。
+> `run_meta.reflection_protocol_text` / `reflection_protocol_hash` are
+> **separated independently** from `prompt_templates_hash`: the former
+> only fingerprints the content of `prompts.REFLECTION_PROTOCOL`
+> (sensitive to on/off + text changes), enabling cross-run distinction
+> of "is the reflection protocol enabled / has it been revised" without
+> polluting the main template's content fingerprint.
 >
-> v4 新增 `run_meta.belief_protocol_text` / `belief_protocol_hash`：与 reflection 协议
-> 字段**完全平行**，刻 `prompts.BELIEF_PROTOCOL` 的内容指纹；同样不污染
-> `prompt_templates_hash`、不污染 `reflection_protocol_hash`，三个指纹彼此独立。
-> v4 同时把 `belief_protocol_hash` 顶层写入 `manifest.json`（与 `reflection_protocol_hash`
-> 同级），让"不开 DB 也能 grep 协议指纹"覆盖两个协议；并加 `analysis_schema: "v4"`
-> 顶层字段，让分析模块按需分发概率族指标 / accuracy-only fallback。
+> v4 adds `run_meta.belief_protocol_text` / `belief_protocol_hash`:
+> **completely parallel** to the reflection-protocol fields,
+> fingerprinting the content of `prompts.BELIEF_PROTOCOL`; same as
+> above, no pollution of `prompt_templates_hash` or
+> `reflection_protocol_hash` — the three fingerprints are mutually
+> independent. v4 also writes `belief_protocol_hash` at the top level
+> of `manifest.json` (alongside `reflection_protocol_hash`), so the
+> "grep the protocol fingerprint without opening the DB" path covers
+> both protocols; and adds `analysis_schema: "v4"` as a top-level
+> field, so the analysis module can dispatch probabilistic-family
+> metrics / accuracy-only fallback as needed.
 
-### 5.3 断点续跑
+### 5.3 Resume
 
-对每个 sample slot 独立判定：
+Each sample slot is judged independently:
 ```sql
--- 对 i ∈ 0..N-1 各执行一次:
+-- execute once per i ∈ 0..N-1:
 SELECT question_id FROM run_results
  WHERE s{i}_created_at IS NOT NULL
    AND (s{i}_error IS NULL OR s{i}_error = 'skipped_training_cutoff');
 ```
-结果合并成 `set[(question_id, sample_idx)]`，从任务队列中剔除。因为每个模型
-自己的 DB 里只有一个 run，`run_id` 不再进入筛选（`run_meta` 单行决定）。
+Results are merged into `set[(question_id, sample_idx)]` and removed from
+the task queue. Since each model's own DB contains only one run, `run_id`
+no longer enters the filter (the single row in `run_meta` decides it).
 
-状态分类：
-| `error` 值                       | 含义                | 下次续跑是否重试 |
+State classification:
+| `error` value                    | Meaning             | Retry on next resume? |
 | -------------------------------- | ------------------- | ---------------- |
-| `NULL`                           | 已正常完成          | 否               |
-| `'skipped_training_cutoff'`      | §3.9 主动剔除       | 否               |
-| `'network'` / `'server_5xx'`     | 退避用完仍失败      | 是               |
-| `'bad_request'`                  | model_not_found 等  | 是（改配置后续跑） |
-| `'content_policy'`               | provider 拒绝       | 可选：默认重试一次并覆盖原行 |
+| `NULL`                           | completed normally  | no               |
+| `'skipped_training_cutoff'`      | actively excluded by §3.9       | no               |
+| `'network'` / `'server_5xx'`     | still failing after exhausted backoff      | yes              |
+| `'bad_request'`                  | model_not_found, etc.  | yes (after config change) |
+| `'content_policy'`               | provider refusal       | optional: default retry once and overwrite the original row |
 
-规则：
-- 同 `run_id` 重跑 = 续跑，会写入既有的 `runs/{run_id}/db/<slug>.db`
-- 换 `run_id` = 全新一跑，会创建新的 `runs/{new_run_id}/` 目录
-- 覆盖语义由 `INSERT ... ON CONFLICT(question_id) DO UPDATE SET s{i}_* = excluded.s{i}_*`
-  兜底，`user_prompt` 用 `COALESCE` 保留首样本值
+Rules:
+- Re-running with the same `run_id` = resume; writes into the existing
+  `runs/{run_id}/db/<slug>.db`
+- Changing `run_id` = a fresh run; creates a new
+  `runs/{new_run_id}/` directory
+- Overwrite semantics are backed by `INSERT ... ON CONFLICT(question_id)
+  DO UPDATE SET s{i}_* = excluded.s{i}_*`; `user_prompt` is preserved
+  with `COALESCE` to keep the first sample's value
 
-### 5.4 并发写入策略
+### 5.4 Concurrent-write strategy
 
-- 每个 DB 连接启动时执行 PRAGMA `journal_mode=WAL / foreign_keys=ON / synchronous=NORMAL / busy_timeout=5000`
-- **每个模型一个 async writer task**：runner 为每个模型 DB 各开一个
-  `forecast_eval.db.AsyncWriter`，所有 worker 的结果通过该模型对应的 writer 入队
-- Writer task 每 `DB_COMMIT_BATCH` 条或 1 秒 flush 一次，短事务；sqlite 写入走
-  `await asyncio.to_thread(...)` 避免阻塞 event loop
-- 单模型 DB 只有一个 writer、多个 reader，WAL 下并发足够
-- 若改为跨线程消费，必须换成 `queue.Queue` / `janus.Queue`；`asyncio.Queue` 不是跨线程安全
+- Every DB connection executes PRAGMA `journal_mode=WAL /
+  foreign_keys=ON / synchronous=NORMAL / busy_timeout=5000` at startup
+- **One async writer task per model**: the runner opens a
+  `forecast_eval.db.AsyncWriter` for each model DB; every worker's
+  result is enqueued via the writer for that model
+- The writer task flushes every `DB_COMMIT_BATCH` entries or every 1
+  second, with short transactions; sqlite writes go through `await
+  asyncio.to_thread(...)` to avoid blocking the event loop
+- A single-model DB has only one writer and multiple readers; under WAL,
+  concurrency is sufficient
+- If switched to cross-thread consumption, `queue.Queue` /
+  `janus.Queue` is required; `asyncio.Queue` is not cross-thread safe
 
 ---
 
-## 6. 目录结构
+## 6. Directory layout
 
 ```
 Forecast/
-├── .env                           # gitignored, 用户填
-├── .env.example                   # 模板, git 管理
+├── .env                           # gitignored, user-filled
+├── .env.example                   # template, git-managed
 ├── .gitignore
-├── environment.yml                # conda env 定义
+├── environment.yml                # conda env definition
 ├── README.md
-├── FRAME.md                       # 本文档
-├── evaluation.py                  # 主入口: parse CLI flags -> runner.run -> analysis.run_analysis
-├── forecast_eval_set_example.db           # 原数据, 只读, **纳入 Git 管理** (确保 source_db_hash 可复现)
-├── runs/                          # 所有评测输出根目录 (gitignored)
+├── FRAME.md                       # this document
+├── evaluation.py                  # main entry: parse CLI flags -> runner.run -> analysis.run_analysis
+├── forecast_eval_set_example.db           # source data, read-only, **checked into Git** (so source_db_hash is reproducible)
+├── runs/                          # root for all evaluation outputs (gitignored)
 │   └── {run_id}/
-│       ├── manifest.json          # run 级元信息 + model_files 映射
+│       ├── manifest.json          # run-level metadata + model_files mapping
 │       ├── db/
-│       │   └── {model_slug}.db    # 每个模型一个 sqlite; 自带 questions + prompt_templates 副本
-│       ├── analysis/              # 跑完后生成的统计产物
+│       │   └── {model_slug}.db    # one sqlite per model; self-contains questions + prompt_templates copies
+│       ├── analysis/              # statistical artefacts generated after the run
 │       │   ├── per_model_summary.csv / .md
-│       │   ├── per_model_by_question_type.csv         # 含 v5 列 (composite-score-by-subtype)
-│       │   ├── per_model_by_choice_type.csv           # 含 v5 列 (composite-score-by-subtype)
-│       │   ├── per_model_composite_by_question_type.csv  # 综合得分总表 (composite-score-by-subtype)
-│       │   ├── per_model_composite_by_choice_type.csv    # 综合得分总表 (composite-score-by-subtype)
-│       │   ├── composite_meta.json                    # 综合得分审计跟踪
+│       │   ├── per_model_by_question_type.csv         # includes v5 columns (composite-score-by-subtype)
+│       │   ├── per_model_by_choice_type.csv           # includes v5 columns (composite-score-by-subtype)
+│       │   ├── per_model_composite_by_question_type.csv  # composite-score table (composite-score-by-subtype)
+│       │   ├── per_model_composite_by_choice_type.csv    # composite-score table (composite-score-by-subtype)
+│       │   ├── composite_meta.json                    # composite-score audit trail
 │       │   ├── error_breakdown.csv
-│       │   └── overall.json                            # 内嵌 composite 段
+│       │   └── overall.json                            # embeds the composite section
 │       └── logs/{run_id}.log
 ├── forecast_eval/
 │   ├── __init__.py
-│   ├── config.py                 # pydantic-settings; RUNS_ROOT + MODEL_TRAINING_CUTOFFS 解析
-│   ├── db.py                     # per-model 宽表 schema + AsyncWriter + hash / 脱敏
-│   ├── loader.py                 # 从 forecast_eval_set_example.db 同步 questions + prompt_templates 到每个 DB
-│   ├── prompts.py                # 按 question_type 渲染 user message
-│   ├── llm.py                    # OpenAI-compatible client + retry 分层 (明确禁用 provider-native browsing)
-│   ├── search.py                 # Tavily + end_date 注入 + retry
-│   ├── tools.py                  # web_search schema (LLM 可见部分, 不含日期)
-│   ├── react.py                  # ReAct loop (一个 sample)
-│   ├── parser.py                 # \boxed{} 解析 + 字母集合归一 + 严格匹配
-│   ├── errors.py                 # 错误分类 + 退避策略 (含 skipped_training_cutoff)
-│   ├── runner.py                 # 任务编排 + 多模型 writer + 训练截止过滤
-│   └── analysis.py               # 后置统计 (读 DB -> CSV / MD / JSON), 可独立 `python -m` 调用
-└── tests/                        # 单元测试 (§17)
+│   ├── config.py                 # pydantic-settings; RUNS_ROOT + MODEL_TRAINING_CUTOFFS parsing
+│   ├── db.py                     # per-model wide-table schema + AsyncWriter + hash / redaction
+│   ├── loader.py                 # syncs questions + prompt_templates from forecast_eval_set_example.db into each DB
+│   ├── prompts.py                # renders user message per question_type
+│   ├── llm.py                    # OpenAI-compatible client + tiered retry (provider-native browsing explicitly disabled)
+│   ├── search.py                 # Tavily + end_date injection + retry
+│   ├── tools.py                  # web_search schema (LLM-visible part, no date)
+│   ├── react.py                  # ReAct loop (single sample)
+│   ├── parser.py                 # \boxed{} parsing + letter-set normalisation + strict matching
+│   ├── errors.py                 # error classification + backoff strategy (includes skipped_training_cutoff)
+│   ├── runner.py                 # task orchestration + multi-model writer + training-cutoff filtering
+│   └── analysis.py               # post-hoc statistics (read DB -> CSV / MD / JSON), invokable independently via `python -m`
+└── tests/                        # unit tests (§17)
     ├── test_prompts.py
     ├── test_parser.py
     ├── test_search.py
@@ -628,68 +740,68 @@ Forecast/
 
 ---
 
-## 7. `.env.example` 完整配置
+## 7. Full `.env.example` configuration
 
 ```ini
 # =============================================================
-#  Forecast Evaluation — 环境变量配置
-#  复制为 .env 后填入 API Key 即可运行: python evaluation.py
+#  Forecast Evaluation — environment-variable configuration
+#  Copy to .env, fill in API keys, then run: python evaluation.py
 # =============================================================
 
 # -------- LLM Endpoint (OpenAI-compatible) --------
-# LLM_BASE_URL 示例: OpenRouter / 阿里百炼 / OpenAI / DeepSeek / SiliconFlow / 本地 vLLM
-# 详见 .env.example 注释
+# LLM_BASE_URL examples: OpenRouter / Aliyun Bailian / OpenAI / DeepSeek / SiliconFlow / local vLLM
+# See .env.example comments for details
 LLM_API_KEY=REPLACE_ME
 LLM_BASE_URL=https://openrouter.ai/api/v1
 
-# 要评测的模型列表, 逗号分隔 (笛卡尔积: 每个模型都会跑所有题目 × 所有 sample)
-# ⚠️ 不要在 model slug 里追加 ":online", 也不要启用任何 provider-native browsing (参见 §3.8)
+# Comma-separated list of models to evaluate (Cartesian product: every model runs every question × every sample)
+# ⚠️ Do not append ":online" to a model slug, and do not enable any provider-native browsing (see §3.8)
 MODELS=openai/gpt-5,anthropic/claude-sonnet-4.5,google/gemini-2.5-pro,deepseek/deepseek-r1
 
-# 模型训练截止日期 (§3.9): 题目 end_time <= cutoff 的 (q, model) 将被跳过并标记 skipped_training_cutoff
-# 格式: "<model_slug>=YYYY-MM-DD" 多组用逗号分隔. 未声明的模型不过滤
-# 建议对每个参评模型都显式声明, 以保证评测公平
+# Model training cutoff dates (§3.9): (q, model) pairs where end_time <= cutoff are skipped and marked skipped_training_cutoff
+# Format: "<model_slug>=YYYY-MM-DD", multiple groups comma-separated. Models not declared are not filtered
+# Recommended to declare a cutoff explicitly for every evaluated model, to ensure fairness
 MODEL_TRAINING_CUTOFFS=openai/gpt-5=2024-10-01,anthropic/claude-sonnet-4.5=2025-03-01,google/gemini-2.5-pro=2025-01-01,deepseek/deepseek-r1=2024-07-01
 
-# LLM 调用参数 (max_tokens 已给足 reasoning + output 预算)
+# LLM call parameters (max_tokens already gives ample reasoning + output budget)
 LLM_MAX_TOKENS=12000
 LLM_TIMEOUT_S=240
 LLM_TEMPERATURE=0.7
 LLM_TOP_P=1.0
 
-# 推理模型 slug 子串列表: 命中后 **不传** temperature / top_p
-# (o-series / deepseek-r1 / qwq 等推理模型对自定义采样参数会直接报 400)
+# Reasoning-model slug substring list: when matched, **do not pass** temperature / top_p
+# (reasoning models like o-series / deepseek-r1 / qwq return 400 directly on custom sampling parameters)
 LLM_REASONING_MODEL_PATTERNS=o1,o3,o4,r1,qwq
 
-# LLM 并发 & 重试
+# LLM concurrency & retry
 LLM_MAX_CONCURRENCY=5
 LLM_RETRY_MAX=5
-# 不同错误类型的退避序列 (秒), 用完仍失败则跳过该 sample 并记 error
+# Backoff sequences (seconds) by error kind; if exhausted with failure, skip the sample and record error
 LLM_BACKOFF_NETWORK_S=2,5,15,30,60
 LLM_BACKOFF_RATE_LIMIT_S=10,30,60,120,300
 LLM_BACKOFF_SERVER_5XX_S=5,15,30,60,120
 
 # -------- Tavily Search --------
-# 单 key 或 CSV 多 key (`tvly-aaa,tvly-bbb`); 多 key 由 TavilyKeyPool 做 least-used
-# 调度 + 401/403 永久拉黑 + 429 临时 cooldown, 详见 .env.example.
+# Single key or CSV multiple keys (`tvly-aaa,tvly-bbb`); multi-key handled by TavilyKeyPool with least-used
+# scheduling + 401/403 permanent blacklist + 429 transient cooldown — see .env.example.
 TAVILY_API_KEY=tvly-REPLACE_ME
-# 单 key 命中 429 时临时拉黑秒数 (默认 60); 401/403 永久拉黑不受此参数影响.
+# Cooldown seconds when a single key hits 429 (default 60); 401/403 permanent blacklisting is unaffected by this parameter.
 TAVILY_KEY_COOLDOWN_S=60
 TAVILY_MAX_RESULTS=5
-# search_depth: basic (1 credit/call, 默认) | advanced (2 credits/call)
+# search_depth: basic (1 credit/call, default) | advanced (2 credits/call)
 TAVILY_SEARCH_DEPTH=basic
-# include_raw_content: false | markdown | text (旧值 true 兼容映射到 markdown)
-# 体积大, 务必配合 TAVILY_RAW_CONTENT_MAX_CHARS 截断
+# include_raw_content: false | markdown | text (legacy true is mapped to markdown for compatibility)
+# Large in size — must be paired with TAVILY_RAW_CONTENT_MAX_CHARS truncation
 TAVILY_INCLUDE_RAW_CONTENT=markdown
-# 单结果 raw_content 截断长度. 0 = 不截断 (谨慎: 单结果可达 40k+ chars)
+# Per-result raw_content truncation length. 0 = no truncation (caution: a single result can exceed 40k chars)
 TAVILY_RAW_CONTENT_MAX_CHARS=8000
-# include_answer: false | basic | advanced. 默认 false 避免 Tavily 内部 LLM 速答污染评测纯度
+# include_answer: false | basic | advanced. Default false to avoid Tavily's internal LLM quick answer polluting evaluation purity
 TAVILY_INCLUDE_ANSWER=false
-# end_date = question.end_time + offset. 项目默认 -1 (前一天, 避免事件当天信息泄露).
-# 数值越小越保守: -2/-3 更严格; 0 = 当天可见 (仅调试用, 不要在正式评测中使用)
+# end_date = question.end_time + offset. Project default -1 (one day before, to avoid same-day information leakage).
+# Smaller is more conservative: -2/-3 stricter; 0 = same-day visible (debug only, do not use for formal evaluation)
 TAVILY_END_DATE_OFFSET_DAYS=-1
 
-# Tavily 并发 & 重试 (与 Tavily 配套)
+# Tavily concurrency & retry (paired with Tavily)
 SEARCH_MAX_CONCURRENCY=5
 SEARCH_RETRY_MAX=3
 SEARCH_BACKOFF_S=2,5,15
@@ -697,33 +809,34 @@ SEARCH_BACKOFF_S=2,5,15
 # -------- ReAct Loop --------
 REACT_MAX_STEPS=12
 REACT_MAX_SEARCH_CALLS=8
-# 反思协议: 启用后在 user message 末尾附加多步推理脚手架, 显著抬升工具调用次数
-# 与思考深度. 不写入 dataset_metadata (prompt_templates_hash 保持不变), 协议
-# 文本通过 user_prompt 字段每条 sample 落库, 配置开关由 config_snapshot 记录.
+# Reflection protocol: when enabled, append a multi-step reasoning scaffold to the end of the user message,
+# significantly raising tool-call count and thinking depth. Not written into dataset_metadata
+# (prompt_templates_hash unchanged); the protocol text is persisted per sample via the user_prompt field,
+# and the configuration toggle is recorded in config_snapshot.
 REACT_REFLECTION_PROTOCOL=true
-# 软性最低搜索次数 (默认 0=关). >0 时, LLM 试图给最终答案但搜索数 < 该值会被
-# 注入一条 user nudge 让其继续检索. 受 REACT_MAX_SEARCH_CALLS 上限约束.
+# Soft minimum search count (default 0=off). When > 0, if the LLM tries to give a final answer with
+# fewer than this many searches, a user nudge is injected to keep retrieving. Bounded by REACT_MAX_SEARCH_CALLS.
 REACT_MIN_SEARCH_CALLS=0
-# 单 sample nudge 注入次数上限 (默认 2), 防止 LLM 与系统反复 nudge 死循环.
+# Per-sample upper bound on nudge injections (default 2), to prevent infinite nudge loops.
 REACT_MAX_NUDGES=2
 
 # -------- Sampling --------
-# 每道题每个模型采样几次 (pass@1 avg / pass_any@N / majority vote 都基于这 N 次)
+# How many samples per question per model (pass@1 avg / pass_any@N / majority vote are all based on these N)
 SAMPLING_N=5
 
 # -------- Run / Resume --------
-# 留空则自动生成 YYYYMMDD-HHMMSS-{4位短uuid}. 填相同的 run_id 可断点续跑
+# Empty → auto-generate YYYYMMDD-HHMMSS-{4-char short uuid}. Same run_id resumes
 RUN_ID=
 RESUME=true
 
 # -------- Database --------
 SOURCE_DB=./forecast_eval_set_example.db
-# 题库表名 (SOURCE_DB 内). 自带数据集请改成你自己的表名; 仅限 [A-Za-z_][A-Za-z0-9_]*.
+# Question table name (inside SOURCE_DB). For a custom dataset, change to your own table name; only [A-Za-z_][A-Za-z0-9_]*.
 SOURCE_TABLE=forecast_eval_set_example
-# 每次评测会在 RUNS_ROOT 下创建独立 {run_id}/ 目录 (db/, analysis/, logs/)
+# Each evaluation creates a separate {run_id}/ directory under RUNS_ROOT (db/, analysis/, logs/)
 RUNS_ROOT=./runs
 DB_COMMIT_BATCH=10
-# false 不存完整 messages trace, 可减小 db 80% 体积
+# false skips the full messages trace, can shrink DB by 80%
 WRITE_MESSAGES_TRACE=true
 
 # -------- Logging --------
@@ -731,46 +844,47 @@ LOG_LEVEL=INFO
 LOG_DIR=./logs
 ```
 
-### 7.1 关键参数说明
+### 7.1 Key parameter notes
 
-- **`MODELS`**：逗号分隔，笛卡尔积展开。单跑一个模型就留一个。为空则报错退出。**禁止**在 slug 中拼接 `:online` 或启用 provider 内置 browsing（见 §3.8）。
-- **`MODEL_TRAINING_CUTOFFS`**：`model=YYYY-MM-DD` 列表，逗号分隔。`config.py` 解析为 `dict[str, date]`。未声明的模型不过滤。过滤在 runner 任务生成阶段做，跳过的样本写一行 `error="skipped_training_cutoff"` 到 `run_results`。
-- **`LLM_MAX_CONCURRENCY` vs `SEARCH_MAX_CONCURRENCY`**：分开控制，因为 Tavily 的 rate limit 通常比 LLM 紧。
-- **`LLM_BACKOFF_*` 三条退避序列**：对应不同错误类型（见 §9），序列长度决定最大重试次数。
-- **`TAVILY_SEARCH_DEPTH`**：`basic`（默认，1 credit）/ `advanced`（2 credits，召回更高）。一次预测平均 3-5 次搜索，`basic` 控制成本。
-- **`TAVILY_INCLUDE_RAW_CONTENT`**：`false` / `markdown`（默认）/ `text`。控制 LLM 看到的页面正文形态。体积大时务必同时设 `TAVILY_RAW_CONTENT_MAX_CHARS`。旧版 `bool` 值仍兼容（`true → markdown`）。
-- **`TAVILY_RAW_CONTENT_MAX_CHARS`**：单 result `raw_content` 截断阈值（chars），默认 `8000` ≈ 2k tokens。`0` = 不截断（谨慎：5 条结果总量可超 200k chars，极易塞爆 LLM context）。
-- **`TAVILY_INCLUDE_ANSWER`**：`false`（默认）/ `basic` / `advanced`。默认关闭以避免引入 "第二个 LLM 判断" 污染评测纯度（启用后强弱模型间的差异会被压缩）。
-- **`TAVILY_END_DATE_OFFSET_DAYS`**：项目默认 `-1`（前一天，推荐的严格默认值）。数值越小越保守；`0` 仅调试用。所有报表默认在 `-1` 下比较。
-- **`RUN_ID` 自动生成格式**：`YYYYMMDD-HHMMSS-xxxx`，例如 `20260424-120344-a7k3`，`ls` 天然按时间排序；同时作为 `RUNS_ROOT/{run_id}/` 目录名。
-- **`RUNS_ROOT`**：评测产物根目录（默认 `./runs`），每个 run 占一个子目录。
-- **`WRITE_MESSAGES_TRACE`**：`true` 存完整 messages JSON（方便 debug 但 db 变大）；`false` 只存关键字段。
-- **`REACT_REFLECTION_PROTOCOL`**：`true`（默认）在每条 sample 的 user message 末尾追加多步推理脚手架（拆题 / ≥3 检索角度 / 每次搜索后反思 / 交叉验证 / 反方向自检 / 置信度声明）。协议文本不进 `dataset_metadata`，因此 `prompt_templates_hash` 不受影响，但渲染后的完整 user message 会写入每条 sample 的 `user_prompt` 字段，开关同时由 `run_meta.config_snapshot` 记录，可事后比对开/关协议下的行为差异。
-- **`REACT_MIN_SEARCH_CALLS` / `REACT_MAX_NUDGES`**：可选兜底机制。当 LLM 在 `web_search` 调用次数还不足 `REACT_MIN_SEARCH_CALLS` 时就试图给最终答案，系统会向消息序列注入一条 user nudge 提醒它再换角度检索；同一个 sample 最多 nudge `REACT_MAX_NUDGES` 次，整体仍受 `REACT_MAX_STEPS` / `REACT_MAX_SEARCH_CALLS` 硬上限约束。`REACT_MIN_SEARCH_CALLS=0`（默认）等价于关闭兜底，仅靠反思协议驱动；`ENABLE_WEB_SEARCH=false` 时 nudge 自动失效（无搜索可做）。Settings 校验会拒绝 `min > max`。
-- **脱敏**：`run_meta.config_snapshot` 写入前 `config.py` 必须对 `LLM_API_KEY` / `TAVILY_API_KEY` 等敏感字段执行 redaction（只保留前 4 位 + 长度 + `sha256[:12]`），敏感明文一律不落库。`TAVILY_API_KEY` 现为 list[str]，每个 key 独立 redact，落盘形如 `[{prefix, sha256_12, length, provider}, ...]`，便于事后审计 "本 run 用了哪几把 key"。
+- **`MODELS`**: comma-separated, Cartesian product. To run a single model just leave one. Empty → error and exit. **Do not** append `:online` to the slug or enable provider built-in browsing (see §3.8).
+- **`MODEL_TRAINING_CUTOFFS`**: list of `model=YYYY-MM-DD`, comma-separated. `config.py` parses it as `dict[str, date]`. Models not declared are not filtered. Filtering happens during the runner's task-generation phase; skipped samples write a row of `error="skipped_training_cutoff"` into `run_results`.
+- **`LLM_MAX_CONCURRENCY` vs `SEARCH_MAX_CONCURRENCY`**: separately controlled, because Tavily's rate limit is generally tighter than the LLM's.
+- **The three `LLM_BACKOFF_*` sequences**: correspond to different error types (see §9); the sequence length determines the max retry count.
+- **`TAVILY_SEARCH_DEPTH`**: `basic` (default, 1 credit) / `advanced` (2 credits, higher recall). A single prediction averages 3-5 searches; `basic` controls cost.
+- **`TAVILY_INCLUDE_RAW_CONTENT`**: `false` / `markdown` (default) / `text`. Controls the page-body form the LLM sees. When the volume is large, also set `TAVILY_RAW_CONTENT_MAX_CHARS`. The legacy `bool` value is still compatible (`true → markdown`).
+- **`TAVILY_RAW_CONTENT_MAX_CHARS`**: per-result `raw_content` truncation threshold (chars), default `8000` ≈ 2k tokens. `0` = no truncation (caution: 5 results combined can exceed 200k chars, easily blowing the LLM context).
+- **`TAVILY_INCLUDE_ANSWER`**: `false` (default) / `basic` / `advanced`. Default off to avoid introducing a "second LLM judgement" that pollutes evaluation purity (when enabled, differences between strong and weak models compress).
+- **`TAVILY_END_DATE_OFFSET_DAYS`**: project default `-1` (one day before, the recommended strict default). Smaller is more conservative; `0` is for debug only. All reports default to comparison under `-1`.
+- **`RUN_ID` auto-generation format**: `YYYYMMDD-HHMMSS-xxxx`, e.g. `20260424-120344-a7k3`; `ls` naturally sorts by time, and this is also the directory name under `RUNS_ROOT/{run_id}/`.
+- **`RUNS_ROOT`**: root directory for evaluation outputs (default `./runs`); each run takes one subdirectory.
+- **`WRITE_MESSAGES_TRACE`**: `true` stores the full messages JSON (handy for debugging, increases DB size); `false` stores only key fields.
+- **`REACT_REFLECTION_PROTOCOL`**: `true` (default) appends a multi-step reasoning scaffold to the end of each sample's user message (decompose / ≥3 retrieval angles / reflect after each search / cross-validate / opposite-direction self-check / confidence statement). The protocol text is not entered into `dataset_metadata`, so `prompt_templates_hash` is unaffected, but the rendered full user message goes into each sample's `user_prompt` field; the toggle is also recorded in `run_meta.config_snapshot`, allowing post-hoc behaviour comparison between protocol on / off.
+- **`REACT_MIN_SEARCH_CALLS` / `REACT_MAX_NUDGES`**: optional fallback mechanism. When the LLM tries to give a final answer with fewer `web_search` calls than `REACT_MIN_SEARCH_CALLS`, the system injects a user nudge into the message sequence asking it to retrieve from another angle; the same sample is nudged at most `REACT_MAX_NUDGES` times, with the overall flow still bounded by `REACT_MAX_STEPS` / `REACT_MAX_SEARCH_CALLS` ceilings. `REACT_MIN_SEARCH_CALLS=0` (default) is equivalent to disabling the fallback, relying solely on the reflection protocol; when `ENABLE_WEB_SEARCH=false`, the nudge is automatically disabled (no search to do). Settings validation rejects `min > max`.
+- **Redaction**: before writing `run_meta.config_snapshot`, `config.py` MUST redact sensitive fields like `LLM_API_KEY` / `TAVILY_API_KEY` (keep only the first 4 chars + length + `sha256[:12]`); sensitive plaintext is never persisted. `TAVILY_API_KEY` is now `list[str]`, each key redacted independently and persisted as `[{prefix, sha256_12, length, provider}, ...]`, for later auditing of "which keys this run used".
 
 ---
 
-## 8. 核心模块职责
+## 8. Core module responsibilities
 
-| 模块         | 职责                                                                                                            | 关键接口                                                                                                       |
+| Module       | Responsibility                                                                                                  | Key interfaces                                                                                                 |
 | ------------ | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `config.py`  | `pydantic-settings` 从 `.env` 读取，校验类型，逗号分隔列表解析                                                  | `Settings` 类（单例）                                                                                          |
-| `loader.py`  | 从 `SOURCE_DB`（默认 `forecast_eval_set_example.db`）同步两张表到 `results.db`：① `<SOURCE_TABLE>`（默认 `forecast_eval_set_example`）→ `questions`（按 filters 过滤）；② `dataset_metadata.features_json.prompt_reconstruction` → `prompt_templates`（key/value 平铺） | `sync_questions(source_db, conn, filters, table=...) -> list[Question]`, `sync_prompt_templates(source_db, conn) -> dict[str,str]` |
-| `prompts.py` | 按 `question_type` 渲染 user message：① 生成 `outcomes_block`（multiple_choice 用 §3.7 字母规则枚举选项）；② 选三套 `output_format` 之一，binary_named 时把 `<options[i]>` 占位符替换为实际实体名；③ 用 `prompt_template` 拼装最终文本 | `render_user_prompt(q: Question, templates: dict[str,str]) -> str`                                             |
-| `tools.py`   | 定义 `web_search` OpenAI-schema；**LLM 可见部分不含日期**                                                       | `WEB_SEARCH_SCHEMA`, `execute_tool_call(tc, q, cfg)`                                                           |
-| `search.py`  | 封装 Tavily `/search`，注入 `end_date = q.end_time + OFFSET`；按 `TAVILY_INCLUDE_RAW_CONTENT` 决定页面正文形态 + 按 `TAVILY_RAW_CONTENT_MAX_CHARS` 截断；retry | `tavily_search(query, end_date, settings) -> SearchResult`                                                     |
-| `llm.py`     | OpenAI-compatible client (OpenRouter)，按错误类型分层 retry；**强制不启用 provider-native browsing**（不传 `plugins`、不加 `:online` 后缀、不发 provider 私有 web tool 字段） | `chat(model, messages, tools, ...) -> ChatResponse`                                                            |
-| `react.py`   | 一次 ReAct 推理 = 一个 sample，循环到无 tool_call 或超限                                                        | `run_react(q, model, sample_idx, cfg) -> SampleResult`                                                         |
-| `parser.py`  | 按 `question_type` 解析 `\boxed{...}` → 字母 `frozenset[str]`（yes_no: Yes/No→A/B；binary_named: label→letter；mc: split letters）；与 `q.answer` 解析出的字母集合做严格 frozenset 相等判对 | `parse_answer(text: str, q: Question) -> frozenset[str] \| None`, `parse_gt(answer: str) -> frozenset[str]`, `is_correct(pred, gt) -> bool` |
-| `errors.py`  | 把 httpx/openai 异常映射到错误分类；给出等待秒数                                                                | `classify(exc) -> ErrorKind`, `backoff_seconds(kind, attempt)`                                                 |
-| `db.py`      | 连接管理、WAL + PRAGMA、**per-model 宽表 schema 动态生成**（`init_schema(conn, sampling_n)` 建 `s{i}_*` 列）、`register_run_meta` / `finish_run_meta`、`AsyncWriter` 按 `(question_id, sample_idx)` UPSERT、`load_completed_samples`、source/metadata/templates hash 计算、config 脱敏、model slug 安全化 | `init_schema(conn, sampling_n)`, `AsyncWriter.enqueue_result`, `load_completed_samples`, `register_run_meta`, `upsert_sample_sync`, `model_slug_safe`, `compute_*_hash` |
-| `runner.py`  | 任务编排：笛卡尔积 → 去重（per-model completed 集）→ **按 `MODEL_TRAINING_CUTOFFS` 过滤并落 skipped_training_cutoff 行到对应 model DB** → asyncio 并发 → 进度 log → 收尾 `finish_run_meta` | `run(settings, filters, questions, templates, run_id, conns: dict[model, sqlite3.Connection]) -> RunStats`, `build_task_plan(...)` |
-| `analysis.py`| 后置统计：扫描 `runs/{run_id}/db/*.db` → 计算 §11 全部指标 → 写 `analysis/` CSV / MD / JSON。**不改 DB**。由 `evaluation.py` 自动调用，或独立 `python -m forecast_eval.analysis runs/{run_id}` 重刷 | `run_analysis(run_dir: Path) -> list[Path]` |
+| `config.py`  | reads `.env` via `pydantic-settings`, validates types, parses comma-separated lists                                                  | `Settings` class (singleton)                                                                                          |
+| `loader.py`  | syncs two tables from `SOURCE_DB` (default `forecast_eval_set_example.db`) into `results.db`: ① `<SOURCE_TABLE>` (default `forecast_eval_set_example`) → `questions` (filtered by filters); ② `dataset_metadata.features_json.prompt_reconstruction` → `prompt_templates` (key/value flat) | `sync_questions(source_db, conn, filters, table=...) -> list[Question]`, `sync_prompt_templates(source_db, conn) -> dict[str,str]` |
+| `prompts.py` | renders the user message per `question_type`: ① generates `outcomes_block` (multiple_choice enumerates options via the §3.7 letter rule); ② selects one of the three `output_format`s; for binary_named, replaces `<options[i]>` placeholders with the actual entity names; ③ assembles the final text via `prompt_template` | `render_user_prompt(q: Question, templates: dict[str,str]) -> str`                                             |
+| `tools.py`   | defines the `web_search` OpenAI-schema; **the LLM-visible part contains no date**                                                       | `WEB_SEARCH_SCHEMA`, `execute_tool_call(tc, q, cfg)`                                                           |
+| `search.py`  | wraps Tavily `/search`, injects `end_date = q.end_time + OFFSET`; controls page-body form per `TAVILY_INCLUDE_RAW_CONTENT` and truncates per `TAVILY_RAW_CONTENT_MAX_CHARS`; retry | `tavily_search(query, end_date, settings) -> SearchResult`                                                     |
+| `llm.py`     | OpenAI-compatible client (OpenRouter), tiered retry by error kind; **forces no provider-native browsing** (no `plugins`, no `:online` suffix, no provider-private web-tool fields) | `chat(model, messages, tools, ...) -> ChatResponse`                                                            |
+| `react.py`   | one ReAct inference = one sample; loops until no tool_call or limits hit                                                        | `run_react(q, model, sample_idx, cfg) -> SampleResult`                                                         |
+| `parser.py`  | parses `\boxed{...}` per `question_type` → letter `frozenset[str]` (yes_no: Yes/No→A/B; binary_named: label→letter; mc: split letters); strict frozenset equality against the letter set parsed from `q.answer` | `parse_answer(text: str, q: Question) -> frozenset[str] \| None`, `parse_gt(answer: str) -> frozenset[str]`, `is_correct(pred, gt) -> bool` |
+| `errors.py`  | maps httpx/openai exceptions to error classifications; gives wait-seconds                                                                | `classify(exc) -> ErrorKind`, `backoff_seconds(kind, attempt)`                                                 |
+| `db.py`      | connection management, WAL + PRAGMA, **per-model wide-table schema dynamic generation** (`init_schema(conn, sampling_n)` creates `s{i}_*` columns), `register_run_meta` / `finish_run_meta`, `AsyncWriter` UPSERT by `(question_id, sample_idx)`, `load_completed_samples`, source/metadata/templates hash computation, config redaction, model-slug safe-ification | `init_schema(conn, sampling_n)`, `AsyncWriter.enqueue_result`, `load_completed_samples`, `register_run_meta`, `upsert_sample_sync`, `model_slug_safe`, `compute_*_hash` |
+| `runner.py`  | task orchestration: Cartesian product → dedup (per-model completed set) → **filter via `MODEL_TRAINING_CUTOFFS` and write skipped_training_cutoff rows into the corresponding model DB** → asyncio concurrency → progress log → cleanup `finish_run_meta` | `run(settings, filters, questions, templates, run_id, conns: dict[model, sqlite3.Connection]) -> RunStats`, `build_task_plan(...)` |
+| `analysis.py`| post-hoc statistics: scans `runs/{run_id}/db/*.db` → computes all metrics in §11 → writes `analysis/` CSV / MD / JSON. **Does not modify the DB.** Auto-invoked by `evaluation.py`, or invokable independently via `python -m forecast_eval.analysis runs/{run_id}` to refresh | `run_analysis(run_dir: Path) -> list[Path]` |
 
-`QFilter` 是 dataclass，包含 `question_types: set[str] | None` 和 `choice_types: set[str] | None`，`None` 表示不过滤。
+`QFilter` is a dataclass containing `question_types: set[str] | None` and
+`choice_types: set[str] | None`, where `None` means no filtering.
 
-### 8.1 `prompts.render_user_prompt` 参考实现
+### 8.1 `prompts.render_user_prompt` reference implementation
 
 ```python
 def render_user_prompt(q: Question, templates: dict[str, str]) -> str:
@@ -806,7 +920,7 @@ def render_user_prompt(q: Question, templates: dict[str, str]) -> str:
     )
 ```
 
-### 8.2 `parser.parse_answer` 参考实现
+### 8.2 `parser.parse_answer` reference implementation
 
 ```python
 BOXED_RE = re.compile(r"\\boxed\{([^}]*)\}")
@@ -821,7 +935,7 @@ def parse_answer(text: str, q: Question) -> frozenset[str] | None:
     matches = BOXED_RE.findall(text or "")
     if not matches:
         return None
-    payload = matches[-1].strip()                       # 取最后一个 \boxed{...}
+    payload = matches[-1].strip()                       # take the last \boxed{...}
 
     if q.question_type == "yes_no":
         v = payload.lower()
@@ -862,52 +976,52 @@ def is_correct(pred: frozenset[str], gt: frozenset[str]) -> bool:
 
 ---
 
-## 9. 错误分层 & 退避策略
+## 9. Error tiering & backoff strategy
 
-所有异常走下表决策：
+All exceptions are routed by the table below:
 
-| 错误类型                         | 识别方式                                                              | 处理策略                                                                 |
+| Error type                         | Identification                                                              | Handling strategy                                                                 |
 | -------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| **Network / Timeout**            | `httpx.ConnectError`, `httpx.ReadTimeout`, `asyncio.TimeoutError`     | 走 `LLM_BACKOFF_NETWORK_S` 序列退避，用完仍失败 → `error="network"` 跳过 |
-| **Rate Limit (429)**             | HTTP 429                                                              | 优先读 `Retry-After` header；否则走 `LLM_BACKOFF_RATE_LIMIT_S`           |
-| **Server 5xx**                   | HTTP 500/502/503/504                                                  | 走 `LLM_BACKOFF_SERVER_5XX_S`，用完 → `error="server_5xx"` 跳过          |
-| **Auth (401/403)**               | HTTP 401/403                                                          | **立即 fail，停止整个 run**（Key 错了继续跑没意义）                      |
-| **Bad Request (400)**            | HTTP 400 + `model_not_found` / `invalid_request`                      | 立即跳过，`error="bad_request"`                                          |
-| **Content Policy**               | HTTP 400 + `content_policy_violation` / provider 拒绝码               | **不重试**，`error="content_policy"`, `parse_ok=0`, `correct=NULL`       |
-| **LLM 软性拒绝**                 | 正常返回但找不到 `\boxed{...}` 或解析后 `frozenset` 为空              | 不是 error，`parse_ok=0`, `correct=NULL`（计入 refusal rate）            |
-| **超 `REACT_MAX_STEPS`**         | ReAct 循环耗尽没给最终答案                                            | 不是 error，`parse_ok=0`, `correct=NULL`                                 |
-| **Tool arguments JSON 解析失败** | LLM 给的 arguments 不是合法 JSON                                      | 告诉 LLM 报错继续循环（非 fatal）                                        |
-| **Tavily 自身错误**              | 独立走 `SEARCH_BACKOFF_S` 重试，用完则把错误作为 tool_result 喂给 LLM | LLM 可以选择重试或放弃                                                   |
-| **训练数据污染剔除**             | 任务生成阶段检测 `q.end_time <= MODEL_TRAINING_CUTOFFS[model]`（见 §3.9） | **不调用 LLM**，直接写 `error="skipped_training_cutoff"`, `parse_ok=0`, `correct=NULL`；resume 不重试 |
+| **Network / Timeout**            | `httpx.ConnectError`, `httpx.ReadTimeout`, `asyncio.TimeoutError`     | use the `LLM_BACKOFF_NETWORK_S` backoff sequence; on still-failure → `error="network"` skip |
+| **Rate Limit (429)**             | HTTP 429                                                              | prefer the `Retry-After` header; otherwise use `LLM_BACKOFF_RATE_LIMIT_S`           |
+| **Server 5xx**                   | HTTP 500/502/503/504                                                  | use `LLM_BACKOFF_SERVER_5XX_S`; on exhaustion → `error="server_5xx"` skip          |
+| **Auth (401/403)**               | HTTP 401/403                                                          | **fail immediately, stop the whole run** (continuing is pointless when the key is wrong)                      |
+| **Bad Request (400)**            | HTTP 400 + `model_not_found` / `invalid_request`                      | skip immediately, `error="bad_request"`                                          |
+| **Content Policy**               | HTTP 400 + `content_policy_violation` / provider rejection code               | **no retry**, `error="content_policy"`, `parse_ok=0`, `correct=NULL`       |
+| **LLM soft refusal**             | normal return but `\boxed{...}` not found or parsed `frozenset` empty              | not an error, `parse_ok=0`, `correct=NULL` (counted into refusal rate)            |
+| **Exceed `REACT_MAX_STEPS`**     | ReAct loop exhausted without producing a final answer                                            | not an error, `parse_ok=0`, `correct=NULL`                                 |
+| **Tool arguments JSON parse fails** | the LLM's arguments are not legal JSON                                      | tell the LLM the error and continue the loop (non-fatal)                                        |
+| **Tavily error itself**          | retry independently via `SEARCH_BACKOFF_S`; on exhaustion, feed the error to the LLM as tool_result | the LLM can choose to retry or give up                                                   |
+| **Training-data contamination filter** | detected during task generation: `q.end_time <= MODEL_TRAINING_CUTOFFS[model]` (see §3.9) | **does not invoke the LLM**, directly writes `error="skipped_training_cutoff"`, `parse_ok=0`, `correct=NULL`; resume does not retry |
 
-### 9.1 关键边界
+### 9.1 Key boundaries
 
-1. **Auth 错误停整个 run**：Key 错了继续烧没意义，早停省钱。
-2. **Content policy 不重试**：同一题目再送一次结果一样。直接标记，最后统计每个模型被卡了多少。
-3. **Refusal ≠ error**：LLM 返回了合法响应但没答（boxed 缺失 / 字母不在选项范围），是模型能力的一部分，进统计而不进 error 字段。
-4. **Tavily 失败降级为 tool_result 错误**：让 LLM 自行决定是否重试 query 或放弃，不中断整个 sample。
-5. **`skipped_training_cutoff` 不算 error rate**：这是主动数据清洗，不是模型失败，报表里单独统计"被剔除题数/占比"而不计入 `error rate by kind`。
+1. **Auth errors stop the whole run**: continuing to burn budget on a wrong key is meaningless; early-stop saves money.
+2. **Content policy is not retried**: re-sending the same question yields the same result. Mark it directly, and tally how many each model was rejected on at the end.
+3. **Refusal ≠ error**: the LLM returned a legal response but did not answer (missing boxed / letter outside the option range) — this is part of model capability, counted in statistics but not the error field.
+4. **Tavily failure degrades to a tool_result error**: let the LLM decide whether to retry the query or give up, without interrupting the whole sample.
+5. **`skipped_training_cutoff` does not count toward error rate**: this is active data cleansing, not a model failure; the report tallies "questions excluded / ratio" separately and does not include it in `error rate by kind`.
 
 ---
 
-## 10. ReAct Loop 伪代码
+## 10. ReAct Loop pseudocode
 
 ```python
 async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> SampleResult:
-    # ① 注入 end_date: LLM 永远看不到
+    # ① inject end_date: the LLM never sees it
     end_date = (date.fromisoformat(q.end_time)
                 + timedelta(days=cfg.TAVILY_END_DATE_OFFSET_DAYS)).isoformat()
 
-    # ② 拼接 user message: agent_role + event + outcomes_block + output_format + guidance
-    #    全部从 prompt_templates 读, 与源数据保持解耦; 反思协议作为 addendum 在
-    #    REACT_REFLECTION_PROTOCOL=true 时附加, 仍是单条 user message.
+    # ② assemble the user message: agent_role + event + outcomes_block + output_format + guidance
+    #    all read from prompt_templates, decoupled from the source data; the reflection protocol
+    #    is appended as an addendum when REACT_REFLECTION_PROTOCOL=true, still a single user message.
     user_prompt = prompts.render_user_prompt(
         q,
         cfg.PROMPT_TEMPLATES,
         reflection_protocol=prompts.REFLECTION_PROTOCOL if cfg.REACT_REFLECTION_PROTOCOL else None,
     )
 
-    # ③ 整体作为单条 user message (最忠实模板; 不再拆 system/user)
+    # ③ as a single user message in its entirety (most faithful to the template; no system/user split)
     messages = [{"role": "user", "content": user_prompt}]
     search_calls: list[dict] = []
     final_raw = ""
@@ -930,8 +1044,8 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
         messages.append(msg.model_dump(exclude_unset=True))
         _accumulate_tokens(tokens, resp.usage)
 
-        # 没 tool_call = LLM 想给最终答案. 软性最低搜索次数兜底:
-        # 不够就 nudge 一次让它继续检索 (受 REACT_MAX_NUDGES 与 REACT_MAX_STEPS 共同保护).
+        # no tool_call = LLM wants to give a final answer. Soft-minimum-search-count fallback:
+        # if insufficient, nudge once to keep retrieving (jointly protected by REACT_MAX_NUDGES and REACT_MAX_STEPS).
         if not msg.tool_calls:
             nudge_enabled = (
                 cfg.ENABLE_WEB_SEARCH
@@ -956,7 +1070,7 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
             final_raw = msg.content or ""
             break
 
-        # 处理所有 tool_call (OpenAI 支持 parallel)
+        # handle every tool_call (OpenAI supports parallel)
         for tc in msg.tool_calls:
             if tc.function.name != "web_search":
                 messages.append(_tool_error(tc, "unknown tool"))
@@ -970,7 +1084,7 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
                 messages.append(_tool_error(tc, f"invalid arguments JSON: {e}"))
                 continue
 
-            # 注入 end_date (LLM 看不到)
+            # inject end_date (invisible to the LLM)
             result = await search.tavily_search(query=args["query"], end_date=end_date)
             search_calls.append({
                 "query": args["query"],
@@ -983,9 +1097,9 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
                 "tool_call_id": tc.id,
                 "content": json.dumps(result.to_llm_payload()),
             })
-    # 超步数了, final_raw 保持为空 → parser 会标记 parse_ok=0
+    # exceeded the step count; final_raw stays empty → parser will mark parse_ok=0
 
-    # ④ 解析与判分: 全部在字母集合层面
+    # ④ parsing and scoring: all at the letter-set level
     parsed = parser.parse_answer(final_raw, q)              # frozenset[str] | None
     gt = parser.parse_gt(q.answer)                          # frozenset[str]
     correct = parser.is_correct(parsed, gt) if parsed is not None else None
@@ -1015,424 +1129,505 @@ async def run_react(q: Question, model: str, sample_idx: int, cfg: Settings) -> 
 
 ---
 
-## 11. 评测指标定义
+## 11. Evaluation metric definitions
 
-指标**完全由 `forecast_eval.analysis` 在 run 结束后计算**，不存 DB。产物落在
-`runs/{run_id}/analysis/` 下（CSV / MD / JSON）。以下定义与源码实现一致。
+Metrics are **computed entirely by `forecast_eval.analysis` after the run
+finishes**, not stored in the DB. Artefacts land in
+`runs/{run_id}/analysis/` (CSV / MD / JSON). The definitions below match
+the source implementation.
 
-一个 `(question_id, model)` 下有 N 个 sample（`N = SAMPLING_N`）。统计时**先排除** `s{i}_error="skipped_training_cutoff"` 的行（它们是被剔除的题，不是模型答错）：
+A `(question_id, model)` has N samples (`N = SAMPLING_N`). When tallying,
+**first exclude** rows with `s{i}_error="skipped_training_cutoff"` (these
+are excluded questions, not the model getting them wrong):
 
-| 指标                            | 定义                                                                              | 说明                    |
+| Metric                          | Definition                                                                              | Notes                    |
 | ------------------------------- | --------------------------------------------------------------------------------- | ----------------------- |
-| **pass@1 avg**                  | `mean(correct over N samples)`                                                    | 反映模型稳定能力        |
-| **pass_any@N** (原 `pass@3`)    | `1 if any(correct) across N samples else 0`                                       | best-of-N 潜力（常见的 pass@k 含义） |
-| **at_least_k_correct@N**        | `1 if sum(correct) ≥ k else 0`                                                    | 多次一致正确，适合做阈值分析 |
-| **majority vote correct**       | N 个 `final_answer_letters`（作为 frozenset）做多数投票，再与 `q.answer` 比对     | self-consistency 指标   |
-| **parse failure rate**          | `mean(1 - parse_ok)`                                                              | 反映格式遵循 / 拒答能力 |
-| **avg tool_calls**              | `mean(tool_calls_count)`                                                          | 反映搜索使用策略        |
-| **avg react_steps**             | `mean(react_steps)`                                                               | 反映推理深度            |
-| **avg latency_ms / avg tokens** | 同名字段平均                                                                      | 反映成本                |
-| **error rate by kind**          | 按 `error` 分类统计占比（不含 `skipped_training_cutoff`）                         | 反映稳定性              |
-| **training_cutoff_skip rate**   | `count(error='skipped_training_cutoff') / count(*)` per model                     | 该模型被剔除多少题      |
-| **avg_nudges_used**             | `mean(nudges_used)` over eligible samples（v3 起）                                 | 反映"strict floor 触发率"——值越大说明模型越频繁触发 reminder；为 0 时说明几乎都自发搜索 |
-| **finish_reason_breakdown**     | per-model 的 `Counter[finish_reason]`，over eligible samples（v3 起）             | NULL 计入 `<missing>` 桶；用来甄别 `length`（输出截断）/ `content_filter`（被拒）等异常占比 |
+| **pass@1 avg**                  | `mean(correct over N samples)`                                                    | reflects stable capability        |
+| **pass_any@N** (was `pass@3`)   | `1 if any(correct) across N samples else 0`                                       | best-of-N potential (the standard pass@k meaning) |
+| **at_least_k_correct@N**        | `1 if sum(correct) ≥ k else 0`                                                    | repeated-consistency correctness, suited for threshold analysis |
+| **majority vote correct**       | majority-vote on N `final_answer_letters` (as frozensets), then compared with `q.answer`     | self-consistency metric   |
+| **parse failure rate**          | `mean(1 - parse_ok)`                                                              | reflects format adherence / refusal rate |
+| **avg tool_calls**              | `mean(tool_calls_count)`                                                          | reflects search-usage strategy        |
+| **avg react_steps**             | `mean(react_steps)`                                                               | reflects reasoning depth            |
+| **avg latency_ms / avg tokens** | average of the same-named fields                                                                      | reflects cost                |
+| **error rate by kind**          | percentages by `error` classification (excluding `skipped_training_cutoff`)                         | reflects stability              |
+| **training_cutoff_skip rate**   | `count(error='skipped_training_cutoff') / count(*)` per model                     | how many questions this model was excluded on      |
+| **avg_nudges_used**             | `mean(nudges_used)` over eligible samples (since v3)                                 | reflects "strict-floor trigger rate" — larger means the model triggers reminders more often; 0 means almost all searches were spontaneous |
+| **finish_reason_breakdown**     | per-model `Counter[finish_reason]` over eligible samples (since v3)             | NULL counted in the `<missing>` bucket; used to identify abnormal proportions like `length` (output truncation) / `content_filter` (refused) |
 
-> 指标命名变更：原文档里的 `pass@3 = sum(correct)≥3` 与业界通用的 `pass@k` 语义不一致（后者是 "any correct in k"），容易误读。现在明确用 `pass_any@N`（= any）与 `at_least_k_correct@N`（= 阈值）两个独立命名。
+> Naming change: the legacy doc's `pass@3 = sum(correct)≥3` is inconsistent
+> with the standard `pass@k` semantics ("any correct in k") and is easily
+> misread. We now use `pass_any@N` (= any) and `at_least_k_correct@N` (=
+> threshold) as two distinct names.
 
-报表切片维度：`model × question_type × choice_type`。产出表：
+Report slicing dimensions: `model × question_type × choice_type`. Output
+tables:
 
-| 文件                              | 内容                                                                              |
+| File                              | Content                                                                              |
 | --------------------------------- | --------------------------------------------------------------------------------- |
-| `per_model_summary.csv` / `.md`   | 每模型一行，含上表全部指标                                                        |
-| `per_model_by_question_type.csv`  | `model × question_type` 切片，同指标集                                            |
-| `per_model_by_choice_type.csv`    | `model × choice_type` 切片，同指标集                                              |
-| `error_breakdown.csv`             | `model × error_kind` 计数 + 样本占比（含 `<ok>` 与 `skipped_training_cutoff`）    |
-| `overall.json`                    | 全部切片的结构化聚合，方便二次处理                                                |
+| `per_model_summary.csv` / `.md`   | one row per model, with all metrics from the table above                                                        |
+| `per_model_by_question_type.csv`  | `model × question_type` slice, same metric set                                            |
+| `per_model_by_choice_type.csv`    | `model × choice_type` slice, same metric set                                              |
+| `error_breakdown.csv`             | `model × error_kind` count + sample share (includes `<ok>` and `skipped_training_cutoff`)    |
+| `overall.json`                    | structured aggregation of every slice, for further processing                                                |
 
-### 11.5 Discrete-native 指标族（v5 主线）+ 概率族（companion）
+### 11.5 Discrete-native metric family (v5 main line) + probabilistic family (companion)
 
-**v5 重新定向**：本项目并行采样 `K=5`，每个 (question, label) 的经验概率
-$\hat{p} = n/K$ 只有 6 个离散值 $\{0, 0.2, 0.4, 0.6, 0.8, 1.0\}$。这把 v4 的
-Reliability Diagram / Murphy 三分解 / Platt scaling LOO 推到了"数学正确、
-统计无意义"的位置（详见 archived `2026-04-26-probabilistic-analysis-v4`
-和 `discrete-native-analysis-v5` 提案）。v5 把分析栈主体改到适合 K=5 的
-**discrete-native** 指标族；BS / NLL / MBS / BI / ABI 降级为辅助列。
+**v5 reorientation**: this project samples `K=5` in parallel; the
+empirical probability $\hat{p} = n/K$ for each (question, label) takes
+only 6 discrete values $\{0, 0.2, 0.4, 0.6, 0.8, 1.0\}$. This pushes
+v4's Reliability Diagram / Murphy three-decomposition / Platt scaling
+LOO into the "mathematically correct, statistically meaningless"
+position (see archived `2026-04-26-probabilistic-analysis-v4` and the
+`discrete-native-analysis-v5` proposal). v5 redirects the analysis stack
+to the **discrete-native** metric family suited for K=5; BS / NLL / MBS
+/ BI / ABI are demoted to auxiliary columns.
 
-**v5 一等公民**（`forecast_eval/analysis/accuracy.py` + `consistency.py`）：
+**v5 first-class citizens** (`forecast_eval/analysis/accuracy.py` +
+`consistency.py`):
 
-| 指标 | 公式 | 解读 |
+| Metric | Formula | Interpretation |
 | --- | --- | --- |
-| **FSS** | Tversky α=2 / β=0.5 per-sample → per-question 均值 → chance correction $s_q = (c_q - p_e)/(1 - p_e)$ → 题间均值 | 主指标。多选错代价 = 漏选 4 倍；单选退化 strict 0/1 |
-| Tversky baseline | 多选 $p_e$ 精确枚举 $O(m \times (k-m))$；单选 $p_e = 1/k$ | FSS 链条 chance correction 项 |
-| Cohen's κ | $(\mathrm{acc} - p_e)/(1 - p_e)$，单选 $p_e = 1/k$ / 多选 $p_e = 0.5$ | strict 0/1 acc 的机会校正 |
-| Hamming Score | $1 - \tfrac{1}{k}\sum_l|\hat{y}_l - o_l|$ | multi 题型 partial credit；纯单选 run 返 NULL |
-| **Fleiss' κ** | $(\bar{P}-\bar{P}_e)/(1-\bar{P}_e)$ on $K$-trial vote matrix；single 按 letter argmax / multi 每 label 二元 Fleiss 取均 | 多评分者一致性，K-trial 独有 |
-| 预测熵 $H_q$ | single：$-\sum_l \hat{p}_l \log_2 \hat{p}_l$；multi：per-label 二元熵均值 | 题级不确定度 |
-| **熵-准确率联合** | per-model 三分位数桶 → 每桶 Acc / MV Acc / Fleiss κ | "高熵题模型表现如何 vs 低熵题"——v5 最具学术原创性的诊断维度 |
-| VCI | $\max_l n_{q,l}/K$ 题间均值 | 投票集中度 |
-| MVG | MV_Acc - Pass@1_Acc | majority vote 信号增益（K-trial 独有） |
+| **FSS** | Tversky α=2 / β=0.5 per-sample → per-question mean → chance correction $s_q = (c_q - p_e)/(1 - p_e)$ → cross-question mean | primary metric. Multi-select wrong cost = 4× missed; single-select degenerates to strict 0/1 |
+| Tversky baseline | multi-select $p_e$ exact enumeration $O(m \times (k-m))$; single-select $p_e = 1/k$ | the chance-correction term in the FSS chain |
+| Cohen's κ | $(\mathrm{acc} - p_e)/(1 - p_e)$, single-select $p_e = 1/k$ / multi-select $p_e = 0.5$ | chance correction for strict 0/1 acc |
+| Hamming Score | $1 - \tfrac{1}{k}\sum_l|\hat{y}_l - o_l|$ | partial credit for multi-select question types; pure single-select runs return NULL |
+| **Fleiss' κ** | $(\bar{P}-\bar{P}_e)/(1-\bar{P}_e)$ on the $K$-trial vote matrix; single uses letter argmax / multi uses the mean of per-label binary Fleiss | multi-rater agreement, K-trial exclusive |
+| Predictive entropy $H_q$ | single: $-\sum_l \hat{p}_l \log_2 \hat{p}_l$; multi: per-label binary-entropy mean | per-question uncertainty |
+| **Entropy-accuracy joint** | per-model tertile buckets → per-bucket Acc / MV Acc / Fleiss κ | "how does the model perform on high-entropy questions vs low-entropy ones" — v5's most academically original diagnostic dimension |
+| VCI | $\max_l n_{q,l}/K$ cross-question mean | vote concentration |
+| MVG | MV_Acc - Pass@1_Acc | majority-vote signal gain (K-trial exclusive) |
 
-**多指标 paired bootstrap**（`forecast_eval/analysis/inference.py`）：
+**Multi-metric paired bootstrap**
+(`forecast_eval/analysis/inference.py`):
 
 `metric_paired_bootstrap(metric_fn, samples_a_by_q, samples_b_by_q, gt_map, ...)`
-参数化 paired bootstrap，对 FSS / Acc / MV_Acc / Fleiss κ / EBI 同时跑 5000
-次重采样，输出 95% CI / p-value / Cohen's d。`pairwise_bootstrap.csv` 是
-模型对决长表；论文图 Figure 2 的 ΔFSS forest plot 就是它。
+parameterised paired bootstrap, runs 5000 resamples in parallel for FSS
+/ Acc / MV_Acc / Fleiss κ / EBI, outputting 95% CI / p-value / Cohen's
+d. `pairwise_bootstrap.csv` is the model-vs-model long table; the paper's
+Figure 2 ΔFSS forest plot is from this.
 
-v4 BS-paired bootstrap (`paired_bootstrap` / `pairwise_paired_bootstrap`)
-保留——`grid.py` 的 per-cell BI CI 与 `paired_delta_bi.csv` / 4 个 v4 产物
-依赖它。
+The v4 BS-paired bootstrap (`paired_bootstrap` /
+`pairwise_paired_bootstrap`) is retained — `grid.py`'s per-cell BI CI
+and `paired_delta_bi.csv` / 4 v4 artefacts depend on it.
 
-**Companion probabilistic family**（保留作辅助列，附 K=5 disclaimer）：
+**Companion probabilistic family** (kept as auxiliary columns, with a
+K=5 disclaimer):
 
-v4 在 accuracy 之外加了一阶 proper scoring rules 与难度调整指标。Phase 0 把
-LLM 的隐式概率信号收成结构化字段（`s{i}_belief_final` / `belief_trace` /
-`belief_parse_ok`），Phase 1 用这些字段加上 §2.4 fallback 在 `analysis/` 包里
-计算 BS / NLL / MBS / BI / ABI 并写进 `per_model_summary.csv` 等。v5 保留这
-些列作为 ForecastBench / BLF 论文的对标锚点；markdown 表加 `†` 脚注：
-"Probabilistic metrics are computed from empirical vote frequencies over K=5
-parallel trials, yielding only 6 discrete probability levels per label.
-These values serve as ordinal companions to the primary discrete metrics."
+v4 added first-order proper scoring rules and difficulty-adjusted metrics
+beyond accuracy. Phase 0 collected the LLM's implicit probability signals
+into structured fields (`s{i}_belief_final` / `belief_trace` /
+`belief_parse_ok`); Phase 1 used these fields plus the §2.4 fallback in
+the `analysis/` package to compute BS / NLL / MBS / BI / ABI and write
+into `per_model_summary.csv` etc. v5 keeps these columns as benchmark
+anchors against ForecastBench / BLF papers; the markdown table adds the
+`†` footnote: "Probabilistic metrics are computed from empirical vote
+frequencies over K=5 parallel trials, yielding only 6 discrete
+probability levels per label. These values serve as ordinal companions
+to the primary discrete metrics."
 
-**统一表示（per-option Bernoulli 标签向量）**：题目 $q$ 的真值
-$\mathbf{o}_q \in \{0,1\}^{k_q}$ 与预测 $\mathbf{p}_q \in [0,1]^{k_q}$ 都按 letter
-顺序排列；single 题型要求 $\sum_l p_l = 1$（容差 $10^{-3}$），multi 题型每个
-$p_l$ 是该选项是否属于答案集的独立 Bernoulli 概率。
+**Unified representation (per-option Bernoulli label vector)**: the
+ground truth $\mathbf{o}_q \in \{0,1\}^{k_q}$ and prediction
+$\mathbf{p}_q \in [0,1]^{k_q}$ for question $q$ are both arranged in
+letter order; single-select question types require $\sum_l p_l = 1$
+(tolerance $10^{-3}$); for multi-select question types, each $p_l$ is
+the independent Bernoulli probability of that option being in the answer
+set.
 
-**一阶指标（`forecast_eval/analysis/proper_score.py`）**：
+**First-order metrics
+(`forecast_eval/analysis/proper_score.py`)**:
 
-| 指标 | 公式 | 适用范围 | CSV 列 |
+| Metric | Formula | Applicable | CSV column |
 | --- | --- | --- | --- |
-| Label-wise Brier | $\mathrm{BS}_q^{\text{lab}} = \tfrac{1}{k_q}\sum_l (p_{q,l}-o_{q,l})^2$ | 所有题型 | `bi`（聚合后） |
+| Label-wise Brier | $\mathrm{BS}_q^{\text{lab}} = \tfrac{1}{k_q}\sum_l (p_{q,l}-o_{q,l})^2$ | all question types | `bi` (after aggregation) |
 | Decision-wise Brier | $\mathrm{BS}_q^{\text{dec}} = \sum_l (p_{q,l}-o_{q,l})^2 = k_q\cdot\mathrm{BS}_q^{\text{lab}}$ | single only | `bi_dec` |
-| Brier Index | $\mathrm{BI} = 100(1 - \sqrt{\overline{\mathrm{BS}^{\text{lab}}}})$，**先取均值再开方** | 所有题型 | `bi` |
-| NLL | single：$-\log p_{q,l^*}$；multi：label-wise BCE；clip $\epsilon = 10^{-3}$ | 所有题型 | `nll` |
-| MBS | $100(\log_2 p_{q,l^*} + 1)$，clip 同 NLL | single only；multi 写 NULL | `mbs` |
-| ABI（crowd） | $\mathrm{ABI}^{(m_0)} = $ sign-aware $100(1\mp\sqrt{|\overline{\mathrm{ABS}^{(m_0)}}|})$，$\overline{\mathbf{p}}$ 排除 $m_0$ | 多模型 run | `abi_crowd` |
-| ABI（uniform） | 同上，但 baseline 是 $\mathbf{p}=(1/k,\dots,1/k)$ | 所有 run；单模型时 `abi_crowd` 退化等于此列 | `abi_uniform` |
-| fallback 占比 | 走 §2.4 fallback 的 question 数 / 该模型可评分 question 数 | 所有 run | `fallback_share` |
+| Brier Index | $\mathrm{BI} = 100(1 - \sqrt{\overline{\mathrm{BS}^{\text{lab}}}})$, **average first then square root** | all question types | `bi` |
+| NLL | single: $-\log p_{q,l^*}$; multi: label-wise BCE; clip $\epsilon = 10^{-3}$ | all question types | `nll` |
+| MBS | $100(\log_2 p_{q,l^*} + 1)$, clip same as NLL | single only; multi writes NULL | `mbs` |
+| ABI (crowd) | $\mathrm{ABI}^{(m_0)} = $ sign-aware $100(1\mp\sqrt{|\overline{\mathrm{ABS}^{(m_0)}}|})$, $\overline{\mathbf{p}}$ excludes $m_0$ | multi-model run | `abi_crowd` |
+| ABI (uniform) | same as above, but baseline is $\mathbf{p}=(1/k,\dots,1/k)$ | all runs; for single-model runs `abi_crowd` degenerates to equal this column | `abi_uniform` |
+| fallback share | the question count that went through §2.4 fallback / the model's scoreable question count | all runs | `fallback_share` |
 
-**ABI 的符号约定**：$\overline{\mathrm{ABS}} \ge 0$（模型不优于 baseline）→
-$100(1 - \sqrt{\overline{\mathrm{ABS}}})$，落在 $[0, 100]$；
-$\overline{\mathrm{ABS}} < 0$（模型优于 baseline）→ $100(1 + \sqrt{|\cdot|})$，
-高过 100，保持"越好分越高"的单调。
+**ABI sign convention**: $\overline{\mathrm{ABS}} \ge 0$ (model not better
+than baseline) → $100(1 - \sqrt{\overline{\mathrm{ABS}}})$, lands in $[0,
+100]$; $\overline{\mathrm{ABS}} < 0$ (model better than baseline) →
+$100(1 + \sqrt{|\cdot|})$, exceeds 100, preserving the "better is higher"
+monotonicity.
 
-**§2.4 fallback**：当 `s{i}_belief_final IS NULL` 但 `s{i}_parse_ok = 1`
-（v3 老 run、或 v4 belief 解析失败但 boxed 解析成功）时，
-$p_l = 1-\epsilon$（命中 boxed letter）/ $\epsilon/(k-|\text{boxed}|)$（其他），
-$\epsilon = 0.05$。该 sample 走 fallback、`belief_parse_ok=0`。完全失败
-（`parse_ok=0`）的 sample MUST NOT 进概率指标均值，避免污染。
+**§2.4 fallback**: when `s{i}_belief_final IS NULL` but `s{i}_parse_ok =
+1` (legacy v3 runs, or v4 belief parse failed but boxed parse
+succeeded), $p_l = 1-\epsilon$ (matched boxed letter) /
+$\epsilon/(k-|\text{boxed}|)$ (others), $\epsilon = 0.05$. The sample
+goes through fallback with `belief_parse_ok=0`. Samples with full
+failure (`parse_ok=0`) MUST NOT enter probabilistic-metric averaging, to
+avoid pollution.
 
-**多试聚合**（`forecast_eval/analysis/aggregation.py`）：
+**Multi-trial aggregation
+(`forecast_eval/analysis/aggregation.py`)**:
 
-Phase 1 的默认是 per (model, question) 取 K 个 sample probability vector 的
-算术平均；Phase 2 加入两个论文 §C.9 同款的备选聚合器和一个诊断扫描：
+Phase 1's default is the arithmetic mean of K sample probability vectors
+per (model, question); Phase 2 adds two paper §C.9-style alternative
+aggregators and one diagnostic scan:
 
-| 函数 | 公式 | 用途 |
+| Function | Formula | Use |
 | --- | --- | --- |
-| `arithmetic_mean(predictions)` | $\hat{\mathbf{p}} = \tfrac{1}{K}\sum_k \mathbf{p}^{(k)}$ | Phase 1 默认 |
-| `logit_space_mean(predictions, ctype)` | single：$\mathrm{softmax}(\overline{\log p})$；multi：$\sigma(\overline{\mathrm{logit}\,p})$ | 论文默认；K 一致时与算术平均同 |
-| `loo_shrinkage(...)` | 在 $\alpha \in \{0, 0.1, \dots, 1.0\}$ 网格上算 $\mathrm{softmax}(\alpha\overline{\log p})$ 的 BS，返回 $\alpha^*$ + 全曲线 | 诊断 dataset 是否需要朝 prior 收缩 |
-| `majority_vote_accuracy_v4(...)` | logit-space mean 后 argmax；K 浮点 logit 几乎不可能 tie | 把 v3 majority\_vote 的 ~10% tie-unresolved 一次性回收 |
+| `arithmetic_mean(predictions)` | $\hat{\mathbf{p}} = \tfrac{1}{K}\sum_k \mathbf{p}^{(k)}$ | Phase 1 default |
+| `logit_space_mean(predictions, ctype)` | single: $\mathrm{softmax}(\overline{\log p})$; multi: $\sigma(\overline{\mathrm{logit}\,p})$ | paper default; same as arithmetic mean when K is consistent |
+| `loo_shrinkage(...)` | computes the BS of $\mathrm{softmax}(\alpha\overline{\log p})$ on the $\alpha \in \{0, 0.1, \dots, 1.0\}$ grid; returns $\alpha^*$ + the full curve | diagnoses whether the dataset needs shrinkage toward the prior |
+| `majority_vote_accuracy_v4(...)` | argmax after logit-space mean; K floating-point logits almost never tie | recovers the ~10% tie-unresolved cases of v3 majority\_vote in one shot |
 
-`majority_vote_accuracy_v4` 是 v3 letter-set vote 的升级版；当前 wired 为 unit-
-testable function，未替换 v3 的 `majority_vote_accuracy` 列以避免破坏 byte
-regression。`loo_shrinkage` 的 $\alpha$ 网格 BI 落到 `analysis/shrinkage_alpha_curve.csv`。
+`majority_vote_accuracy_v4` is the upgraded version of v3's letter-set
+vote; currently wired as a unit-testable function and has not replaced
+the v3 `majority_vote_accuracy` column to avoid breaking byte
+regression. The $\alpha$-grid BI of `loo_shrinkage` lands in
+`analysis/shrinkage_alpha_curve.csv`.
 
-**分层校准（v5 已删除，因 K=5 离散分辨率约束）**：
+**Stratified calibration (deleted in v5 due to K=5 discrete-resolution constraints)**:
 
-v4 的 `calibration.py` 实现了 per-(question_type, choice_type) cell Platt /
-Temperature scaling LOO + ECE / Murphy 三分解 / Reliability bins。在 K=5 工作
-点上：
+v4's `calibration.py` implemented per-(question_type, choice_type) cell
+Platt / Temperature scaling LOO + ECE / Murphy three-decomposition /
+Reliability bins. At the K=5 working point:
 
-* Platt scaling 在 6 个独特概率值上拟 sigmoid 是教科书过拟合；
-* Temperature scaling 单参数勉强稳定但"温度"在 6 级离散上语义存疑；
-* ECE 用 15 bins 中 9+ bin 永远空，weighted-average 高方差不可比；
-* Murphy 三分解 CAL/RES 项被空 bin 把方差吞掉。
+* Fitting Platt scaling sigmoid on 6 unique probability values is textbook overfitting;
+* Temperature scaling's single parameter is barely stable, but the "temperature" is semantically dubious on 6-level discrete data;
+* ECE with 15 bins always has 9+ empty bins; weighted-average has high variance and is not comparable;
+* Murphy three-decomposition's CAL/RES terms have their variance swallowed by empty bins.
 
-v5 整文件删除 `calibration.py`，停产 `calibration_params.json` /
-`per_model_summary_calibrated.csv` / `reliability_data*.json` /
-`brier_decomposition.csv` 共 5 个产物。`per_model_summary.md` 删除
-`BI_cal / NLL_cal / ECE_uncal / ECE_cal` 列与 `cal*` 哨兵。如未来 K 增加
-到 ≥30，可在新 change 中重新引入校准。
+v5 deletes `calibration.py` entirely and discontinues 5 artefacts:
+`calibration_params.json` / `per_model_summary_calibrated.csv` /
+`reliability_data*.json` / `brier_decomposition.csv`. `per_model_summary.md`
+removes the `BI_cal / NLL_cal / ECE_uncal / ECE_cal` columns and the
+`cal*` sentinel. If K is increased to ≥30 in the future, calibration can
+be reintroduced in a new change.
 
-**统计推断**（`forecast_eval/analysis/inference.py`）：
+**Statistical inference
+(`forecast_eval/analysis/inference.py`)**:
 
-| 函数 | 算法 | 输出 |
+| Function | Algorithm | Output |
 | --- | --- | --- |
-| `paired_bootstrap(bs_a, bs_b)` | $B=5000$ 配对重抽（同索引同时索引 A 和 B） | `delta_mean / ci_low / ci_high / p_two_sided` |
-| `holm_bonferroni(p_values)` | $(n - i) \cdot p_{(i)}$ 后累积 max | adjusted p-values，原顺序返回 |
-| `difficulty_tertile(gammas)` | per-question $\gamma_q$ 排序后切 tertile | `low / mid / high` 分桶 |
-| `paired_bootstrap_by_difficulty(...)` | 每 tier 独立 paired bootstrap | `{tier: PairedBootstrapResult}` |
-| `posterior_a_better_than_b(bs_a, bs_b)` | 在 paired bootstrap 上 Monte-Carlo $\Pr(\overline{BS}_A < \overline{BS}_B)$ | $\Pr(\mathrm{BI}_A > \mathrm{BI}_B) \in [0, 1]$ |
-| `posterior_normal_fit(...)` | normal 闭式 $\Phi(-\bar\Delta / SE)$ | 同上的 sanity-check 通道 |
+| `paired_bootstrap(bs_a, bs_b)` | $B=5000$ paired resampling (the same indices index A and B simultaneously) | `delta_mean / ci_low / ci_high / p_two_sided` |
+| `holm_bonferroni(p_values)` | $(n - i) \cdot p_{(i)}$ then cumulative max | adjusted p-values, returned in original order |
+| `difficulty_tertile(gammas)` | sort per-question $\gamma_q$ then cut into tertiles | `low / mid / high` buckets |
+| `paired_bootstrap_by_difficulty(...)` | independent paired bootstrap per tier | `{tier: PairedBootstrapResult}` |
+| `posterior_a_better_than_b(bs_a, bs_b)` | Monte-Carlo $\Pr(\overline{BS}_A < \overline{BS}_B)$ on paired bootstrap | $\Pr(\mathrm{BI}_A > \mathrm{BI}_B) \in [0, 1]$ |
+| `posterior_normal_fit(...)` | normal closed-form $\Phi(-\bar\Delta / SE)$ | sanity-check channel for the above |
 
-paired bootstrap 是同索引版本——同一次 bootstrap 抽到的 question id 同时索引
-A 和 B 的 BS 数组——这控制 question-level 方差（论文 §G.2 量化为总方差的
-62%）。多对比较通过 Holm-Bonferroni 控制 FWER。
+The paired bootstrap is the same-indexed version — the same bootstrap
+draws the same question id to index both A's and B's BS arrays — to
+control question-level variance (quantified at 62% of total variance in
+paper §G.2). Multiple comparisons are controlled via Holm-Bonferroni at
+the FWER level.
 
-**v5 产物清单**：
+**v5 artefact list**:
 
-| 文件 | 内容 | 状态 |
+| File | Content | Status |
 | --- | --- | --- |
-| `per_model_summary.csv` | v3 + v5 discrete (FSS / Cohen κ / Hamming / Fleiss κ / 均熵 / VCI / MVG) + v4 概率族 (companion) | v5 修订列序 |
-| `per_model_summary.md` | 同上 markdown，v5 列在主区，v4 概率列加 `†` 脚注 | v5 修订 |
-| `inter_trial_consistency.csv` | per-model Fleiss κ / mean entropy / VCI / MVG | **v5 新增** |
-| `entropy_accuracy_bins.csv` | per-model × tertile (Acc / MV Acc / Fleiss κ)；per-model 桶边界不一致 | **v5 新增** |
-| `pairwise_bootstrap.csv` | 多指标 paired bootstrap：FSS / Acc / MV_Acc / Fleiss κ / EBI × pairs × ΔMean / 95% CI / p / Cohen's d | **v5 新增** |
-| `shrinkage_alpha_curve.csv` | per-(model, ctype) $\alpha$ 网格 mean BS / BI | v4 保留 |
-| `paired_delta_bi.csv` | BS-paired 模型对决 ΔBS + 95% CI + Holm + posterior | v4 保留（grid.py 依赖） |
-| `pairwise_significance.csv` | $\alpha = 0.05$ 显著性标记（raw + Holm） | v4 保留 |
-| `posterior_pairwise.csv` | $\Pr(\mathrm{BI}_A > \mathrm{BI}_B)$ | v4 保留 |
-| `per_model_by_difficulty.csv` | 按 difficulty tertile 分层的 BI / NLL / ABI | v4 保留 |
-| `paired_delta_bi_by_difficulty.csv` | 每个 tier 独立 paired bootstrap | v4 保留 |
-| ~~`calibration_params.json`~~ | ~~per-cell Platt / temperature~~ | **v5 删除** |
-| ~~`per_model_summary_calibrated.csv`~~ | ~~校准后指标~~ | **v5 删除** |
-| ~~`reliability_data.json` / `_calibrated.json`~~ | ~~per-(model, qtype) bins~~ | **v5 删除** |
-| ~~`brier_decomposition.csv`~~ | ~~Murphy 三分解~~ | **v5 删除** |
+| `per_model_summary.csv` | v3 + v5 discrete (FSS / Cohen κ / Hamming / Fleiss κ / mean entropy / VCI / MVG) + v4 probabilistic family (companion) | v5 revised column order |
+| `per_model_summary.md` | same as above markdown; v5 columns in the main area, v4 probabilistic columns get a `†` footnote | v5 revised |
+| `inter_trial_consistency.csv` | per-model Fleiss κ / mean entropy / VCI / MVG | **v5 new** |
+| `entropy_accuracy_bins.csv` | per-model × tertile (Acc / MV Acc / Fleiss κ); per-model bucket boundaries differ | **v5 new** |
+| `pairwise_bootstrap.csv` | multi-metric paired bootstrap: FSS / Acc / MV_Acc / Fleiss κ / EBI × pairs × ΔMean / 95% CI / p / Cohen's d | **v5 new** |
+| `shrinkage_alpha_curve.csv` | per-(model, ctype) $\alpha$ grid mean BS / BI | v4 retained |
+| `paired_delta_bi.csv` | BS-paired model-vs-model ΔBS + 95% CI + Holm + posterior | v4 retained (grid.py depends on it) |
+| `pairwise_significance.csv` | $\alpha = 0.05$ significance flag (raw + Holm) | v4 retained |
+| `posterior_pairwise.csv` | $\Pr(\mathrm{BI}_A > \mathrm{BI}_B)$ | v4 retained |
+| `per_model_by_difficulty.csv` | BI / NLL / ABI stratified by difficulty tertile | v4 retained |
+| `paired_delta_bi_by_difficulty.csv` | independent paired bootstrap per tier | v4 retained |
+| ~~`calibration_params.json`~~ | ~~per-cell Platt / temperature~~ | **v5 deleted** |
+| ~~`per_model_summary_calibrated.csv`~~ | ~~calibrated metrics~~ | **v5 deleted** |
+| ~~`reliability_data.json` / `_calibrated.json`~~ | ~~per-(model, qtype) bins~~ | **v5 deleted** |
+| ~~`brier_decomposition.csv`~~ | ~~Murphy three-decomposition~~ | **v5 deleted** |
 
-`error_breakdown.csv` / `finish_reason_breakdown.csv` 的 byte-regression
-保护从 Phase 1 延续——Phase 2 不改这两个文件。
+Byte-regression protection of `error_breakdown.csv` /
+`finish_reason_breakdown.csv` continues from Phase 1 — Phase 2 does not
+modify these two files.
 
-**行为分析**（`forecast_eval/analysis/behavior.py`）：
+**Behavioural analysis
+(`forecast_eval/analysis/behavior.py`)**:
 
-Phase 3 把 `belief_trace` JSON 时间序列变成 5 个一等公民指标，并加上反思
-协议 A/B、tool-usage PDP、confidence joint diagnosis 三组诊断：
+Phase 3 turns the `belief_trace` JSON time series into 5 first-class
+metrics, plus three groups of diagnostics — reflection
+protocol A/B, tool-usage PDP, confidence joint diagnosis:
 
-| 指标 | 公式 | 解读 |
+| Metric | Formula | Interpretation |
 | --- | --- | --- |
-| Trial-internal volatility | $V_{q,k} = \tfrac{1}{T-1}\sum_t \|b_t-b_{t-1}\|_2$ | 该 trial 内信念变化总幅度 |
-| Inter-trial variance | $\sigma_q = \mathrm{std}_k\,b^{(q,k)}_T$ | 论文 §4 Figure 2 同款 |
-| Convergence step | $C_{q,k} = \min\{t : \|b_T-b_t\|_2<0.05\}$ | 多少步达到最终信念 |
-| Evidence efficiency | $\eta_{q,k} = (\mathrm{NLL}(b_0) - \mathrm{NLL}(b_T))/\max(1, \text{search\_calls})$ | 每次搜索带来的信息增益 |
-| Counterevidence engagement | 至少一条 counterevidence 字符串中出现非最终选 letter（letter 匹配，无 NLP） | 是否做了反方向自检 |
+| Trial-internal volatility | $V_{q,k} = \tfrac{1}{T-1}\sum_t \|b_t-b_{t-1}\|_2$ | total magnitude of belief change within this trial |
+| Inter-trial variance | $\sigma_q = \mathrm{std}_k\,b^{(q,k)}_T$ | matches paper §4 Figure 2 |
+| Convergence step | $C_{q,k} = \min\{t : \|b_T-b_t\|_2<0.05\}$ | how many steps to reach the final belief |
+| Evidence efficiency | $\eta_{q,k} = (\mathrm{NLL}(b_0) - \mathrm{NLL}(b_T))/\max(1, \text{search\_calls})$ | information gain per search |
+| Counterevidence engagement | at least one counterevidence string contains a letter that is not the final choice (letter match, no NLP) | whether opposite-direction self-check was performed |
 
-反思协议 A/B（`find_paired_runs` + `reflection_ab_report`）扫描全部 run，
-按"`reflection_protocol_hash` 不同、其他全部 hash 相同"配对；配对算 ΔBI /
-Δσ / ΔC / Δη 的 paired bootstrap 95% CI，按 question_type 分层报告。指纹
-不一致 MUST NOT 配对——这是 spec 26.5 的硬约束。
+Reflection protocol A/B (`find_paired_runs` + `reflection_ab_report`)
+scans every run and pairs them by "differing
+`reflection_protocol_hash`, every other hash equal"; for each pair it
+computes paired-bootstrap 95% CI of ΔBI / Δσ / ΔC / Δη, reported
+stratified by question_type. Inconsistent fingerprints MUST NOT pair —
+that is the hard constraint of spec 26.5.
 
-Tool-usage PDP（`tool_usage_pdp`）用纯 Python IRLS 拟合
-$\Pr(\text{correct}\mid\mathbf{x})$（logistic）与 $\mathbb{E}[\mathrm{NLL}\mid\mathbf{x}]$
-（ridge linear）在 5 个特征上的关系——
-`tool_calls_count / react_steps / latency_ms / prompt_tokens / completion_tokens`，
-对每特征做 quantile 网格 partial dependence。L2 正则 + 步长裁剪保证 IRLS
-稳定（Phase 2 在饱和 sigmoid 上学到的教训）。
+Tool-usage PDP (`tool_usage_pdp`) fits with pure-Python IRLS the
+relationship of $\Pr(\text{correct}\mid\mathbf{x})$ (logistic) and
+$\mathbb{E}[\mathrm{NLL}\mid\mathbf{x}]$ (ridge linear) over 5 features —
+`tool_calls_count / react_steps / latency_ms / prompt_tokens /
+completion_tokens` — and computes a quantile-grid partial dependence per
+feature. L2 regularisation + step clipping keep IRLS stable (a lesson
+learnt on the saturated sigmoid in Phase 2).
 
-Confidence-calibration 联合诊断（`confidence_calibration` /
-`numeric_confidence_calibration`）：把 `belief_trace` 最末步的
-`confidence ∈ {low, medium, high}` 当主观置信，把 `max_l p_l` 当数值置信，
-分别和命中率对照。`confidence_conflict_models` 哨兵：
-（a）`low` 桶 `mean_max_p > 0.70` —— 语言保守 + 数值过度自信；
-（b）`high` 桶 `mean_max_p < 0.55` —— 语言自信 + 数值不到位。命中其一就
-在 `per_model_summary.md` 模型名后追加 `conflict*`。这是论文里**没有**的
-诊断维度——论文只有二值 $p$，无法把 *language* 和 *numeric* confidence 解耦。
+Confidence-calibration joint diagnosis (`confidence_calibration` /
+`numeric_confidence_calibration`): treat the final-step `confidence ∈
+{low, medium, high}` from `belief_trace` as subjective confidence, and
+`max_l p_l` as numeric confidence; compare each against hit rate.
+`confidence_conflict_models` sentinel:
+(a) `low` bucket `mean_max_p > 0.70` — verbally conservative +
+numerically overconfident;
+(b) `high` bucket `mean_max_p < 0.55` — verbally confident +
+numerically underconfident. On either, append `conflict*` after the
+model name in `per_model_summary.md`. This is a diagnostic dimension
+**absent** from the paper — the paper only has binary $p$ and cannot
+decouple *language* and *numeric* confidence.
 
-**Phase 3 产物清单**：
+**Phase 3 artefact list**:
 
-| 文件 | 内容 |
+| File | Content |
 | --- | --- |
-| `belief_evolution.csv` | per-(model, q, k) 5 指标行 |
-| `reflection_ab.csv` | 配对 run 的 ΔBI / Δσ / ΔC / Δη paired bootstrap CI（含 per-qtype 切片） |
-| `tool_usage_pdp.csv` | per-(model, feature, value) PDP 行 |
-| `confidence_calibration.csv` | per-(model, low/medium/high) 主观置信 vs 命中率 |
-| `numeric_confidence_calibration.csv` | per-(model, max_p bin) 数值置信 vs 命中率 |
-| `per_model_summary.md` | 追加 `conflict*` 哨兵（与既有 `cal*` 并列） |
+| `belief_evolution.csv` | per-(model, q, k) 5-metric rows |
+| `reflection_ab.csv` | paired-run ΔBI / Δσ / ΔC / Δη paired-bootstrap CI (with per-qtype slice) |
+| `tool_usage_pdp.csv` | per-(model, feature, value) PDP rows |
+| `confidence_calibration.csv` | per-(model, low/medium/high) subjective confidence vs hit rate |
+| `numeric_confidence_calibration.csv` | per-(model, max_p bin) numeric confidence vs hit rate |
+| `per_model_summary.md` | append `conflict*` sentinel (alongside the existing `cal*`) |
 
-**可视化**：`scripts/plot_analysis.py` 是按需 CLI（matplotlib 仅在用户机
-本地装），读 `analysis/*.csv` 出图：
+**Visualisation**: `scripts/plot_analysis.py` is an on-demand CLI
+(matplotlib is installed only on the user's local machine); reads
+`analysis/*.csv` to produce figures:
 
-* **v5 主图**：`fss_bar_with_ci.png` / `delta_fss_forest.png` /
-  `entropy_accuracy_grid_<model>.png`（per-model 3 桶 × 3 指标）；
-* **Companion / appendix**：`bi_bar_with_ci.png`（BLF 对标锚点）/
+* **v5 main figures**: `fss_bar_with_ci.png` / `delta_fss_forest.png` /
+  `entropy_accuracy_grid_<model>.png` (per-model 3 buckets × 3 metrics);
+* **Companion / appendix**: `bi_bar_with_ci.png` (BLF benchmark anchor) /
   `delta_bi_forest.png` / `difficulty_grid.png` / `belief_trajectory_*.png`
-  / `tool_pdp_*.png`。
+  / `tool_pdp_*.png`.
 
-v5 删除了 `reliability_diagram_per_model.png` / `_calibrated.png` /
-`brier_decomp_stacked.png` 三幅图（输入数据被删）。所有图落
-`analysis/figs/`（`.gitignore` 隔离）。matplotlib 不进 `environment.yml`、
-不影响 CI。
+v5 removed three figures
+(`reliability_diagram_per_model.png` / `_calibrated.png` /
+`brier_decomp_stacked.png`) since their input data was deleted. All
+figures land in `analysis/figs/` (gitignored). matplotlib is not in
+`environment.yml` and does not affect CI.
 
-**FSS sensitivity（按需 CLI）**：`scripts/fss_sensitivity.py` 一次性脚本
-跑 4 档 (α, β) 输出 `fss_sensitivity.csv`；不进 `run_analysis` 主流程
-（Decision 12）。论文 appendix 用它回答"为什么是 (2, 0.5) 不是 (1, 1)"。
+**FSS sensitivity (on-demand CLI)**: `scripts/fss_sensitivity.py` is a
+one-shot script running 4 (α, β) tiers and writing
+`fss_sensitivity.csv`; not part of the `run_analysis` main flow
+(Decision 12). The paper appendix uses it to answer "why (2, 0.5) and
+not (1, 1)?".
 
-`Settings.BELIEF_PROTOCOL=false` 时旧 accuracy 列输出零变化、新概率列照样
-通过 fallback 计算（虽然校准信号被削弱）；行为分析则降级到空交付物（v3 老
-run 没有 belief_trace、`belief_evolution.csv` 不写）。这套向后兼容保证
-v3→v4 单向迁移不重跑历史 run。
+When `Settings.BELIEF_PROTOCOL=false`, the legacy accuracy columns
+output zero changes; the new probabilistic columns are still computed
+via fallback (although the calibration signal is weakened); behavioural
+analysis degrades to empty deliverables (legacy v3 runs lack
+belief_trace, so `belief_evolution.csv` is not written). This
+backward-compatibility ensures the v3→v4 unidirectional migration does
+not require re-running historical runs.
 
-<!-- exam-score-metric: removable section ↓ —— 删除直到下一个 `### 11.6` 标题 -->
+<!-- exam-score-metric: removable section ↓ — delete down to the next `### 11.6` heading -->
 
-#### 考试式部分得分（exam_score）
+#### Exam-style partial credit (exam_score)
 
-`forecast_eval/analysis/exam_score.py` 给 §11.5 的 discrete-native 指标族追加一把"对外解释的尺子"。公式 $\text{exam\_score}(\hat S, G) = (|\hat S \cap G|/|G|) \cdot \mathbb{1}(\hat S \setminus G = \emptyset)$ —— 含错选直接 0，否则按 partial recall 给分；与 FSS 的 chance correction / Tversky 软惩罚正交。
+`forecast_eval/analysis/exam_score.py` adds an "explanatory ruler for
+the public" alongside §11.5's discrete-native metric family. Formula:
+$\text{exam\_score}(\hat S, G) = (|\hat S \cap G|/|G|) \cdot \mathbb{1}(\hat S \setminus G = \emptyset)$
+— any wrong selection → 0 directly, otherwise score by partial recall;
+orthogonal to FSS's chance correction / Tversky soft penalty.
 
-聚合采用题内均值 → 题间均值两步（$e_q = \frac{1}{|S_q|}\sum_s \text{exam\_score}$，全局 $= \frac{1}{|Q|}\sum_q e_q$）；题内分母是**实际进基数的 sample 数**（cutoff / error 剔除，parse 失败计 0）。
+Aggregation uses the per-question mean → cross-question mean two-step
+($e_q = \frac{1}{|S_q|}\sum_s \text{exam\_score}$, global $=
+\frac{1}{|Q|}\sum_q e_q$); the per-question denominator is the **actual
+sample count entering the denominator** (cutoff / error excluded, parse
+failure counted as 0).
 
-写到 `per_model_summary.csv` 的 `exam_score_at_n_avg` 列，紧跟 `at_least_all_at_n` 之后；通过 `Aggregate` 字段自动跟随所有 `_slice_by` 切片输出。
+Written into the `exam_score_at_n_avg` column of
+`per_model_summary.csv`, immediately following `at_least_all_at_n`;
+automatically follows all `_slice_by` slices via the `Aggregate` field.
 
-SAMPLING_N 在该指标视角下重新解读为"独立测验次数"（每次得分独立 [0,1]、最终算术均值），与 best-of-N 的"取最高"框架（pass_any_at_n / majority_vote_accuracy）并存。
+SAMPLING_N is reinterpreted under this metric's view as "the number of
+independent trials" (each score independent [0,1], final arithmetic
+mean), coexisting with the best-of-N "take the highest" framework
+(pass_any_at_n / majority_vote_accuracy).
 
-约束：本指标**整体可摘除** —— 删 `exam_score.py` + `tests/test_exam_score.py` + 代码 / 文档中标记的挂接点（marker 字面与清单见 spec：`openspec/changes/add-exam-score-metric/specs/exam-score-metric/spec.md` §"摘除等价性"），仓库回到字节级一致状态。
+Constraint: this metric is **fully removable** — delete `exam_score.py`
++ `tests/test_exam_score.py` + the hook points marked in code/docs (the
+marker literal and catalogue are in spec
+`openspec/changes/add-exam-score-metric/specs/exam-score-metric/spec.md`
+§"removability equivalence"); the repo returns to byte-level identical
+state.
 
-### 11.5.5 综合得分按子题型加权（composite-score-by-subtype）
+### 11.5.5 Composite score weighted by sub-question type (composite-score-by-subtype)
 
-模块：`forecast_eval/analysis/composite.py`；写出：
+Module: `forecast_eval/analysis/composite.py`; writes:
 `per_model_composite_by_question_type.csv` /
 `per_model_composite_by_choice_type.csv` / `composite_meta.json`，
-并在 `overall.json` 嵌入 `composite` 段。
+and embeds a `composite` section in `overall.json`.
 
-**输入收集**：
+**Input collection**:
 
-| 来源 | 数据形状 | 列覆盖 |
+| Source | Data shape | Column coverage |
 | --- | --- | --- |
-| `analysis._slice_by(samples, key_fn=question_type/choice_type, ...)` | `{model: {bucket: Aggregate}}` | v3 accuracy + final_answer_retry_rate（共 23 列） |
-| `composite.slice_v5_metrics_by_bucket(...)` | `{model: {bucket: V5SliceResult}}` | v5 离散家族 8 列（FSS / Cohen κ / Hamming / Fleiss κ / mean entropy / VCI / MVG / fss_pe_mean） |
-| `probabilistic.build_probabilistic_report(...).per_model_by_qtype/_by_ctype` | `{model: {bucket: ModelProbabilisticAggregate}}` | v4 概率族 7 列（BI / BI_dec / NLL / MBS / ABI_crowd / ABI_uniform / fallback_share） |
+| `analysis._slice_by(samples, key_fn=question_type/choice_type, ...)` | `{model: {bucket: Aggregate}}` | v3 accuracy + final_answer_retry_rate (23 columns total) |
+| `composite.slice_v5_metrics_by_bucket(...)` | `{model: {bucket: V5SliceResult}}` | v5 discrete family 8 columns (FSS / Cohen κ / Hamming / Fleiss κ / mean entropy / VCI / MVG / fss_pe_mean) |
+| `probabilistic.build_probabilistic_report(...).per_model_by_qtype/_by_ctype` | `{model: {bucket: ModelProbabilisticAggregate}}` | v4 probabilistic family 7 columns (BI / BI_dec / NLL / MBS / ABI_crowd / ABI_uniform / fallback_share) |
 
-`composite.collect_bucket_values(...)` 把三路汇总成
-`{model: {metric: {bucket: value}}}` 的统一形状，再过一次
-`compute_composite(...)` 输出 `CompositeReport`。
+`composite.collect_bucket_values(...)` aggregates the three sources into
+the unified shape `{model: {metric: {bucket: value}}}`, which is then
+processed by `compute_composite(...)` to produce a `CompositeReport`.
 
-**加权公式**：见 `DESIGN.md` §3.5。缺失桶剔除并按比例归一化；全 None →
-composite 返 None；权重和不需归一化。
+**Weighting formula**: see `DESIGN.md` §3.5. Missing buckets are dropped
+and proportionally renormalised; all None → composite returns None;
+weights are not required to be normalised.
 
-**配置**（`Settings`）：
+**Configuration** (`Settings`):
 
-| 字段 | 默认 | 说明 |
+| Field | Default | Notes |
 | --- | --- | --- |
-| `COMPOSITE_WEIGHTS_QTYPE` | `yes_no=0.15,binary_named=0.15,multiple_choice=0.70` | qtype 维度全局默认权重 |
-| `COMPOSITE_WEIGHTS_CTYPE` | `single=0.40,multi=0.60` | ctype 维度全局默认权重 |
-| `COMPOSITE_WEIGHT_OVERRIDES_QTYPE` | `{}` | qtype 维度按指标覆盖；形如 `"fss=yes_no=0.05,multiple_choice=0.95"`，分号分隔多指标 |
-| `COMPOSITE_WEIGHT_OVERRIDES_CTYPE` | `{}` | ctype 维度同上 |
+| `COMPOSITE_WEIGHTS_QTYPE` | `yes_no=0.15,binary_named=0.15,multiple_choice=0.70` | global default weights for the qtype dimension |
+| `COMPOSITE_WEIGHTS_CTYPE` | `single=0.40,multi=0.60` | global default weights for the ctype dimension |
+| `COMPOSITE_WEIGHT_OVERRIDES_QTYPE` | `{}` | per-metric overrides for the qtype dimension; form: `"fss=yes_no=0.05,multiple_choice=0.95"`, semicolon-separated for multiple metrics |
+| `COMPOSITE_WEIGHT_OVERRIDES_CTYPE` | `{}` | same as above for the ctype dimension |
 
-启动期校验（`Settings.model_validator`）：桶名必须 ∈ 合法集合、权重 ≥ 0、
-至少一个 > 0。**指标名校验**放在 `compute_composite` 入口（运行时
-raise）——避免 `config.py` 反向 import `analysis.composite` 形成循环；指标
-名拼错的代价是分析阶段炸掉而非启动期，错误信息一样清楚。
+Startup validation (`Settings.model_validator`): bucket name must ∈ the
+legal set, weight ≥ 0, at least one > 0. **Metric-name validation** is
+placed at the `compute_composite` entrypoint (raising at runtime) — to
+avoid a reverse-import cycle (`config.py` importing `analysis.composite`);
+the cost of a misspelled metric name is failing during the analysis
+phase rather than startup, with equally clear error messages.
 
-**输出契约**：
+**Output contract**:
 
-| 文件 | 列序 |
+| File | Column order |
 | --- | --- |
-| `per_model_composite_by_question_type.csv` | `model + sampling_n + weights_kind + (_SUMMARY_FIELDS 数据列)` |
-| `per_model_composite_by_choice_type.csv` | 同上 |
+| `per_model_composite_by_question_type.csv` | `model + sampling_n + weights_kind + (_SUMMARY_FIELDS data columns)` |
+| `per_model_composite_by_choice_type.csv` | same as above |
 
-`weights_kind` ∈ {`default`, `overridden`}：该 (model) 行只要有任一指标
-命中 override 即标 `overridden`。
+`weights_kind` ∈ {`default`, `overridden`}: if any metric in this
+(model) row hits an override, the row is marked `overridden`.
 
-`composite_meta.json` 是审计跟踪：每个 (model, metric) 记录
+`composite_meta.json` is the audit trail: per (model, metric), records
 `value / buckets_used / weights_used_normalized / bucket_values /
-weights_kind`。`overall.json` 内嵌的 `composite` 段是同等结构的精简版。
+weights_kind`. The `composite` section embedded in `overall.json` is a
+condensed version with the same structure.
 
-**与现有 slice 表的对齐**：`per_model_by_question_type.csv` /
-`per_model_by_choice_type.csv` 现在也补全了 v5 离散家族列（之前是 NULL
-占位）——`slice_v5_metrics_by_bucket` 的副产品，列序与
-`per_model_summary.csv` 一致。
+**Alignment with existing slice tables**:
+`per_model_by_question_type.csv` / `per_model_by_choice_type.csv` now
+also include the v5 discrete-family columns (previously NULL
+placeholders) — a by-product of `slice_v5_metrics_by_bucket`, with
+column order matching `per_model_summary.csv`.
 
-**与 evaluation 的串联**：`evaluation.py` 把 `Settings` 上的 4 个
-`COMPOSITE_*` 字段透传给 `analysis.run_analysis(...)` 的 keyword
-参数；`analysis` 模块自身不读 `.env`。CLI 入口
-`python -m forecast_eval.analysis ...` 会 best-effort 调
-`load_settings()`，失败（如无 `.env`）则回退到
-`composite.DEFAULT_WEIGHTS_*` + 空 overrides——单元测试零配置也能跑出
-composite 文件。
+**Wiring with evaluation**: `evaluation.py` passes the 4 `COMPOSITE_*`
+fields on `Settings` through to the keyword arguments of
+`analysis.run_analysis(...)`; the `analysis` module itself does not read
+`.env`. The CLI entrypoint `python -m forecast_eval.analysis ...`
+calls `load_settings()` best-effort; on failure (e.g. no `.env`), it
+falls back to `composite.DEFAULT_WEIGHTS_*` + empty overrides — unit
+tests can produce composite files with zero configuration.
 
-### 11.6 网格搜索分析（`react-tavily-grid-search`）
+### 11.6 Grid-search analysis (`react-tavily-grid-search`)
 
-`Settings.TAVILY_MAX_RESULTS`（R）与 `REACT_MAX_SEARCH_CALLS`（C）支持
-逗号分隔的多值列表；evaluation 入口对 `MODELS × R_list × C_list` 做
-笛卡尔展开，每个 `(real_model, R, C)` cell 编码为虚拟 slug
-`{real}::r{R}::c{C}`，runner / DB schema / 既有 analysis 主流程**一行
-不动**。`forecast_eval/analysis/grid.py` 负责反解三元组、重聚合、出 paper
-长表。详细决策见 `DESIGN.md` "grid search via virtual slug (C 方案)"。
+`Settings.TAVILY_MAX_RESULTS` (R) and `REACT_MAX_SEARCH_CALLS` (C)
+support comma-separated multi-value lists; the evaluation entrypoint
+performs Cartesian expansion over `MODELS × R_list × C_list`, encoding
+each `(real_model, R, C)` cell as the virtual slug
+`{real}::r{R}::c{C}`. The runner / DB schema / existing analysis main
+pipeline are **unchanged byte-for-byte**.
+`forecast_eval/analysis/grid.py` decodes the triple, re-aggregates, and
+emits paper long tables. For detailed decisions see `DESIGN.md` "grid
+search via virtual slug (option C)".
 
-| 文件 | 内容 |
+| File | Content |
 | --- | --- |
-| `grid_summary.csv` | per `(real_model, R, C)` 17 列主表：accuracy/BI/NLL + 95% CI + `mean_search_calls / mean_latency_ms` 等 cost 列 |
-| `grid_marginal_C.csv` / `grid_marginal_R.csv` | 固定 `R = default_r` 沿 C 扫 / 固定 `C = default_c` 沿 R 扫 |
-| `grid_pareto.csv` | 每个 cell 一行；frontier cell 的 `dominated_by` 列空，否则记字典序最小的支配者虚拟 slug |
-| `grid_winrate.csv` | 每对 `(real_model_a, real_model_b)`：跨 (R, C) cell 的 wins/ties + paired bootstrap 显著 cell 计数 |
+| `grid_summary.csv` | per `(real_model, R, C)` 17-column main table: accuracy/BI/NLL + 95% CI + cost columns like `mean_search_calls / mean_latency_ms` |
+| `grid_marginal_C.csv` / `grid_marginal_R.csv` | scan along C with `R = default_r` fixed / scan along R with `C = default_c` fixed |
+| `grid_pareto.csv` | one row per cell; for frontier cells the `dominated_by` column is empty, otherwise records the lex-smallest dominator's virtual slug |
+| `grid_winrate.csv` | per `(real_model_a, real_model_b)` pair: cross-(R, C) cell wins/ties + paired-bootstrap significant-cell count |
 
-CI 全部走 `inference.paired_bootstrap`（5000 次重抽，seed=42）；BI 域
-CI 通过 "BS 域 paired bootstrap + 单调变换 $\mathrm{BI}=100(1-\sqrt{\mathrm{BS}})$"
-得到，不引入新的统计代码（`DESIGN.md` D8）。
+All CIs go through `inference.paired_bootstrap` (5000 resamples,
+seed=42); BI-domain CIs are obtained via "BS-domain paired bootstrap +
+monotone transform $\mathrm{BI}=100(1-\sqrt{\mathrm{BS}})$" with no new
+statistical code (see `DESIGN.md` D8).
 
-可视化由 `scripts/plot_analysis.py` 在主流程检测到 `manifest.grid` 段
-时按需输出：
+Visualisation is produced on demand by `scripts/plot_analysis.py` when
+the main flow detects the `manifest.grid` block:
 
-| 图 | 内容 |
+| Figure | Content |
 | --- | --- |
-| `grid_pareto_C.png` | Fig 1 主图：固定 `R = default_r`，每个 real_model 一条 `BI vs mean_search_calls` 曲线 + 95% CI band，Pareto cell 标星 |
-| `grid_pareto_C_R{R}.png` | 附录：每个非默认 R 的同款图 |
-| `grid_heatmap_RC_<real_model>.png` | Fig 2 per real_model：(R, C) 平面 BI 热力图，与 best cell CI 重叠的格子 hatch |
-| `grid_curve_C.png` / `grid_curve_R.png` | Fig 3：3 行（BI / NLL / Acc）× M 列 panel，CI shading + 饱和点（一阶差分 < 0.01）虚线竖标 |
-| `grid_winrate_matrix.png` | Fig 4：`M × M` 行优于列的占比矩阵，sig\_cells_* ≥ 1 的 cell 加 `*` 标记 |
+| `grid_pareto_C.png` | Fig 1 main: with `R = default_r` fixed, one `BI vs mean_search_calls` curve per real_model + 95% CI band, Pareto cells starred |
+| `grid_pareto_C_R{R}.png` | Appendix: same-format figure for each non-default R |
+| `grid_heatmap_RC_<real_model>.png` | Fig 2 per real_model: (R, C) plane BI heatmap; cells whose CI overlaps the best cell are hatched |
+| `grid_curve_C.png` / `grid_curve_R.png` | Fig 3: 3 rows (BI / NLL / Acc) × M columns panel, with CI shading + saturation point (first-order difference < 0.01) marked with a dashed vertical line |
+| `grid_winrate_matrix.png` | Fig 4: `M × M` matrix of "row beats column" share, with cells where sig\_cells_* ≥ 1 marked `*` |
 
-旧 v4 run（manifest 无 `grid` 段）下 `run_grid_analysis` 早退、不写
-任何 `grid_*.csv`；plot 流程也跳过 grid 图族——单值 .env 在新代码下
-解析为长度 1 列表 → 笛卡尔生成单一虚拟 slug，行为与本变更前字节级
-等价（除 .db 文件名后缀 `__r{R}__c{C}`）。
+For legacy v4 runs (manifest without a `grid` block),
+`run_grid_analysis` early-exits and writes no `grid_*.csv`; the plot
+flow also skips the grid figure family — a single-value .env, parsed
+under the new code as a length-1 list → Cartesian product producing a
+single virtual slug, behaves byte-equivalently to the pre-change
+behaviour (except for the `__r{R}__c{C}` suffix on .db filenames).
 
 ---
 
-## 12. CLI 与运行方式
+## 12. CLI and how to run
 
-### 12.1 命令
+### 12.1 Commands
 
 ```bash
-# 跑全部 319 道题
+# Run all 319 questions
 python evaluation.py
 
-# 按 question_type 过滤 (可重复)
+# Filter by question_type (repeatable)
 python evaluation.py --question-type yes_no --question-type binary_named
 
-# 按 choice_type 过滤 (可重复)
+# Filter by choice_type (repeatable)
 python evaluation.py --choice-type single
 
-# 组合过滤 (AND): 仅跑 multiple_choice 中的多选题 (34 道)
+# Combined filter (AND): only multi-select multiple_choice questions (34)
 python evaluation.py --question-type multiple_choice --choice-type multi
 
-# 不在 run 结束时生成 analysis/ (原始 DB 仍会落在 db/)
+# Do not generate analysis/ at run end (raw DBs still land in db/)
 python evaluation.py --skip-analysis
 
-# 独立重刷 analysis/ (不改 DB)
+# Refresh analysis/ independently (does not modify the DB)
 python -m forecast_eval.analysis runs/{run_id}
 ```
 
-`--question-type` 取值：`yes_no` / `binary_named` / `multiple_choice`，可重复，不传 = 不限制。
-`--choice-type`   取值：`single` / `multi`，可重复，不传 = 不限制。
-除 `--skip-analysis` 以外，所有可调项仍走 `.env`。
+`--question-type` values: `yes_no` / `binary_named` /
+`multiple_choice`, repeatable; if not passed = no restriction.
+`--choice-type` values: `single` / `multi`, repeatable; if not passed =
+no restriction. All tunables other than `--skip-analysis` still go
+through `.env`.
 
-### 12.2 流程
+### 12.2 Flow
 
 ```
-1. argparse 解析 --question-type / --choice-type / --skip-analysis, 组装为 QFilter
-2. Settings() 加载并校验 .env (含 MODEL_TRAINING_CUTOFFS + RUNS_ROOT)
-3. 生成或复用 run_id -> 确定 run_dir = RUNS_ROOT/{run_id}; 建 db/ / analysis/ / logs/
-4. 计算 source_db_hash / metadata_hash / prompt_templates_hash
-5. 对每个 MODELS[i]:
+1. argparse parses --question-type / --choice-type / --skip-analysis, assembling a QFilter
+2. Settings() loads and validates .env (including MODEL_TRAINING_CUTOFFS + RUNS_ROOT)
+3. Generate or reuse run_id -> determine run_dir = RUNS_ROOT/{run_id}; create db/ / analysis/ / logs/
+4. Compute source_db_hash / metadata_hash / prompt_templates_hash
+5. For each MODELS[i]:
    a. open conn = RUNS_ROOT/{run_id}/db/{safe_slug(model)}.db
-   b. db.init_schema(conn, SAMPLING_N)  # 动态建 s{i}_* 列
+   b. db.init_schema(conn, SAMPLING_N)  # dynamically create s{i}_* columns
    c. loader.sync_prompt_templates(src, conn) / loader.sync_questions(src, conn, filter)
    d. db.register_run_meta(conn, run_id=..., model=..., hashes=..., training_cutoff=...)
-6. 写 manifest.json (run_id, models, model_files, sampling_n, filters, hashes, started_at)
-7. runner.run(..., conns={model: conn, ...}) 启动 asyncio event loop
-   a. 对每个模型 db.load_completed_samples(conn, SAMPLING_N) 作为 resume 基准
-   b. 生成笛卡尔积: questions × MODELS × range(SAMPLING_N); 扣除 resume 集
-   c. §3.9 过滤: 把 q.end_time <= cutoff 的 (q, model, idx) 直接写 skipped_training_cutoff 行
-      到对应 model 的 writer, 不入 LLM 任务队列
-   d. 剩余任务: Semaphore 限流 (LLM / Search 各一个) 并发
-   e. 每条完成 → 路由到该模型的 writer → 批量 UPSERT s{i}_* 列
-   f. 每完成一条打一行 log: [x/xx] q=.. qt=.. ct=.. model=.. idx=.. correct=..
-8. 每个模型 db.finish_run_meta(conn, run_id); 收尾 manifest.finished_at
-9. 除非 --skip-analysis: 调用 forecast_eval.analysis.run_analysis(run_dir), 写 analysis/
+6. Write manifest.json (run_id, models, model_files, sampling_n, filters, hashes, started_at)
+7. runner.run(..., conns={model: conn, ...}) starts the asyncio event loop
+   a. For each model, db.load_completed_samples(conn, SAMPLING_N) becomes the resume baseline
+   b. Generate the Cartesian product: questions × MODELS × range(SAMPLING_N); subtract the resume set
+   c. §3.9 filter: rows with q.end_time <= cutoff for (q, model, idx) are written directly as
+      skipped_training_cutoff rows to the corresponding model's writer, not entering the LLM task queue
+   d. Remaining tasks: Semaphore-limited (one each for LLM / Search) concurrency
+   e. Each completion → routed to that model's writer → batch UPSERT into s{i}_* columns
+   f. One log line per completion: [x/xx] q=.. qt=.. ct=.. model=.. idx=.. correct=..
+8. For each model, db.finish_run_meta(conn, run_id); finalise manifest.finished_at
+9. Unless --skip-analysis: call forecast_eval.analysis.run_analysis(run_dir), write analysis/
 ```
 
 ---
 
-## 13. 日志 (`loguru`)
+## 13. Logging (`loguru`)
 
 ```python
 from loguru import logger
@@ -1452,20 +1647,20 @@ logger.add(
 )
 ```
 
-### 13.1 进度打印
+### 13.1 Progress printing
 
-格式：
+Format:
 ```
 12:03:44 | INFO    | [run=20260424-120344-a7k3] [5/1610] q=69566c13 qt=binary_named ct=single model=openai/gpt-5 sample=2/5 correct=True steps=4 tool_calls=3 latency=8421ms
 ```
 
-- `[5/1610]` 分母 = `len(questions_after_filter) × len(MODELS) × SAMPLING_N`（扣掉已完成的续跑任务）
-- 每条 sample 完成就打一行
-- 错误时打 `ERROR` 级：`[x/xx] q=.. model=.. error=rate_limit retry_exhausted`
+- `[5/1610]` denominator = `len(questions_after_filter) × len(MODELS) × SAMPLING_N` (minus completed resume tasks)
+- One line printed per sample completion
+- On error, print at `ERROR` level: `[x/xx] q=.. model=.. error=rate_limit retry_exhausted`
 
 ---
 
-## 14. Conda 环境 (`environment.yml`)
+## 14. Conda environment (`environment.yml`)
 
 ```yaml
 name: forecast
@@ -1475,96 +1670,105 @@ dependencies:
   - python=3.12
   - pip
   - pip:
-      - openai>=1.50            # OpenRouter 用 OpenAI-compatible SDK
+      - openai>=1.50            # OpenRouter uses the OpenAI-compatible SDK
       - tavily-python>=0.5
       - pydantic>=2.6
       - pydantic-settings>=2.2
       - python-dotenv>=1.0
       - loguru>=0.7
       - httpx>=0.27
-      - tenacity>=9.0           # 重试装饰器, 实现分层退避
-      - pytest>=8.0             # §17 测试
-      - pytest-asyncio>=0.23    # async 测试支持
-      - respx>=0.21             # mock httpx, 用于 LLM / Tavily dry-run
+      - tenacity>=9.0           # retry decorator, implements tiered backoff
+      - pytest>=8.0             # §17 tests
+      - pytest-asyncio>=0.23    # async test support
+      - respx>=0.21             # httpx mocking, for LLM / Tavily dry-run
 ```
 
-创建环境：
+Create the environment:
 ```bash
 conda env create -f environment.yml
 conda activate forecast
 cp .env.example .env
-# 编辑 .env 填入 LLM_API_KEY 和 TAVILY_API_KEY (LLM_BASE_URL 可指任意 OpenAI 兼容 endpoint)
+# Edit .env to fill in LLM_API_KEY and TAVILY_API_KEY (LLM_BASE_URL can point to any OpenAI-compatible endpoint)
 python evaluation.py --question-type yes_no
 ```
 
 ---
 
-## 15. 最终 Premise 汇总（供最后 review）
+## 15. Final-premise summary (for last review)
 
-1. **源数据 7 字段**：`id / choice_type / question_type / event / options / answer / end_time`，统一字母编码答案
-2. **源数据库 `forecast_eval_set_example.db` 纳入 Git 管理**（只读示例数据集，随仓库分发，保证 `source_db_hash` 可复现；`SOURCE_DB` / `SOURCE_TABLE` 可指向自带数据集）
-3. **LLM 看不到 `end_date`**，注入在 Tool 实现层
-4. **Tavily `end_date = end_time + TAVILY_END_DATE_OFFSET_DAYS`**，项目统一以 `-1` 为默认严格基准（所有报表默认在 `-1` 下比较）
-5. **泄漏边界与威胁模型**（§3.8）：Tool 只能约束工具搜索；强制禁用 provider-native browsing / `:online`；参数记忆通过 §3.9 的训练截止过滤部分缓解
-6. **按模型训练截止日期过滤题**（§3.9）：`.env` 的 `MODEL_TRAINING_CUTOFFS` 指定每个模型 cutoff，`q.end_time ≤ cutoff` 的样本被写为 `error="skipped_training_cutoff"`，不调用 LLM、resume 不重试
-7. **Prompt 拼接由 `prompts.py` 完成**：从 `dataset_metadata` 拉模板 → 按 `question_type` 渲染 `outcomes_block` 与 `output_format`（binary_named 时替换 `<options[i]>` 占位符）；>26 选项走源数据 ASCII 续接兼容模式（§3.7 警告）
-8. **评测 = 字母集合 frozenset 严格相等**，漏选/多选都算错
-9. **Parse 失败 ≠ error**，单独统计 refusal / format_failure rate
-10. **多模型一次 run 笛卡尔积**，通过 `run_id` 断点续跑；每个模型一个 DB，`run_meta`
-    单行记录 `filters_snapshot` + `source_db_hash` + `metadata_hash` + `prompt_templates_hash`
-    + `training_cutoff` + **脱敏**后的 `config_snapshot`（API Key 明文不落库）
-11. **Auth 错误整个 run 停止**；其他错误按退避分层重试，retry 用完 skip + 记 `error`
-12. **Content policy violation 不重试**，直接标记
-13. **所有灵活参数在 `.env`**，CLI 仅 `--question-type` / `--choice-type` / `--skip-analysis`
-14. **主入口 `evaluation.py`**：创建 `RUNS_ROOT/{run_id}/`、跑 runner、跑 analysis（除非 `--skip-analysis`）
-15. **Conda + Python 3.12 + loguru**，进度 `[x/xx]` 打 log
-16. **SQLite WAL + `PRAGMA foreign_keys=ON` + 每模型一个 async writer task**，避免并发写入锁竞争
-17. **每个 model DB 自包含**：内置 `questions` + `prompt_templates` 副本 + `run_meta`，可独立分发与复盘
-18. **指标命名**：业界 `pass@k` 对应本项目 `pass_any@N`；原阈值口径改名 `at_least_k_correct@N`
-19. **记录与分析拆开**：DB 里只存原始 sample 记录；pass@1 / pass_any@N / majority / parse_failure / cutoff_skip 等全部由 `analysis.py` 后置计算，写到 `analysis/` 下的 CSV / MD / JSON
+1. **Source data has 7 fields**: `id / choice_type / question_type / event / options / answer / end_time`, with letter-encoded answers throughout
+2. **Source DB `forecast_eval_set_example.db` is checked into Git** (read-only example dataset, ships with the repo, ensures `source_db_hash` reproducibility; `SOURCE_DB` / `SOURCE_TABLE` can point to a custom dataset)
+3. **The LLM does not see `end_date`**; injection happens at the tool implementation layer
+4. **Tavily `end_date = end_time + TAVILY_END_DATE_OFFSET_DAYS`**; the project uses `-1` as the strict default baseline (all reports default to comparison under `-1`)
+5. **Leak boundary and threat model** (§3.8): the tool layer can only constrain tool-search; provider-native browsing / `:online` is forcibly disabled; parametric memory is partially mitigated by §3.9's training-cutoff filtering
+6. **Filter questions by model training cutoff** (§3.9): `.env`'s `MODEL_TRAINING_CUTOFFS` specifies each model's cutoff; samples with `q.end_time ≤ cutoff` are written as `error="skipped_training_cutoff"`, do not call the LLM, and are not retried on resume
+7. **Prompt assembly is performed by `prompts.py`**: pull templates from `dataset_metadata` → render `outcomes_block` and `output_format` per `question_type` (substitute `<options[i]>` placeholders for binary_named); > 26 options use the source-data ASCII-continuation compatibility mode (§3.7 warning)
+8. **Evaluation = letter-set frozenset strict equality**; missed and extra selections are all wrong
+9. **Parse failure ≠ error**; refusal / format_failure rate are tallied separately
+10. **Multi-model single-run Cartesian product**, with resume via `run_id`; one DB per model, the single row in `run_meta`
+    records `filters_snapshot` + `source_db_hash` + `metadata_hash` + `prompt_templates_hash`
+    + `training_cutoff` + **redacted** `config_snapshot` (no API-key plaintext is persisted)
+11. **Auth errors stop the entire run**; other errors are retried with tiered backoff; on retry exhaustion, skip + record `error`
+12. **Content policy violations are not retried**, just marked
+13. **All flexible parameters live in `.env`**; CLI exposes only `--question-type` / `--choice-type` / `--skip-analysis`
+14. **Main entrypoint `evaluation.py`**: creates `RUNS_ROOT/{run_id}/`, runs the runner, runs analysis (unless `--skip-analysis`)
+15. **Conda + Python 3.12 + loguru**, with progress `[x/xx]` logged
+16. **SQLite WAL + `PRAGMA foreign_keys=ON` + one async writer task per model**, avoiding concurrent-write lock contention
+17. **Each model DB is self-contained**: built-in `questions` + `prompt_templates` copies + `run_meta`, independently distributable and replayable
+18. **Metric naming**: the standard `pass@k` corresponds to this project's `pass_any@N`; the legacy threshold-style metric is renamed `at_least_k_correct@N`
+19. **Recording and analysis are separated**: the DB stores only raw sample records; pass@1 / pass_any@N / majority / parse_failure / cutoff_skip etc. are computed post-hoc by `analysis.py` and written to `analysis/` as CSV / MD / JSON
 
 ---
 
-## 16. 待落地模块顺序（建议）
+## 16. Suggested module landing order
 
 1. `environment.yml` + `.env.example` + `.gitignore`
-2. `forecast_eval/config.py`（Settings 类，含 `RUNS_ROOT`）
-3. `forecast_eval/db.py`（per-model 宽表 schema + `AsyncWriter` + resume 查询 + prompt_templates 表 + model_slug_safe）
-4. `forecast_eval/loader.py`（同步 questions + prompt_templates）
-5. `forecast_eval/prompts.py`（按 question_type 渲染 user message，**单元测试覆盖三种类型**）
-6. `forecast_eval/parser.py`（`\boxed{}` 解析 + 字母集合归一 + 严格匹配，**单元测试覆盖三种类型 + edge case**）
-7. `forecast_eval/errors.py`（错误分类 + 退避）
-8. `forecast_eval/search.py`（Tavily + end_date 注入）
-9. `forecast_eval/tools.py`（schema + execute_tool_call）
-10. `forecast_eval/llm.py`（OpenRouter client + retry）
-11. `forecast_eval/react.py`（单 sample ReAct loop）
-12. `forecast_eval/runner.py`（编排 + 并发 + 多模型 writer + 进度）
-13. `forecast_eval/analysis.py`（后置统计, 读 DB -> CSV / MD / JSON）
-14. `evaluation.py`（main, 建目录 + register_run_meta + runner + analysis）
+2. `forecast_eval/config.py` (Settings class, with `RUNS_ROOT`)
+3. `forecast_eval/db.py` (per-model wide-table schema + `AsyncWriter` + resume queries + prompt_templates table + model_slug_safe)
+4. `forecast_eval/loader.py` (sync questions + prompt_templates)
+5. `forecast_eval/prompts.py` (render user message per question_type, **with unit tests covering all three types**)
+6. `forecast_eval/parser.py` (`\boxed{}` parsing + letter-set normalisation + strict matching, **with unit tests covering all three types + edge cases**)
+7. `forecast_eval/errors.py` (error classification + backoff)
+8. `forecast_eval/search.py` (Tavily + end_date injection)
+9. `forecast_eval/tools.py` (schema + execute_tool_call)
+10. `forecast_eval/llm.py` (OpenRouter client + retry)
+11. `forecast_eval/react.py` (single-sample ReAct loop)
+12. `forecast_eval/runner.py` (orchestration + concurrency + multi-model writer + progress)
+13. `forecast_eval/analysis.py` (post-hoc statistics, read DB -> CSV / MD / JSON)
+14. `evaluation.py` (main, create directories + register_run_meta + runner + analysis)
 
-先用 `--question-type yes_no` + `MODELS=openai/gpt-4o-mini` + `SAMPLING_N=1` 跑通 smoke test（93 道，最便宜的题型），验证 `prompts.render_user_prompt` 输出与 `parser.parse_answer` 归一无误后，再放开完整评测。
+Get a smoke test passing first via `--question-type yes_no` +
+`MODELS=openai/gpt-4o-mini` + `SAMPLING_N=1` (93 questions, the cheapest
+question type), verify that `prompts.render_user_prompt` output and
+`parser.parse_answer` normalisation are correct, then open up to full
+evaluation.
 
 ---
 
-## 17. 测试计划（`tests/`）
+## 17. Test plan (`tests/`)
 
-评测单次成本较高（319 题 × 模型数 × N samples），测试先站稳能省下大量 API 费用。所有测试 **不联网**、**不烧 API**：Tavily / OpenRouter 均以 fixture 或 mock 替身存在。
+A single evaluation is costly (319 questions × number of models × N
+samples), so getting tests stable first saves a lot of API spend. All
+tests run **offline** and **do not burn the API**: Tavily / OpenRouter
+exist as fixtures or mocked stand-ins.
 
-| 测试文件                    | 覆盖对象              | 关键用例                                                                                                                                                                                                                |
+| Test file                   | Subject               | Key cases                                                                                                                                                                                                                |
 | --------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `test_prompts.py`           | `prompts.py`          | ① `yes_no` / `binary_named` / `multiple_choice`（≤26 选项）三种模板渲染 snapshot；② `binary_named` 占位符替换正确；③ `multiple_choice` >26 选项（用数据库里真实的 4 道题做 fixture）outcomes_block 标签准确                  |
-| `test_parser.py`            | `parser.py`           | ① 三种题型的 `\boxed{}` 正解路径；② 多 `\boxed{}` 取最后一个；③ 大小写、空格、逗号/空格分隔混排；④ 非法字母越界；⑤ >26 选项 label↔letter round-trip；⑥ `parse_gt` 对 `"A, B"` 解析；⑦ 软性拒绝 → None 不报错               |
-| `test_search.py`            | `search.py` + `tools.py` | ① `web_search` schema LLM 可见字段 **不含** `end_date`；② `tavily_search` 注入的 `end_date = q.end_time + OFFSET`；③ Tavily 报错走 `SEARCH_BACKOFF_S` 重试；④ 重试用完后返回错误 payload 而不抛；⑤ `_build_request_payload` 把 `TAVILY_INCLUDE_RAW_CONTENT={false,markdown,text}` / `TAVILY_SEARCH_DEPTH` / `TAVILY_INCLUDE_ANSWER` 三档枚举映射到 Tavily 协议形式；⑥ 超长 `raw_content` 在 `_truncate_raw_content` 处截断到 `TAVILY_RAW_CONTENT_MAX_CHARS` 并追加省略标记；⑦ `to_llm_payload` 缺失字段（`score` / `raw_content` / `published_date` / `answer`）不输出 `null` 占位 |
-| `test_db.py`                | `db.py`               | ① per-model schema 按 `sampling_n` 动态建 `s{i}_*` 列 + PRAGMA；② schema `N` mismatch 时 fail-fast；③ `model_slug_safe` 规则；④ hash 计算稳定；⑤ `config_snapshot` 脱敏；⑥ UPSERT 按 `(qid, sample_idx)` 覆盖；⑦ `AsyncWriter` 分桶批量提交 |
-| `test_runner_resume.py`     | `runner.py`           | ① `load_completed_samples` 排除 retryable error；② `build_task_plan` 按 per-model completed 去重；③ 未在 `completed` 中声明的模型默认空集（全部入队）                                                                    |
-| `test_training_cutoff.py`   | §3.9 过滤逻辑         | ① `q.end_time <= cutoff` 全部 N samples 都写 skipped_training_cutoff；② 未声明 cutoff 的模型不过滤；③ resume 优先于 cutoff；④ 写入后 `load_completed_samples` 命中                                                       |
-| `test_llm_no_browsing.py`   | `llm.py`              | mock 客户端断言请求 payload 里**没有** `plugins`、`tools` 里没有 provider-native web_search、model 名字不以 `:online` 结尾                                                                                              |
-| `test_errors.py`            | `errors.py`           | 各类 `httpx` / OpenAI 异常 → 正确 `ErrorKind`；`Retry-After` header 优先于默认退避                                                                                                                                      |
-| `test_analysis.py`          | `analysis.py`         | ① 手工造宽表 fixture；② pass@1 / pass_any@N / ≥majority / ≥all / majority_vote / parse_failure / error_rate / cutoff_skip 数值正确；③ `overall.json` 与 CSV 对齐；④ `error_breakdown.csv` 汇总                           |
-| `test_smoke_dry_run.py`     | 端到端 dry-run        | 用 httpx stub 替换 OpenRouter + Tavily，跑 3 道题 × 1 模型 × 1 sample，验证宽表 `s0_*` 字段齐全、`messages_trace` 合法 JSON、`search_calls` 记录 `end_date`                                                               |
+| `test_prompts.py`           | `prompts.py`          | ① snapshots of all three template renderings for `yes_no` / `binary_named` / `multiple_choice` (≤26 options); ② correct `binary_named` placeholder substitution; ③ accurate `outcomes_block` labels for `multiple_choice` > 26 options (using fixtures from the 4 real questions in the DB)                  |
+| `test_parser.py`            | `parser.py`           | ① positive `\boxed{}` paths for all three question types; ② multiple `\boxed{}` → take the last one; ③ mixed case, spaces, comma/space separators; ④ illegal letter out-of-range; ⑤ > 26 options label↔letter round-trip; ⑥ `parse_gt` parses `"A, B"`; ⑦ soft refusal → None without raising               |
+| `test_search.py`            | `search.py` + `tools.py` | ① `web_search` schema LLM-visible fields **do not contain** `end_date`; ② `tavily_search` injects `end_date = q.end_time + OFFSET`; ③ Tavily errors retry via `SEARCH_BACKOFF_S`; ④ after retry exhaustion, returns an error payload instead of throwing; ⑤ `_build_request_payload` maps the three `TAVILY_INCLUDE_RAW_CONTENT={false,markdown,text}` / `TAVILY_SEARCH_DEPTH` / `TAVILY_INCLUDE_ANSWER` enum values to the Tavily protocol form; ⑥ overly long `raw_content` is truncated to `TAVILY_RAW_CONTENT_MAX_CHARS` at `_truncate_raw_content` with an ellipsis marker; ⑦ `to_llm_payload` does not output `null` placeholders for missing fields (`score` / `raw_content` / `published_date` / `answer`) |
+| `test_db.py`                | `db.py`               | ① per-model schema dynamically creates `s{i}_*` columns per `sampling_n` + PRAGMA; ② fail-fast on schema `N` mismatch; ③ `model_slug_safe` rules; ④ hash computation stable; ⑤ `config_snapshot` redaction; ⑥ UPSERT overrides by `(qid, sample_idx)`; ⑦ `AsyncWriter` bucket-wise batched commits |
+| `test_runner_resume.py`     | `runner.py`           | ① `load_completed_samples` excludes retryable errors; ② `build_task_plan` deduplicates by per-model completed; ③ models not declared in `completed` default to empty set (all enqueued)                                                                    |
+| `test_training_cutoff.py`   | §3.9 filtering logic | ① every N samples for `q.end_time <= cutoff` writes skipped_training_cutoff; ② models without declared cutoff are not filtered; ③ resume takes precedence over cutoff; ④ after writing, `load_completed_samples` matches                                                       |
+| `test_llm_no_browsing.py`   | `llm.py`              | mock client asserts the request payload **does not contain** `plugins`, `tools` does not contain provider-native web_search, and the model name does not end in `:online`                                                                                              |
+| `test_errors.py`            | `errors.py`           | various `httpx` / OpenAI exceptions → correct `ErrorKind`; `Retry-After` header takes precedence over default backoff                                                                                                                                      |
+| `test_analysis.py`          | `analysis.py`         | ① hand-crafted wide-table fixture; ② pass@1 / pass_any@N / ≥majority / ≥all / majority_vote / parse_failure / error_rate / cutoff_skip values are correct; ③ `overall.json` aligns with the CSVs; ④ `error_breakdown.csv` aggregation                           |
+| `test_smoke_dry_run.py`     | end-to-end dry-run    | replace OpenRouter + Tavily with httpx stubs, run 3 questions × 1 model × 1 sample, verify the wide-table `s0_*` fields are complete, `messages_trace` is legal JSON, and `search_calls` records `end_date`                                                               |
 
-运行：
+Run:
 ```bash
 pytest tests/ -q
 ```
-CI 最低要求：`test_prompts.py` / `test_parser.py` / `test_training_cutoff.py` / `test_llm_no_browsing.py` / `test_analysis.py` 五项必须绿灯（核心语义 + 安全边界 + 统计正确性）。
+CI minimum: `test_prompts.py` / `test_parser.py` / `test_training_cutoff.py`
+/ `test_llm_no_browsing.py` / `test_analysis.py` — these five must stay
+green (core semantics + safety boundary + statistical correctness).

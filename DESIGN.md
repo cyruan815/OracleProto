@@ -1,219 +1,345 @@
-# Forecast Evaluation — 设计理念详解
+# Forecast Evaluation — Design Rationale
 
-> 本文档面向第一次接触本项目、想理解"为什么这么做"而非"具体怎么做"的读者。
-> 所有具体接口、字段定义、参数列表请配合 `FRAME.md` 阅读，本文聚焦在**设计取舍背后的动机**。
-
----
-
-## 0. 写在最前：本项目想回答的问题
-
-> **如果不让 LLM 看见事件解决之后的信息，它在 319 道真实预测题上的能力到底有多强？**
-
-围绕这一句，项目给自己加了三条几乎"宗教式"的硬约束：
-
-1. **信息边界必须严格**：模型只能通过我们写的 `web_search` 工具获取外部信息，且工具只能搜到事件解决日期之前的内容。
-2. **结果必须可复现**：同一份数据集 + 同一份配置 + 同一组模型 → 任何人都能复跑出可比的数据。
-3. **过程必须可复盘**：每一次模型调用、每一次搜索、每一次解析都要能事后追溯到字段级。
-
-整套设计——从 prompt 拼接、Tool schema、DB schema 到 resume 语义——都是这三条约束的具体落地。理解这一点之后，下面所有"看起来过度严格"的设计都会变得自然。
+> This document is for readers new to the project who want to understand "why
+> we did it this way" rather than "how exactly to do it". For concrete
+> interfaces, field definitions, and parameter lists, read this alongside
+> `FRAME.md`; here we focus on **the motivation behind each design trade-off**.
 
 ---
 
-## 1. 信息隔离：项目的"第一性原理"
+## 0. Foreword: the question this project tries to answer
 
-### 1.1 LLM 永远看不到 `end_date`
+> **If we never let the LLM see information published after an event has been
+> resolved, how strong is its ability across 319 real-world forecasting
+> questions?**
 
-`web_search` 工具向模型暴露的 schema 只有一个 `query` 参数。
-真正调 Tavily 时，`end_date` 由 Tool 实现层从当前题目的 `end_time` **硬编码注入**，模型既感知不到、也无法绕过。
+Around that single question, the project imposes three almost "religious"
+hard constraints on itself:
 
-这背后的设计哲学有两层：
+1. **The information boundary must be strict**: the model can only obtain
+   external information through our `web_search` tool, and the tool may only
+   surface content from before the event resolution date.
+2. **Results must be reproducible**: the same dataset + same config + same set
+   of models → anyone can re-run and obtain comparable numbers.
+3. **The process must be auditable**: every model call, every search, every
+   parse must be traceable down to the field level after the fact.
 
-* **能力边界与 Tool 边界对齐**：能力（"知道某天之前的世界")是由系统配置决定的，不应该是 prompt 工程或模型选择行为能影响到的；让模型连"我被截断到哪天"都看不到，才能避免它通过 prompt 构造、参数注入等方式推断或绕过。
-* **failure mode 唯一可控**：如果把 `end_date` 暴露成 LLM 工具参数，就必须假设它会"忘记填"或者"故意填一个未来日期"。把决定权握在工具实现手里，failure mode 从"模型可能犯错"压缩为"我们的代码可能犯错"——后者是可测、可审计、可单元覆盖的。
-
-### 1.2 默认偏严格：`end_date = end_time - 1 day`
-
-`TAVILY_END_DATE_OFFSET_DAYS=-1` 是项目默认值。理由很直接：很多题（赛事、央行决议、奥斯卡提名）当天就会出结果，如果用 `end_time` 当天作为搜索截止，新闻摘要里很可能已经包含答案。把搜索时间往前挪一天，是**用一点信息粒度换严格性**。
-
-报表也都默认在 `-1` 下比较——这本身就是设计上的约束："不同 offset 下的数字不可直接对照"。
-
-### 1.3 强制禁用 provider-native browsing
-
-OpenRouter / OpenAI / Anthropic 都有自己的 web 工具或 `:online` 后缀。一旦走那条路，时间截断就完全失控。
-项目在两层强约束：
-
-* **代码层**：`llm.chat` 只挂自家定义的 `WEB_SEARCH_SCHEMA`，禁止任何 `plugins` / `:online` / provider-native retrieval。
-* **测试层**：`test_llm_no_browsing.py` 直接 mock 客户端，断言 outbound payload 里没有这些字段。
-
-设计哲学：**对外部工具的"诱惑"要在最早的阶段就被拒绝掉**。否则一旦在某个 release 中"为了方便"开了一次，整套数据的可比性就废了。
-
-### 1.4 训练数据污染：用过滤而不是欺骗
-
-工具截断管不到模型参数里已经记住的事实。对此项目采取了一个非常朴素的策略：
-
-> 对每个模型声明它的 **训练截止日期**；如果题目 `end_time ≤ cutoff`，这道题对该模型直接跳过。
-
-跳过的样本仍然会在 DB 里写一行 `error="skipped_training_cutoff"`：
-
-* 报表能清楚展示"每个模型被剔除了多少题、剩多少题可比"。
-* `resume` 不会重试这一行（与 `network` 这类瞬态错误区分开）。
-* 不计入 `error rate by kind`——它不是失败，是**主动数据清洗**。
-
-这背后有一个项目反复用到的设计准则：**"被剔除"和"失败"是两种语义，必须在数据层就分开**。如果只用一个布尔 `skipped` 字段，未来想做按 cutoff 的分层报表就会丢失信息。
-
-### 1.5 我们能控制什么、控制不了什么
-
-`FRAME.md §3.8` 里有一张"威胁模型"表，本质是一份**诚实自白**：
-
-| 泄漏源                       | 是否可控 |
-| ---------------------------- | -------- |
-| Tavily 返回正文              | ✅       |
-| Provider 内置 browsing       | ✅       |
-| 模型参数记忆                 | ⚠️ 部分（靠 §1.4 缓解） |
-| Tavily snippet 的未来泄漏     | ⚠️ 部分（v5.2 起经 detector 兜底，见 §1.6） |
-| 题目本身含年份等时间线索     | ❌       |
-| 训练后的外部知识回流         | ❌       |
-
-设计哲学：**承认控制不了的部分，比假装能控制更重要**。不可控的部分会作为评测偏差的一部分被接受；可控的部分则用代码 + 测试守死。
-
-### 1.6 Stage 2 LLM 内容审核：补 Tavily 协议层兜不住的语义泄漏（v5.2）
-
-§1.1 - §1.4 是协议层（schema / `end_date` 注入 / `:online` 禁用 / cutoff 跳题）防御。这层覆盖不到的一类泄漏是 **Tavily 返回页面正文里描述了 `end_time` 之后才发生的事件**：Tavily 用 `end_date` 过滤的是页面 *crawl/index* 时间，不是页面 *内容描述* 的事件时间。一个 `end_date` 之前被索引的 wiki / 聚合页 / 长文，正文里完全可以引用未来事件。
-
-`search-leak-filter-v1` 的方案是在 `tavily_search` 末尾、主 LLM 看到 `tool_result` 之前，加一层独立 LLM 审核器（"detector"）：每条 `SearchResultItem` 单条调用 detector，verdict ∈ {keep, drop, failed:*}。verdict=drop 整条剔除，主 LLM 看不到任何被 drop 的字段（含 title / url / content / raw_content）。
-
-| 维度        | 落地             |
-| ----------- | ---------------- |
-| 切点        | `forecast_eval/search.py:tavily_search` 200 路径末尾，`return` 之前 |
-| 客户端      | `_detector_client: AsyncOpenAI`，独立单例，与主 LLM `_client` 不共享 |
-| input 字段  | 白名单：title / url / published_date / content / raw_content / cutoff_date；MUST NOT 含 `Question` 任何字段（防 detector 演变成"答案审核器"） |
-| prompt 严格度 | 6 条原则：cutoff_date 占位、specific/scheduled/speculative future event 一视同仁、"暧昧 → drop"、禁用参数知识、严格 JSON 输出、不感知 question |
-| 失败模式    | FAIL-RETRY → CLOSED：默认重试 K 次仍失败 → drop；AUTH 错误本地 catch 立即 drop（不 propagate，不 abort 整 run） |
-| 可观测性    | `search_calls.detector_*` 五字段 + `run_meta.config_snapshot` detector 三键指纹 |
-| 总开关      | `ENABLE_SEARCH_LEAK_FILTER`，默认 True；关闭后字节级回退 |
-
-detector 的基准日期是 *题目* `end_time + TAVILY_END_DATE_OFFSET_DAYS`（与 Tavily `end_date` 同源），与 §1.4 的 `MODEL_TRAINING_CUTOFFS`（模型训练 cutoff，按 *模型* 索引）独立。题目通过 cutoff 过滤进入执行后，detector 仍对 *该题* 的 search results 做内容审核，两者互不替代。
-
-参考 BLF 论文（[arXiv:2604.18576](https://arxiv.org/abs/2604.18576) §B.1 Stage 2）：他们的 LLM-based leak classifier 在 Brave 端日期过滤之后再加一层 LLM 审核，post-hoc audit 显示 runtime filter 抓住 320/341 = 93.8% 实际泄漏，最终 agent 看到的 results 残余泄漏率仅 1.5%。Stage 2 是工程上经验证有效的"算法层 + 语义层双保险"。
-
-完整 spec 见 `openspec/changes/search-leak-filter-v1/specs/`（capability `search-leak-filter` / `search-tool` / `information-barrier` / `results-persistence`）。
+The whole design — from prompt assembly, tool schema, DB schema to resume
+semantics — is the concrete embodiment of these three constraints. Once you
+internalise this, every "seemingly over-strict" design below feels natural.
 
 ---
 
-## 2. 可复现性：每一次 run 都是一个独立时空
+## 1. Information isolation: the project's "first principle"
 
-### 2.1 源数据库纳入 Git 管理
+### 1.1 The LLM never sees `end_date`
 
-`forecast_eval_set_example.db` 直接进了仓库。它是评测的"金标准"示例数据集，必须随仓库分发；任何人都能用 `git clone` 拿到完全一致的 319 道题。文件名 (`SOURCE_DB`) 和内部题库表名 (`SOURCE_TABLE`，默认 `forecast_eval_set_example`) 都暴露成 `.env` 参数，自带数据集时改这两个变量即可，loader 在运行时把 `<SOURCE_TABLE>` 拼进 SQL 的 `FROM` 子句；表名在 Settings 阶段就被白名单 `[A-Za-z_][A-Za-z0-9_]*` 校验，杜绝注入。
+The schema the `web_search` tool exposes to the model has only one `query`
+parameter. When Tavily is actually called, `end_date` is **hard-coded and
+injected by the tool implementation layer** from the current question's
+`end_time` — the model can neither perceive nor bypass it.
 
-每次 run 还会计算 `source_db_hash` 并写到 `run_meta`，配合 `metadata_hash` 与 `prompt_templates_hash`，构成"该 run 究竟基于哪份输入"的三段指纹。
+There are two design philosophies underneath:
 
-### 2.2 每次 run 一个独立目录
+* **Aligning capability boundaries with tool boundaries**: capability
+  ("knowing the world up to a particular day") is determined by system
+  configuration, and should not be something prompt engineering or model
+  behaviour can affect. By making the model unable to even see "which day I
+  am cut off at", we prevent it from inferring or working around that
+  boundary via prompt construction, parameter injection, etc.
+* **Single, controllable failure mode**: if we exposed `end_date` as an LLM
+  tool argument, we'd have to assume the model could "forget to fill it in"
+  or "deliberately fill in a future date". Holding the decision inside the
+  tool implementation collapses the failure mode from "the model might make
+  a mistake" to "our code might make a mistake" — the latter is testable,
+  auditable, and unit-testable.
+
+### 1.2 Default leans strict: `end_date = end_time - 1 day`
+
+`TAVILY_END_DATE_OFFSET_DAYS=-1` is the project default. The reason is
+straightforward: many questions (sports events, central bank decisions, Oscar
+nominations) get resolved on the same day, and using the question's
+`end_time` as the search cutoff would likely surface news summaries that
+already contain the answer. Pushing the search time forward by one day
+**trades a little information granularity for strictness**.
+
+Reports also default to comparison at `-1` — this is itself a design
+constraint: "numbers under different offsets are not directly comparable".
+
+### 1.3 Provider-native browsing is forcibly disabled
+
+OpenRouter / OpenAI / Anthropic each have their own web tool or `:online`
+suffix. The moment we go down that path, the time cutoff is completely out
+of control. The project enforces this on two layers:
+
+* **Code layer**: `llm.chat` only attaches our own `WEB_SEARCH_SCHEMA`; any
+  `plugins` / `:online` / provider-native retrieval is forbidden.
+* **Test layer**: `test_llm_no_browsing.py` directly mocks the client and
+  asserts the outbound payload contains none of those fields.
+
+Design philosophy: **the "temptation" of external tools must be rejected at
+the earliest possible stage**. If even one release "for convenience" turned
+this on once, the comparability of the entire dataset would be ruined.
+
+### 1.4 Training-data contamination: filtering, not lying
+
+The tool cutoff cannot constrain facts the model has already memorised in
+its parameters. The project takes a very plain strategy:
+
+> Declare each model's **training cutoff date**; if a question's `end_time ≤
+> cutoff`, that question is simply skipped for that model.
+
+Skipped samples still write a row into the DB with
+`error="skipped_training_cutoff"`:
+
+* Reports can clearly show "how many questions were filtered out per model
+  and how many remain comparable".
+* `resume` will not retry that row (distinguishing it from transient errors
+  like `network`).
+* It is not counted in `error rate by kind` — it is not a failure, but
+  **active data cleansing**.
+
+Behind this is a design principle the project repeatedly invokes: **"filtered
+out" and "failed" are two different semantics and must be separated at the
+data layer**. If we only used a boolean `skipped` field, future stratified
+reporting by cutoff would lose information.
+
+### 1.5 What we can and cannot control
+
+`FRAME.md §3.8` contains a "threat model" table that is in essence an
+**honest confession**:
+
+| Leakage source                          | Controllable? |
+| --------------------------------------- | ------------- |
+| Tavily returned content                 | ✅           |
+| Provider built-in browsing              | ✅           |
+| Model parameter memory                  | ⚠️ Partial (mitigated by §1.4) |
+| Future leakage in Tavily snippets       | ⚠️ Partial (since v5.2 backed by detector, see §1.6) |
+| Time clues in the question text itself (e.g. year)  | ❌  |
+| External knowledge backflow after training | ❌        |
+
+Design philosophy: **acknowledging what we cannot control matters more than
+pretending we can**. The uncontrollable parts are accepted as part of the
+evaluation bias; the controllable parts are locked down by code + tests.
+
+### 1.6 Stage 2 LLM content audit: covering the semantic leakage Tavily's protocol layer cannot catch (v5.2)
+
+§1.1 - §1.4 are protocol-layer (schema / `end_date` injection / `:online`
+disabling / cutoff skipping) defences. The class of leakage this layer
+cannot cover is **the body of a Tavily-returned page describing events that
+happened after `end_time`**: Tavily's `end_date` filter operates on a page's
+*crawl/index* time, not on the event time *described in the page content*. A
+wiki / aggregator page / long article indexed before `end_date` can perfectly
+well reference future events in its body.
+
+The `search-leak-filter-v1` solution is to add an independent LLM audit layer
+(the "detector") at the end of `tavily_search`, before the main LLM sees
+`tool_result`: each `SearchResultItem` is sent to the detector individually,
+with verdict ∈ {keep, drop, failed:*}. Items with verdict=drop are removed
+entirely — the main LLM never sees any field of a dropped item (including
+title / url / content / raw_content).
+
+| Dimension      | Implementation                          |
+| -------------- | --------------------------------------- |
+| Cut point      | end of the 200 path in `forecast_eval/search.py:tavily_search`, before `return` |
+| Client         | `_detector_client: AsyncOpenAI`, independent singleton, not shared with the main LLM `_client` |
+| input fields   | whitelist: title / url / published_date / content / raw_content / cutoff_date; MUST NOT contain any field of `Question` (to prevent the detector from morphing into an "answer auditor") |
+| prompt strictness | 6 principles: cutoff_date placeholder, treat specific/scheduled/speculative future events equally, "ambiguous → drop", forbid parametric knowledge, strict JSON output, no awareness of the question |
+| Failure mode   | FAIL-RETRY → CLOSED: by default, K retries still failing → drop; AUTH errors are caught locally and immediately drop (no propagation, no aborting the whole run) |
+| Observability  | `search_calls.detector_*` five fields + `run_meta.config_snapshot` detector three-key fingerprint |
+| Master switch  | `ENABLE_SEARCH_LEAK_FILTER`, default True; when off, byte-level rollback |
+
+The detector's reference date is *the question's* `end_time +
+TAVILY_END_DATE_OFFSET_DAYS` (sharing the same source as Tavily's
+`end_date`), independent of §1.4's `MODEL_TRAINING_CUTOFFS` (the model
+training cutoff, indexed *per model*). Even after a question passes through
+the cutoff filter and enters execution, the detector still audits the search
+results for *that question* — the two do not substitute for each other.
+
+Reference: BLF paper ([arXiv:2604.18576](https://arxiv.org/abs/2604.18576)
+§B.1 Stage 2): their LLM-based leak classifier adds a layer of LLM audit
+after Brave's date filter; post-hoc audit shows the runtime filter catches
+320/341 = 93.8% of actual leakage, and the residual leakage rate the agent
+ultimately sees is only 1.5%. Stage 2 is an empirically validated
+"algorithmic-layer + semantic-layer double insurance" engineering practice.
+
+For the full spec see `openspec/changes/search-leak-filter-v1/specs/`
+(capabilities `search-leak-filter` / `search-tool` / `information-barrier` /
+`results-persistence`).
+
+---
+
+## 2. Reproducibility: every run is its own independent space-time
+
+### 2.1 The source database is checked into Git
+
+`forecast_eval_set_example.db` goes straight into the repo. It is the
+evaluation's "gold-standard" example dataset and must ship with the repo;
+anyone can `git clone` and obtain the exact same 319 questions. The filename
+(`SOURCE_DB`) and the internal question table name (`SOURCE_TABLE`, default
+`forecast_eval_set_example`) are both exposed as `.env` parameters; with a
+custom dataset, just change these two variables and the loader splices
+`<SOURCE_TABLE>` into the SQL `FROM` clause at runtime. The table name is
+whitelist-validated (`[A-Za-z_][A-Za-z0-9_]*`) at the Settings stage to
+foreclose injection.
+
+Each run also computes `source_db_hash` and writes it to `run_meta`; together
+with `metadata_hash` and `prompt_templates_hash`, this forms a three-part
+fingerprint of "exactly which inputs this run is based on".
+
+### 2.2 Each run gets its own directory
 
 ```
 runs/{run_id}/
-  manifest.json          # run 级元信息
-  db/{model_slug}.db     # 每个模型一个 sqlite
-  analysis/              # 后置统计产物
+  manifest.json          # run-level metadata
+  db/{model_slug}.db     # one sqlite per model
+  analysis/              # post-hoc statistical artefacts
   logs/{run_id}.log
 ```
 
-设计选择有几个细节：
+A few details of the design choice:
 
-* **目录化而不是单库化**：早期的"`results.db` 单库"被替换掉了。原因是单库时多次 run 的边界全靠 `run_id` 字段切分，难以独立分发，也很容易在分析时混入其他 run 的数据。
-* **`run_id` 默认 `YYYYMMDD-HHMMSS-xxxx`**：`ls` 天然按时间排序；同时是目录名，肉眼一眼能看出"什么时候跑的"。
-* **`RUN_ID` 留空 → 新建；填相同的 → 续跑**。一个变量管两件事，CLI 不再多一个 `--resume` flag。
+* **Directory per run, not single DB**: the early "single `results.db`" was
+  replaced. The reason: with a single DB, the boundary between runs depended
+  entirely on the `run_id` column, which made independent distribution hard
+  and made it easy to mix data from other runs into analysis.
+* **`run_id` defaults to `YYYYMMDD-HHMMSS-xxxx`**: `ls` naturally sorts by
+  time, and since this is also the directory name you can tell "when it ran"
+  at a glance.
+* **`RUN_ID` empty → new run; same value → resume**. One variable handles
+  both, no extra `--resume` CLI flag needed.
 
-### 2.3 每个模型一个 SQLite
+### 2.3 One SQLite per model
 
-为什么不是"一个 run 一个大 DB"？三条理由，按重要性排序：
+Why not "one big DB per run"? Three reasons, in order of importance:
 
-1. **可独立分发**：把 `runs/{run_id}/db/openai__gpt-5.db` 单独发给别人，对方就能复盘这一个模型，不需要拿到其他模型的结果。
-2. **写入路径互不干扰**：每个模型一个 async writer task，单 writer 多 reader 的 WAL 模式下并发足够，且不会因为某个模型卡住而阻塞别人。
-3. **schema 演进容易隔离**：未来某个模型需要存一个特殊字段（比如 reasoning trace），可以单独扩它的 schema，不影响别人。
+1. **Independently distributable**: hand `runs/{run_id}/db/openai__gpt-5.db`
+   to someone else and they can replay just this one model, with no need to
+   obtain the other models' results.
+2. **Non-interfering write paths**: one async writer task per model, with
+   single-writer-multi-reader WAL mode providing ample concurrency, and one
+   model's stall cannot block another's.
+3. **Easy schema-evolution isolation**: if some model needs to store a
+   special field (e.g. reasoning trace), its schema can be extended
+   independently without affecting others.
 
-代价是分析层要扫多个文件，但 `analysis.py` 已经把这件事封装好了。
+The cost is that the analysis layer must scan multiple files, but
+`analysis.py` already encapsulates that.
 
-### 2.4 每个 DB 自包含 `questions` + `prompt_templates` 副本
+### 2.4 Each DB self-contains `questions` + `prompt_templates` copies
 
-每个模型 DB 内部都嵌入了源题库与 prompt 模板的副本。乍看冗余，实际是为"独立复盘"服务的：
+Each model DB embeds copies of the source question set and prompt templates.
+This looks redundant at first glance, but it serves "independent replay":
 
-> 拿到 `openai__gpt-5.db` 的人，不需要再去找 `forecast_eval_set_example.db`，也不需要找当时 metadata 是哪一版——所有评测当时的输入都在这个 DB 里。
+> Whoever receives `openai__gpt-5.db` does not need to track down
+> `forecast_eval_set_example.db`, nor hunt for which metadata version was in
+> use at the time — every input the evaluation needed is inside this single
+> DB.
 
-副本之间的一致性靠 hash 校验保证：`run_meta.source_db_hash` / `metadata_hash` / `prompt_templates_hash` 三个字段把"当时的源数据"钉死。
+Consistency between copies is guaranteed by hash verification: three fields
+— `run_meta.source_db_hash` / `metadata_hash` / `prompt_templates_hash` —
+pin down "the source data at the time".
 
-### 2.5 配置脱敏后写进 DB
+### 2.5 The config is redacted before being written into the DB
 
-`run_meta.config_snapshot` 存的是脱敏后的 `.env` JSON。`LLM_API_KEY` 这种敏感字段只保留前 4 位 + 长度 + `sha256[:12]`。
+`run_meta.config_snapshot` stores the redacted `.env` as JSON. Sensitive
+fields like `LLM_API_KEY` only retain the first 4 characters + length +
+`sha256[:12]`.
 
-设计哲学：
+Design philosophy:
 
-* **想知道这次 run 用了什么参数（temperature、并发数、retry 序列）**——存。
-* **想知道用的是哪个 key 的明文**——绝不存。
-* 把"可审计"和"不可外泄"在同一个字段里同时满足。
+* **Want to know which parameters (temperature, concurrency, retry sequence)
+  this run used?** — stored.
+* **Want to know the plaintext of the key that was used?** — never stored.
+* "Auditable" and "non-leakable" coexist within the same field.
 
 ---
 
-## 3. 评分系统：朴素到极致
+## 3. Scoring system: as plain as it gets
 
-### 3.1 字母集合 frozenset 严格相等
+### 3.1 Strict frozenset equality on letter sets
 
-整个判分逻辑就一行：
+The entire scoring logic is one line:
 
 ```python
-predicted_letters == ground_truth_letters  # 都是 frozenset[str]
+predicted_letters == ground_truth_letters  # both are frozenset[str]
 ```
 
-漏选、多选、顺序——都按"严格相等"算错。
-这是项目最有"洁癖"的一处设计。
+Missed selections, extra selections, ordering — all are scored as wrong by
+"strict equality". This is the project's most "fastidious" design.
 
-#### 为什么不用部分得分（Jaccard / F1）？
+#### Why not partial credit (Jaccard / F1)?
 
-* **解释成本太高**：`pass@1=0.62` 比 `mean Jaccard=0.74` 直观得多；论文里写一个就够。
-* **避免一题打半分掩盖问题**：如果一个模型每次都漏选一两个，平均得分仍然能 70+，但它本质上**没真正掌握**这道题。严格匹配把这种行为打成 0，强迫报表诚实。
-* **统一三种题型的判分接口**：`yes_no` / `binary_named` / `multiple_choice` 在评分阶段都是 frozenset；写一次代码，三种题型都对。
+* **Explanation cost is too high**: `pass@1=0.62` is far more intuitive than
+  `mean Jaccard=0.74`; one number is enough for a paper.
+* **Avoid half-credit masking the real problem**: if a model misses one or
+  two selections every time, its average score can still be 70+, but
+  fundamentally it has **not really mastered** that question. Strict
+  matching scores this behaviour as 0, forcing the report to be honest.
+* **Unifies the scoring interface across three question types**: `yes_no` /
+  `binary_named` / `multiple_choice` are all frozensets at the scoring
+  stage; write the code once, all three types work.
 
-#### 字母编码是 canonical answer
+#### Letter encoding is the canonical answer
 
-源数据库的 `answer` 字段统一用字母（`'A'` 或 `'A, B'`），而不是用选项文本：
+The source DB's `answer` field uniformly uses letters (`'A'` or `'A, B'`)
+rather than option text:
 
-* yes_no：`Yes=A, No=B`
-* binary_named：第一个实体=A，第二个=B
-* multiple_choice：按选项数组顺序 A/B/C/...
+* yes_no: `Yes=A, No=B`
+* binary_named: the first entity = A, the second = B
+* multiple_choice: A/B/C/... follow the order of the options array
 
-模型输出的形态因 question_type 而异（`Yes`、实体名、字母列表都可能），但 parser 一律归一为 `frozenset[str]`。这个设计让"模型怎么说"和"系统怎么打分"彻底解耦。
+The model's output form varies by question_type (`Yes`, entity name, letter
+list are all possible), but the parser uniformly normalises to
+`frozenset[str]`. This design completely decouples "how the model says it"
+from "how the system scores it".
 
-### 3.2 `parse_ok=0` 不是 error
+### 3.2 `parse_ok=0` is not an error
 
-LLM 没输出 `\boxed{...}`、或写了"I cannot predict the future"——**这不是系统失败，是模型能力的一部分**。
+The LLM didn't output `\boxed{...}`, or wrote "I cannot predict the future"
+— **this is not a system failure, it is part of the model's capability**.
 
-具体落地：
+Concretely:
 
-* **`parse_ok=0`, `correct=NULL`**：parse 失败/拒答会单独累计成"refusal rate"，进入报表。
-* **不走 retry**：模型自己说不会答，再问一次结果还是不会——退避重试只是浪费 token。
-* **`error` 字段保持 NULL**：`error rate by kind` 报表里不会被这种"软失败"污染。
+* **`parse_ok=0`, `correct=NULL`**: parse failures / refusals are
+  accumulated separately into "refusal rate" and surfaced in reports.
+* **No retry**: when the model itself says it cannot answer, asking again
+  yields the same answer — backoff retries only waste tokens.
+* **`error` field stays NULL**: the `error rate by kind` report is not
+  polluted by such "soft failures".
 
-设计哲学：**每一种行为都要在报表里有自己的格子**。"系统错误率"和"模型拒答率"是两件事，不能用一个总错误率混在一起。
+Design philosophy: **every behaviour must have its own cell in the
+report**. "System error rate" and "model refusal rate" are two different
+things and cannot be lumped under a single total error rate.
 
-### 3.3 ASCII 续接：不完美但保持映射的稳定
+### 3.3 ASCII continuation: imperfect, but keeps the mapping stable
 
-数据库里有 4 道 `multiple_choice` 选项数 > 26，且其中 3 道答案落在 `[ \ ] ^ _ ` ` ` a b c ...` 这种 ASCII 续接字符上。
+The DB contains 4 `multiple_choice` questions with > 26 options, of which 3
+have ground-truth answers landing on ASCII continuation characters like
+`[ \ ] ^ _ ` ` ` a b c ...`.
 
-这些字符对 LLM 极不友好（反引号会被 markdown 吞、大小写 a/A 混淆），但项目仍然保留——为了**保持字母 ↔ index 的一一映射**。
+These characters are extremely unfriendly to LLMs (backticks are eaten by
+markdown, lower/upper-case a/A are easily confused), but the project still
+keeps them — in order to **preserve a one-to-one letter ↔ index mapping**.
 
-代价靠几道防线兜住：
+The cost is mitigated by several defences:
 
-1. `prompts.render_user_prompt` 在生成 >26 选项 `outcomes_block` 时显式加引号或转义。
-2. `parser.parse_answer` 必须对 >26 选项做 round-trip 单元测试。
-3. 日志/报表并行记录 letters 与 labels，便于人工复核。
+1. `prompts.render_user_prompt` explicitly quotes or escapes labels when
+   generating an `outcomes_block` for > 26 options.
+2. `parser.parse_answer` MUST have a round-trip unit test for > 26 options.
+3. Logs/reports record letters and labels in parallel for manual review.
 
-未来如果发现 LLM 表现明显被标签拖累，再迁移到 `AA/AB` 或 `A01/A02` 等稳定方案。**这是一个被记录在案的"债务"，而不是一个被忽略的 bug**。
+If we later confirm LLM performance is meaningfully dragged down by the
+labelling scheme, we'll migrate to a stable scheme like `AA/AB` or
+`A01/A02`. **This is a documented "debt", not an ignored bug**.
 
-<!-- exam-score-metric: removable section ↓ —— 删除直到下一个 `---` 分隔符 -->
+<!-- exam-score-metric: removable section ↓ — delete down to the next `---` separator -->
 
-### 3.4 考试式部分得分（exam_score）
+### 3.4 Exam-style partial credit (exam_score)
 
-`forecast_eval/analysis/exam_score.py` 给主指标 FSS（Tversky α=2/β=0.5 + chance correction）配了一把"对外解释的尺子"。公式只有一行：
+`forecast_eval/analysis/exam_score.py` provides an "explanatory ruler for
+the public" alongside the primary metric FSS (Tversky α=2/β=0.5 + chance
+correction). The formula is one line:
 
 $$
 \text{exam\_score}(\hat S, G) = \begin{cases}
@@ -222,294 +348,475 @@ $$
 \end{cases}
 $$
 
-—— 含错选直接 0 分，否则按答对比例给分。形式上等价于 **Recall under zero-FP gate**：把 Recall 加一个"任何 FP 都一票否决"的硬门。
+— any wrong selection → 0 directly; otherwise score by the proportion
+correct. Formally equivalent to **Recall under zero-FP gate**: Recall plus a
+hard "any FP vetoes" gate.
 
-#### 基数规则（跟 `pass_at_1_avg` 有意不同）
+#### Denominator rule (intentionally different from `pass_at_1_avg`)
 
-| sample 状态 | `exam_score` | 进基数？ |
+| sample state | `exam_score` | enters denominator? |
 | --- | --- | --- |
-| `is_cutoff`（题目晚于训练截止） | `None` | 否 |
-| 非 cutoff 的 `error`（敏感词、API timeout 等） | `None` | 否 |
-| `error=None` 且 `parse_ok != 1` | `0.0` | 是（"完成但答错"） |
-| `error=None` 且 `parse_ok=1`，FP > 0 | `0.0` | 是 |
-| `error=None` 且 `parse_ok=1`，FP = 0 | $|\hat S \cap G|/|G|$ | 是 |
+| `is_cutoff` (question later than training cutoff) | `None` | no |
+| non-cutoff `error` (sensitive word, API timeout, etc.) | `None` | no |
+| `error=None` and `parse_ok != 1` | `0.0` | yes ("completed but wrong") |
+| `error=None` and `parse_ok=1`, FP > 0 | `0.0` | yes |
+| `error=None` and `parse_ok=1`, FP = 0 | $|\hat S \cap G|/|G|$ | yes |
 
-剔除 vs 计 0 的语义差异：cutoff / error 是"未完成过程"（基础设施失败 / 信息屏障，不该算到模型头上）；parse 失败是"完成过程但写得没人看懂"（考试评分逻辑里 = 答错）。这跟 `pass_at_1_avg` 把 parse 失败也剔除的设计**有意不同**。
+Semantic difference between excluding vs counting as 0: cutoff / error means
+"the process did not complete" (infrastructure failure / information
+barrier — should not count against the model); parse failure means "the
+process completed but no one can read the output" (under exam-grading logic
+= wrong answer). This is **intentionally different** from `pass_at_1_avg`
+which also excludes parse failures.
 
-#### 聚合：题内均值 → 题间均值
+#### Aggregation: per-question mean → cross-question mean
 
 $$e_q = \frac{1}{|S_q|}\sum_{s \in S_q}\text{exam\_score}(s, G_q), \quad \text{global} = \frac{1}{|Q|}\sum_q e_q$$
 
-题内分母 $|S_q|$ 是**实际进基数的 sample 数**（不是 SAMPLING_N 固定值 —— 一题 3 次采样 1 次敏感词失败、剩 2 次进基数则按 2 平均）。空基数题 $e_q = \text{None}$ 不参与全局题间分母。
+The per-question denominator $|S_q|$ is **the count of samples actually
+entering the denominator** (not a fixed SAMPLING_N — for a question with 3
+samples where 1 fails on a sensitive word and 2 enter the denominator,
+average over 2). A question with empty denominator has $e_q = \text{None}$
+and does not participate in the global cross-question denominator.
 
-#### 与既有评分的差异表
+#### Differences vs existing scoring metrics
 
-| 指标 | 错选惩罚 | 漏选惩罚 | chance correction | 单选退化 |
+| Metric | Wrong-selection penalty | Missed-selection penalty | chance correction | Single-select degeneration |
 | --- | --- | --- | --- | --- |
-| `parser.is_correct`（strict） | 全或无 | 全或无 | 否 | 0/1 |
-| `fss`（Tversky α=2/β=0.5） | 软（α 倍） | 软（β 倍） | 是（`p_e`） | 0/1 |
-| `hamming_score` | 与漏选对称 | 与错选对称 | 否 | 0/1 |
-| **`exam_score`** | 一票否决（硬门） | 按比例扣分 | 否（直观） | 0/1 |
+| `parser.is_correct` (strict) | all-or-nothing | all-or-nothing | no | 0/1 |
+| `fss` (Tversky α=2/β=0.5) | soft (α multiplier) | soft (β multiplier) | yes (`p_e`) | 0/1 |
+| `hamming_score` | symmetric with missed | symmetric with wrong | no | 0/1 |
+| **`exam_score`** | veto (hard gate) | proportional deduction | no (intuitive) | 0/1 |
 
-#### SAMPLING_N 双语义
+#### Dual semantics of SAMPLING_N
 
-* **best-of-N 视角**（`pass_any_at_n` / `at_least_majority_at_n` / `at_least_all_at_n` / `majority_vote_accuracy`）：N 是"对一题做多次随机采样、看至少有一次答对的概率"。
-* **独立测验视角**（`exam_score_at_n_avg`）：N 重新解读为"独立测验次数"，每次得分独立 [0, 1]，最终算术均值。
+* **Best-of-N view** (`pass_any_at_n` / `at_least_majority_at_n` /
+  `at_least_all_at_n` / `majority_vote_accuracy`): N is "the probability of
+  getting the answer right at least once across multiple random samples for
+  one question".
+* **Independent-trials view** (`exam_score_at_n_avg`): N is reinterpreted
+  as "the number of independent trials", with each score independently in
+  [0, 1] and the final result is the arithmetic mean.
 
-两套语义对同一组数据并存，分析师可自取：要解释给非作者就报 `exam_score_at_n_avg`，要写论文就报 `fss`。
+Two semantic frames coexist over the same data; analysts choose: report
+`exam_score_at_n_avg` for non-author audiences, and `fss` for papers.
 
-#### 摘除等价性
+#### Removability equivalence
 
-本指标允诺"摘除等价性"：删 `forecast_eval/analysis/exam_score.py` + `tests/test_exam_score.py` + 代码 / 文档中标记的少量挂接点（marker 字面与清单见 `openspec/changes/add-exam-score-metric/design.md` §D8），仓库回到引入本指标前的字节级一致状态。
+This metric promises "removability equivalence": delete
+`forecast_eval/analysis/exam_score.py` + `tests/test_exam_score.py` + the
+small set of hook points marked in code/docs (markers and the catalogue are
+in `openspec/changes/add-exam-score-metric/design.md` §D8), and the repo
+returns to byte-level identical state with the pre-introduction commit.
 
-### 3.5 综合得分按子题型加权（composite-score-by-subtype）
+### 3.5 Composite score weighted by sub-question type (composite-score-by-subtype)
 
-`per_model_summary.csv` 把所有题型混算为单一均值；这对"区分模型能力"不一定理想 —— 简单题（如 `yes_no` k=2）模型基本满分、不区分能力，多选题几乎所有模型都很差、区分度高。把两类题揉在一起算等于让"信息密度低的桶"和"信息密度高的桶"等权贡献给最终分数。
+`per_model_summary.csv` mixes every question type into a single mean; this
+is not necessarily ideal for "discriminating model capability" — easy
+questions (e.g. `yes_no`, k=2) generally have models near 100% and
+discriminate poorly, while multi-select questions are answered poorly by
+almost every model and discriminate strongly. Mixing both classes together
+effectively means "low-information-density buckets" and
+"high-information-density buckets" contribute equally to the final score.
 
-`forecast_eval/analysis/composite.py` 提供"先按子题型分别算 → 再按用户配置权重合成 → 缺失桶剔除并归一化"的链路。**两个维度独立做一遍**（互不耦合，因为 `multiple_choice` 内部既有 single 又有 multi，两者并不正交）：
+`forecast_eval/analysis/composite.py` provides the "compute by sub-question
+type first → compose with user-configured weights → drop missing buckets
+and renormalise" pipeline. **Two dimensions are computed independently**
+(decoupled from each other, since `multiple_choice` itself contains both
+single and multi — the two are not orthogonal):
 
-* `question_type` 维度（桶：`yes_no` / `binary_named` / `multiple_choice`） → 写出 `per_model_composite_by_question_type.csv`；
-* `choice_type` 维度（桶：`single` / `multi`） → 写出 `per_model_composite_by_choice_type.csv`。
+* `question_type` dimension (buckets: `yes_no` / `binary_named` /
+  `multiple_choice`) → writes
+  `per_model_composite_by_question_type.csv`;
+* `choice_type` dimension (buckets: `single` / `multi`) → writes
+  `per_model_composite_by_choice_type.csv`.
 
-#### 加权公式
+#### Weighting formula
 
-对每个 (model, dimension, metric)：
+For each (model, dimension, metric):
 
 $$\text{composite}_m = \frac{\sum_{b \in B_{\text{valid}}} w_{m,b} \cdot v_{m,b}}{\sum_{b \in B_{\text{valid}}} w_{m,b}}$$
 
-* $B_{\text{valid}}$ = 该 (model, metric) 下子题型实测值非 None **且**该桶权重 > 0 的桶集合
-* 缺失桶（slice 算不出来或权重 0）被剔除后，剩余桶的权重重新归一化（不会被当作 0）；
-* 全 None → composite = None；
-* 权重和不要求等于 1，分母自动归一化。
+* $B_{\text{valid}}$ = the bucket set under that (model, metric) where the
+  sub-question-type measurement is non-None **and** the bucket weight > 0
+* Missing buckets (slice unavailable or weight 0) are dropped, and the
+  remaining weights are renormalised (they are not treated as 0);
+* All None → composite = None;
+* Weights are not required to sum to 1; the denominator is normalised
+  automatically.
 
-#### 默认权重的"难题区分度高"原则
+#### "Harder questions discriminate better" rationale for default weights
 
-| 维度 | 桶 | 默认权重 | 难度依据 |
+| Dimension | Bucket | Default weight | Difficulty rationale |
 |---|---|---|---|
-| `question_type` | `yes_no` | 0.15 | k=2，盲猜 50%，模型间几乎不区分 |
-| `question_type` | `binary_named` | 0.15 | k=2 同上，加名称识别 |
-| `question_type` | `multiple_choice` | 0.70 | k=2..N 跨度大，含多选，区分度最高 |
-| `choice_type` | `single` | 0.40 | 整体偏易（含 yes_no / binary_named） |
-| `choice_type` | `multi` | 0.60 | 真正多选，几乎所有模型都很差，区分度高 |
+| `question_type` | `yes_no` | 0.15 | k=2, blind guess 50%, almost no inter-model discrimination |
+| `question_type` | `binary_named` | 0.15 | k=2 as above, adds name recognition |
+| `question_type` | `multiple_choice` | 0.70 | k=2..N wide range, includes multi-select, highest discrimination |
+| `choice_type` | `single` | 0.40 | overall easier (includes yes_no / binary_named) |
+| `choice_type` | `multi` | 0.60 | true multi-select, almost every model performs poorly, high discrimination |
 
-一句话：**让区分模型能力的桶贡献更大**。改成"我更关心简单题"只要把数字反过来即可。这是一个有取向的默认值，不是"中性"的——上面列的取向我们认为对绝大多数评测场景更合理；用户对此有不同看法时，覆盖一行 `.env` 就解决。
+One sentence: **let buckets that discriminate model capability contribute
+more**. To switch to "I care more about easy questions", just flip the
+numbers. This is an opinionated default, not a "neutral" one — we believe
+the orientation above is more reasonable for the vast majority of
+evaluation scenarios; users with a different view solve it by overriding
+one line of `.env`.
 
-#### 配置入口（`Settings` / `.env`）
+#### Configuration entrypoint (`Settings` / `.env`)
 
-* `COMPOSITE_WEIGHTS_QTYPE` / `COMPOSITE_WEIGHTS_CTYPE`：全局默认权重，所有未显式覆盖的指标共享。
-* `COMPOSITE_WEIGHT_OVERRIDES_QTYPE` / `COMPOSITE_WEIGHT_OVERRIDES_CTYPE`：按指标独立覆盖。形如 `"fss=yes_no=0.05,multiple_choice=0.95"`，分号分隔多指标。指标名拼写错误（不在 `_SUMMARY_FIELDS` 数据列内）由 `compute_composite` 在分析阶段 raise，不会"静默回退到默认"——这是有意设计，配错了要让你知道。
-* 启动期校验：桶名必须 ∈ 合法集合、权重 ≥ 0、至少一个 > 0。
+* `COMPOSITE_WEIGHTS_QTYPE` / `COMPOSITE_WEIGHTS_CTYPE`: global default
+  weights, shared by all metrics that are not explicitly overridden.
+* `COMPOSITE_WEIGHT_OVERRIDES_QTYPE` /
+  `COMPOSITE_WEIGHT_OVERRIDES_CTYPE`: per-metric independent overrides.
+  Form: `"fss=yes_no=0.05,multiple_choice=0.95"`, semicolon-separated for
+  multiple metrics. Misspelled metric names (not in `_SUMMARY_FIELDS` data
+  columns) raise from `compute_composite` during the analysis phase rather
+  than "silently falling back to default" — this is intentional: when you
+  misconfigure, we make sure you know.
+* Startup-time validation: bucket name must ∈ the legal set, weight ≥ 0,
+  at least one > 0.
 
-#### 与现有 CSV 的关系
+#### Relationship to existing CSVs
 
-* `per_model_summary.csv` 语义不变（仍是混合后的均值），不影响下游；
-* `per_model_by_question_type.csv` / `per_model_by_choice_type.csv` 现在补全了 v5 离散家族列（FSS / Cohen κ / Hamming / Fleiss κ / mean entropy / VCI / MVG），列序与 `per_model_summary.csv` 一致；
-* `per_model_composite_*.csv` 列序也与 `per_model_summary.csv` 对齐（多一列 `weights_kind` 标记 `default` / `overridden`），下游脚本只要换文件路径就能读"按子题型加权后的总表"；
-* `composite_meta.json` 是审计跟踪：每个综合值实际用了哪些桶、归一化后的权重、每桶原始 slice 值都在里面，可以一对一复现。
+* `per_model_summary.csv` semantics are unchanged (still the mixed mean) —
+  no impact on downstream;
+* `per_model_by_question_type.csv` / `per_model_by_choice_type.csv` now
+  also include the v5 discrete-family columns (FSS / Cohen κ / Hamming /
+  Fleiss κ / mean entropy / VCI / MVG), with column order matching
+  `per_model_summary.csv`;
+* `per_model_composite_*.csv` column order is also aligned with
+  `per_model_summary.csv` (with one extra `weights_kind` column marking
+  `default` / `overridden`); downstream scripts only need to swap file
+  paths to read the "weighted-by-sub-question-type total table";
+* `composite_meta.json` is the audit trail: which buckets each composite
+  value actually used, the normalised weights, and the raw slice value per
+  bucket are all there, fully reproducible one-to-one.
 
-#### v5 离散家族的"按桶切"
+#### "Per-bucket slicing" of the v5 discrete family
 
-`fss` / `cohen_kappa` / `hamming_score` / `fleiss_kappa` / `mean_entropy` / `vci` / `mvg` 在 v5 主链路里是按 model 全局算的（写进 `per_model_summary.csv`）；做加权合成必须先按桶切再算，所以 `composite.slice_v5_metrics_by_bucket` 接管了这件事。其结果**同时**回流给 `per_model_by_*.csv`——用户读子题型明细表也能看到这些指标，不再是 NULL 占位。
-
----
-
-## 4. ReAct + Tool Use：把模型推理过程"摊开"
-
-### 4.1 整段 prompt 作为单条 user message
-
-模板就是一整块完整的 prompt（agent_role + event + outcomes + format + guidance），项目选择把它**整体作为单条 user message**喂进去，不再拆 system / user。
-
-理由：
-
-* **最忠实地复现源 metadata 的模板**：源数据 `dataset_metadata.features_json.prompt_reconstruction` 给的是一整块字符串，硬拆出 system 部分会丢失原始拼接的语义。
-* **跨模型一致**：不同 provider 对 system 的处理不一样（OpenAI 会强 cache，Anthropic 有独立字段）。统一走 user 消息能拿到最稳定的可比性。
-* **易于 hash 与对照**：整段 prompt 的内容直接写进 `user_prompt` 字段，未来任何模板变更都能通过 hash 一目了然。
-
-### 4.2 ReAct loop 的硬天花板
-
-每个 sample 有两道闸门：
-
-* `REACT_MAX_STEPS=12`：LLM 总共最多与系统交互 12 轮（启用反思协议或 nudge 后比单步直答多 2-4 轮，因此默认略高于历史值）。
-* `REACT_MAX_SEARCH_CALLS=8`：累计 8 次 `web_search` 之后，工具直接返回 `search budget exceeded` 给 LLM。
-
-设计哲学是**用预算定义"模型自主搜索"的上限**：
-
-* 没有上限，恶意/退化的模型可能调到天荒地老，把 API 账单烧穿。
-* 有上限的同时返回错误而不是抛异常，让 LLM 还能基于已有信息给出一个"尽力答案"，把"超预算"和"系统挂了"两件事区分开。
-
-超步数没给出 boxed 答案 → `parse_ok=0`，与拒答同样处理（§3.2）。
-
-### 4.2.1 反思协议：用 prompt 而不是用规则把模型拉离"一步直答"
-
-观察发现，部分模型平均只发 ~1.6 次搜索就给最终答案——这种"自信式一发"在面对长尾事件时会大幅拉低 `pass@1`。项目的回应分两层：
-
-* **首选：反思协议（`REACT_REFLECTION_PROTOCOL=true`，默认开）。** 在每条 sample 的 user message 末尾追加一段 *Forecasting Protocol*：拆题 → 列 ≥3 个不同检索角度 → 每次搜索后反思 → 交叉验证 → 反方向自检 → 给出置信度。这段附录**不写入 `dataset_metadata`**，因此 `prompt_templates_hash` 不变；它的存在通过 `run_meta.config_snapshot` 与每条 sample 的 `user_prompt` 字段一起持久化，可事后逐题对照。
-* **兜底：软性最低搜索次数（`REACT_MIN_SEARCH_CALLS`，默认 `0`=关）。** 当 LLM 在搜索次数不足时仍试图给最终答案，系统注入一条 user nudge 让它换个角度再搜一次；同一 sample 的 nudge 次数受 `REACT_MAX_NUDGES` 上限保护，整体仍受 `REACT_MAX_STEPS` 硬天花板约束。`ENABLE_WEB_SEARCH=false` 时 nudge 自动失效（无搜索可做）。
-
-设计哲学：
-
-* **优先用 prompt，不用规则。** 反思协议是"指导"，nudge 才是"限制"。先尝试用更好的指导让模型自发地多走几步，只有当模型仍然一意孤行时才上软性下限——避免把"评测的能力"和"系统的强制"搅在一起。
-* **可关、可对照。** 两个开关都默认值清晰，关闭后行为退化为旧版（同一份代码可以同时跑"开协议 vs 关协议"的对照实验）。
-* **可复盘。** 协议文本与 nudge 都会出现在 `messages_trace` 里；启停由 `config_snapshot` 锚定，**不是隐式行为**。
-
-### 4.3 工具调用错误的优雅降级
-
-ReAct 循环中，几种工具相关错误都不会中断整个 sample：
-
-| 情况                      | 处理                                                        |
-| ------------------------- | ----------------------------------------------------------- |
-| 未知 tool name            | 给 LLM 返回 `unknown tool`，让它自己换思路                  |
-| `arguments` JSON 解析失败 | 把错误信息发回去当 tool_result，LLM 可以重试                |
-| 搜索预算用尽              | tool_result 返回 `search budget exceeded`                   |
-| Tavily 自身报错           | 走 `SEARCH_BACKOFF_S` 重试，用完仍失败 → 把错误塞进 tool_result |
-
-设计哲学：**让 LLM 在系统视角下"看到"自己的失败，而不是替它兜底**。这样统计出来的能力数据更接近真实——一个不会处理工具失败的模型，本来就该被打分低一些。
-
-### 4.4 推理模型的"禁词"
-
-某些推理模型（o1 / o3 / r1 / qwq…）对 `temperature` / `top_p` 这种自定义采样参数会直接报 400。
-项目在 `.env` 里维护 `LLM_REASONING_MODEL_PATTERNS=o1,o3,o4,r1,qwq` 子串列表；命中的模型在调用时**不传**这两个参数。
-
-这是一个典型的"维护成本前置"设计：与其在 retry / error handling 里去识别 400，不如在请求构造前就把它处理掉。
+`fss` / `cohen_kappa` / `hamming_score` / `fleiss_kappa` / `mean_entropy` /
+`vci` / `mvg` are computed model-globally on the v5 main path (written into
+`per_model_summary.csv`); for weighted composition we must first slice by
+bucket and then compute, so `composite.slice_v5_metrics_by_bucket` takes
+this over. Its results are **also** routed back into `per_model_by_*.csv`
+— users reading the sub-question-type detail tables can now see these
+metrics too, instead of NULL placeholders.
 
 ---
 
-## 5. 数据存储：宽表 + 单 writer + 后置分析
+## 4. ReAct + Tool Use: "unfolding" the model's reasoning process
 
-### 5.1 为什么是宽表
+### 4.1 The whole prompt as a single user message
 
-每道题一行，每个 sample 一组 `s{i}_*` 列（v3 起 20 个字段：原 14 个 + 新增 6 个观测列）。
-对比"长表 + (question_id, sample_idx) 复合主键"，宽表的优势：
+The template is one entire prompt block (agent_role + event + outcomes +
+format + guidance); the project chooses to feed it in **as a single user
+message** rather than splitting into system / user.
 
-* **resume 查询天然简单**：`SELECT question_id WHERE s{i}_created_at IS NOT NULL` 直接扫一列，不需要 group by。
-* **单行原子读**：分析脚本读一行，所有 sample 全在；不需要 join 或聚合。
-* **schema 决定 N**：建表时就把 `SAMPLING_N` 钉死，后续无论何时打开 DB，结构都和当时一致。
+Reasoning:
 
-代价：`SAMPLING_N` 必须在 run 开始前确定，不能中途扩；schema 也需要"动态生成 20 × N 列"。这个代价在**评测场景下是可接受的**——`SAMPLING_N` 本来就属于 run 配置的一部分，不应该在 run 过程中变。
+* **Most faithfully reproduces the source metadata template**: the source
+  data `dataset_metadata.features_json.prompt_reconstruction` is a single
+  string; forcibly extracting a system part would lose the semantics of
+  the original concatenation.
+* **Cross-model consistency**: different providers handle system messages
+  differently (OpenAI hard-caches them, Anthropic uses an independent
+  field). Going uniformly through a user message gives the most stable
+  comparability.
+* **Easy to hash and diff**: the entire prompt content is written directly
+  into the `user_prompt` field, so any future template change is visible
+  through a hash at a glance.
 
-#### 为什么 `step_metrics` 用 JSON 列而不是单独长表
+### 4.2 Hard ceilings on the ReAct loop
 
-ReAct 每轮的单步指标天然是 1-to-N（一个 sample → 多个 step），看起来很想拆出
-`run_step_metrics(question_id, sample_idx, step, prompt, completion, ...)` 这种长表。
-项目最终把它压成 `s{i}_step_metrics TEXT`（JSON 数组）有三条理由：
+Each sample has two gates:
 
-* **没有跨 step 的查询需求**：分析层永远是"按 sample 取整段轨迹然后处理"，从来不
-  做 `SELECT * FROM steps WHERE finish_reason='length'` 这种行级聚合——所有过滤都
-  落在 sample 粒度。把这种数据正规化进表，相当于为不存在的查询付索引/JOIN 成本。
-* **保持单 writer per model 的简单性**：v3 把数据从 14 列扩到 20 列只是
-  `ALTER TABLE ADD COLUMN`，零复杂度；如果改成长表，就要新增第二张表 + 第二条
-  外键 + 第二条 INSERT 路径，writer 边界一下子从"一行 upsert"变成"多行事务"，
-  和 §5.2 的"用编排消除竞争"原则冲突。
-* **JSON 体量可控**：每 sample 的 step 数受 `REACT_MAX_STEPS`（默认 6）限制，单条
-  JSON 通常 < 1 KB；v3 schema 在 SAMPLING_N=3 / 题量 ~100 下，DB 增量在 KB 级，
-  WAL 完全吃得下。
+* `REACT_MAX_STEPS=12`: the LLM may interact with the system at most 12
+  rounds in total (enabling the reflection protocol or nudges adds 2-4
+  rounds beyond a single-step direct answer, so the default is slightly
+  higher than the historical value).
+* `REACT_MAX_SEARCH_CALLS=8`: after 8 cumulative `web_search` calls, the
+  tool returns `search budget exceeded` directly to the LLM.
 
-代价：长表能做的"按 step 聚合"在这里只能在 Python 里 reload + parse。考虑到分析
-脚本本来就是一次性脚本（`python -m forecast_eval.analysis`），这个代价可接受。
+The design philosophy is to **define an upper bound on "the model's
+autonomous searching" via a budget**:
 
-#### 为什么 `reflection_protocol_hash` 与 `prompt_templates_hash` 独立
+* Without a cap, malicious/degenerate models could call indefinitely and
+  burn through the API bill.
+* Capping while returning an error rather than throwing lets the LLM still
+  provide a "best-effort answer" based on existing information, and
+  separates "out of budget" from "system crashed".
 
-直觉上，反思协议是 prompt 的一部分，似乎应该并入 `prompt_templates_hash`。但项目
-故意把它单独拎出来，理由是**它们的变更节奏与解释维度不同**：
+Exceeding step count without producing a boxed answer → `parse_ok=0`,
+treated the same as a refusal (§3.2).
 
-* `prompt_templates_hash` 反映的是"题目内容是怎么渲染给模型的"——题干、选项、
-  指令、问题类型说明等的**模板**。模板一旦改动，所有题面都变了，这是一个粗粒度
-  的 run 区分键。
-* `reflection_protocol_hash` 反映的是"模型在 ReAct 主循环里被注入了哪段元认知
-  指令"，本质上是**搜索行为先验的开关**。它的变体只有三个轴：开/关、文本是否被
-  改、版本号。把它合进主模板 hash 会让"我只是关掉了反思"这种小变更看起来等价于
-  "我重写了所有题模板"——丢失了对照实验的解释力。
+### 4.2.1 Reflection protocol: pulling the model off "one-shot direct answer" with prompt rather than rules
 
-把两个 hash 分离的好处：跨 run 跑 A/B 比较时，可以选择"只允许
-`reflection_protocol_hash` 不同，其他全等"——这正是消融实验的常见诉求。同样地，
-`reflection_protocol_text`（全文）也并存于 `run_meta`，便于在不依赖 prompts.py
-源代码的情况下做事后比对（例如发布报告时对方拿到的是脱敏 DB 而不是 git repo）。
+We observed that some models give a final answer after only ~1.6 searches
+on average — this "confident one-shot" behaviour drastically lowers
+`pass@1` on long-tail events. The project responds in two layers:
 
-#### 为什么 `belief_protocol_hash` 也独立（v4）
+* **Preferred: reflection protocol (`REACT_REFLECTION_PROTOCOL=true`,
+  default on).** Append a *Forecasting Protocol* to the end of each
+  sample's user message: decompose the question → list ≥3 different
+  retrieval angles → reflect after each search → cross-validate → check
+  the opposite direction → state confidence. This addendum **is not
+  written into `dataset_metadata`**, so `prompt_templates_hash` does not
+  change; its existence is persisted through `run_meta.config_snapshot`
+  alongside each sample's `user_prompt` field, enabling per-question
+  diffing after the fact.
+* **Fallback: soft minimum search count (`REACT_MIN_SEARCH_CALLS`, default
+  `0`=off).** When the LLM tries to give a final answer with insufficient
+  searches, the system injects a user nudge asking it to try a different
+  angle and search again; the nudge count per sample is capped by
+  `REACT_MAX_NUDGES`, and the overall step count remains bounded by
+  `REACT_MAX_STEPS`. When `ENABLE_WEB_SEARCH=false` the nudge is
+  automatically disabled (no search to do).
 
-v4 引入的 `BELIEF_PROTOCOL` 同样是 user message 末尾的尾部追加段（追加在
-`REFLECTION_PROTOCOL` 之后），让 LLM 在 `\boxed{...}` 之前再输出一段
-`<belief>{...}</belief>` 严格 JSON，承载概率族指标的原料。和反思协议**完全
-平行**地处理：
+Design philosophy:
 
-* 协议正文 **不进** `dataset_metadata.prompt_reconstruction`、**不进**
-  `prompt_templates_hash`；
-* 在 `run_meta` 新增 `belief_protocol_text` / `belief_protocol_hash` 两列，
-  与 `reflection_protocol_*` 同源同语义；
-* `manifest.json` 顶层同时含 `reflection_protocol_hash` 与 `belief_protocol_hash`，
-  让"不开 DB 也能 grep 协议指纹"的检索路径覆盖两个协议；
-* 三个指纹（`prompt_templates_hash` / `reflection_protocol_hash` /
-  `belief_protocol_hash`）相互**独立**：换协议不影响主模板哈希、开关一个协议不
-  影响另一个协议的指纹，便于做 belief A/B、reflection A/B、模板 A/B 三路独立的
-  消融实验。
+* **Prompt first, rules second.** The reflection protocol is "guidance",
+  the nudge is "restriction". First try better guidance to make the model
+  walk a few more steps spontaneously, only impose a soft floor when the
+  model still insists — to avoid mixing "the capability under
+  evaluation" with "the system's enforcement".
+* **Toggleable, comparable.** Both switches have clear defaults, and
+  turning them off degrades to the old behaviour (the same code can run
+  "protocol on vs off" controlled experiments).
+* **Auditable.** The protocol text and nudges both appear in
+  `messages_trace`; the on/off state is anchored by `config_snapshot`, so
+  this is **not implicit behaviour**.
 
-belief 协议的解析路径（`parser.parse_belief`）也与 `parse_answer` 完全独立：
-belief 解析失败 MUST NOT 影响 `parse_ok` / `correct` / `final_answer_letters`，
-让 v3 那条已经验证过的 boxed 路径保持稳定，v4 只是**叠加**而非替换。
+### 4.3 Graceful degradation for tool-call errors
 
-#### Phase 2 calibration 用 LOO 而非 holdout（v4）
+Within the ReAct loop, several tool-related errors do not interrupt the
+whole sample:
 
-`forecast_eval/analysis/calibration.py` 的 Platt scaling 与 temperature
-scaling 都强制用 leave-one-out（每题 $q$ 的校准参数从 $\mathcal{Q}_t \setminus
-\{q\}$ 学）。理由：
+| Situation                  | Handling                                                       |
+| -------------------------- | -------------------------------------------------------------- |
+| Unknown tool name          | return `unknown tool` to the LLM and let it change tack        |
+| `arguments` JSON parse fails | send the error back as tool_result; the LLM can retry         |
+| Search budget exhausted    | tool_result returns `search budget exceeded`                   |
+| Tavily itself errors       | go through `SEARCH_BACKOFF_S` retries; if still failing → stuff the error into tool_result |
 
-* **N 偏小**：本数据集 319 题、按 cell 分层后每个 cell 50-150 题量级。在
-  这个量级上 holdout 划分会让校准参数高方差——同一 dataset 不同 split 出来
-  的 (a, b) 差异能到 ±0.3，足以让 ECE 比较失去意义。LOO 把每题都用上、
-  又没让该题污染自己的校准参数——这是论文 §C.11 的核心防过拟手段，本项目
-  照搬。
-* **算力够便宜**：Platt 用 IRLS 单次 ~10 次 Newton 迭代、每次 O(N) 算
-  Hessian。LOO 是 N 次 refit，naive 实现总开销 O(N²) ≈ 100k 浮点操作，
-  319 题 < 1s。Temperature 用黄金分割搜索 30 次评估、每次 O(N)，同样
-  sub-second。
-* **过拟哨兵已就位**：LOO 仍可能在小 cell 上过拟（特别是 multi 类的边角
-  cell）。`ModelCalibrationReport.overfit_warning` 在 `cal BI - uncal BI > 5`
-  时返回 True，`per_model_summary.md` 把模型名标 `cal*`——reviewer 一眼
-  就能看出这一行的校准结果不可信。
+Design philosophy: **let the LLM "see" its own failures from the system's
+perspective rather than papering over for it**. The capability numbers
+this produces are closer to reality — a model that cannot handle tool
+failures should naturally score lower.
 
-`scipy` 没有引入：IRLS 与黄金分割搜索都在 ~30 行纯 Python 写完，无依赖
-膨胀。如果未来 Phase 2.x 加 Dirichlet calibration 等需要更复杂数值方法的
-变种，再视情况按 design.md Open Q1 引入 scipy。
+### 4.4 "Forbidden words" for reasoning models
 
-#### Phase 3 confidence-calibration 联合诊断（v4）
+Some reasoning models (o1 / o3 / r1 / qwq…) directly return 400 on custom
+sampling parameters like `temperature` / `top_p`.
 
-`forecast_eval/analysis/behavior.py::confidence_calibration` 把模型自报的
-`confidence ∈ {low, medium, high}` 当成"主观置信"，把 $\max_l p_l$ 当成
-"数值置信"，分别和命中率对照。`confidence_conflict_models` 在两类断层上
-返回模型集合：
+The project maintains the substring list
+`LLM_REASONING_MODEL_PATTERNS=o1,o3,o4,r1,qwq` in `.env`; for matching
+models, those two parameters are **not passed** at call time.
 
-* **语言保守 + 数值过度自信**：`low` 桶 `mean_max_p > 0.70`，模型嘴上保守
-  但数字暴露真实信心；
-* **语言自信 + 数值不到位**：`high` 桶 `mean_max_p < 0.55`，模型口头吹自己
-  但 max_p 撑不起这个口径。
+This is a typical "shift maintenance cost forward" design: rather than
+identifying 400 inside retry / error handling, handle it at request
+construction time.
 
-命中其一 → `per_model_summary.md` 模型名后追加 `conflict*` 哨兵（与
-Phase 2 的 `cal*` 并列）。这是论文里**没有**的诊断维度——BLF 论文
-（arXiv 2604.18576v2）只覆盖二值预测，*language confidence* 与 *numeric
-max_p* 在 binary $p$ 下退化成同一信号；本项目把 yes_no / multiple_choice
-统一到 per-option Bernoulli 之后，两个量首次解耦：language confidence 是
-LLM 直接生成的离散 token，numeric max_p 是一阶概率向量的统计量，二者来源
-完全不同。当它们在系统性范围内不一致时，要么 prompt 没把"low/medium/high"
-和数值校准锚定上（calibration prompting failure），要么模型在写文字时
-做 hedge、在写数字时按真实 token logit 自相调（hedging-vs-revealing
-divergence）。前者通过 prompt 改写解决，后者是模型本征属性，
-反映了**模型 self-report 不可信**——和 chain-of-thought faithfulness
-研究指向同一个底层问题。
-`conflict*` 因此不是单纯的"过拟"哨兵，而是把"语言/数值不一致"作为新的
-质量维度暴露给 reviewer，让 prompt-engineering 与 reflection 协议设计有
-实证依据可循。
+---
 
-### 5.2 单 writer per model + WAL
+## 5. Data storage: wide table + single writer + post-hoc analysis
 
-并发写入 SQLite 是经典坑。项目的策略：
+### 5.1 Why a wide table
 
-* **每个模型 DB 一个 async writer task**：所有 worker 的结果通过 `asyncio.Queue` 发给该模型对应的 writer。
-* **`PRAGMA journal_mode=WAL` + `synchronous=NORMAL` + `busy_timeout=5000`**：单 writer 多 reader 下吞吐充足，且崩溃恢复仍然安全。
-* **批量提交**：每 `DB_COMMIT_BATCH=10` 条或 1 秒触发一次 flush。
+One row per question, with an `s{i}_*` group of columns per sample (since
+v3, 20 fields: original 14 + 6 newly added observation columns). Compared
+to a "long table + (question_id, sample_idx) composite primary key", the
+wide table's advantages:
 
-这套设计的核心思想：**用编排消除竞争，而不是用锁解决竞争**。一旦确定每个 DB 只有一个 writer，并发问题就退化成普通的单线程批量插入。
+* **Resume queries are naturally simple**: `SELECT question_id WHERE
+  s{i}_created_at IS NOT NULL` simply scans one column, no group by needed.
+* **Atomic single-row read**: the analysis script reads one row and has
+  every sample; no join or aggregation needed.
+* **Schema fixes N**: `SAMPLING_N` is pinned at table-creation time, so
+  whenever the DB is reopened in the future, the structure matches what it
+  was then.
 
-### 5.3 DB 只存原始观测，聚合全在 `analysis/` 后置算
+The cost: `SAMPLING_N` must be determined before the run starts and cannot
+be expanded mid-run; the schema also needs to "dynamically generate 20 × N
+columns". This cost **is acceptable in evaluation scenarios** —
+`SAMPLING_N` is by nature part of the run config and should not change
+mid-run.
+
+#### Why `step_metrics` uses a JSON column instead of a separate long table
+
+ReAct's per-round step metrics are naturally 1-to-N (one sample → multiple
+steps), and at first glance you'd want to factor them out into a long
+table like `run_step_metrics(question_id, sample_idx, step, prompt,
+completion, ...)`. The project ultimately compresses it into
+`s{i}_step_metrics TEXT` (a JSON array) for three reasons:
+
+* **No cross-step query need**: the analysis layer always "fetches the
+  whole trajectory by sample and then processes it"; it never does
+  row-level aggregation like `SELECT * FROM steps WHERE
+  finish_reason='length'` — every filter happens at sample granularity.
+  Normalising this data into a table would mean paying index/JOIN cost
+  for queries that don't exist.
+* **Preserves the simplicity of one writer per model**: v3 expanding from
+  14 to 20 columns was just `ALTER TABLE ADD COLUMN`, zero complexity;
+  switching to a long table would require a second table + a second
+  foreign key + a second INSERT path, and the writer boundary would
+  jump from "one-row upsert" to "multi-row transaction", conflicting
+  with §5.2's "eliminate races via orchestration" principle.
+* **JSON size is controllable**: the step count per sample is bounded by
+  `REACT_MAX_STEPS` (default 6); a single JSON is typically < 1 KB; on
+  v3 schema with SAMPLING_N=3 / ~100 questions, the DB delta is on the
+  order of KB — WAL handles it easily.
+
+The cost: "step-level aggregation" that a long table could do has to be
+done by reload + parse in Python here. Given that the analysis script is
+a one-shot script anyway (`python -m forecast_eval.analysis`), this cost
+is acceptable.
+
+#### Why `reflection_protocol_hash` is independent of `prompt_templates_hash`
+
+Intuitively, the reflection protocol is part of the prompt, so it seems
+natural to merge it into `prompt_templates_hash`. But the project
+deliberately pulls it out, because **their change cadence and
+explanatory dimensions differ**:
+
+* `prompt_templates_hash` reflects "how question content is rendered to
+  the model" — the **templates** for the stem, options, instructions,
+  question-type description, and so on. Once a template changes, every
+  question text changes — this is a coarse-grained run-distinguishing
+  key.
+* `reflection_protocol_hash` reflects "which meta-cognitive instruction
+  was injected into the model in the ReAct main loop", essentially **a
+  switch on a search-behaviour prior**. Its variation has only three
+  axes: on/off, whether the text was modified, version number. Merging
+  it into the main template hash would make a small change like "I just
+  turned reflection off" appear equivalent to "I rewrote every question
+  template" — losing the explanatory power for controlled experiments.
+
+The benefit of separating the two hashes: when running A/B comparisons
+across runs, you can choose "only `reflection_protocol_hash` differs,
+everything else equal" — this is exactly what ablation studies want.
+Similarly, `reflection_protocol_text` (full text) coexists in `run_meta`,
+to enable post-hoc diffs without depending on the prompts.py source code
+(e.g. when releasing a report, the recipient receives a redacted DB
+rather than the git repo).
+
+#### Why `belief_protocol_hash` is also independent (v4)
+
+The `BELIEF_PROTOCOL` introduced in v4 is also a tail addendum at the end
+of the user message (appended after `REFLECTION_PROTOCOL`), making the
+LLM emit a strict-JSON `<belief>{...}</belief>` segment before
+`\boxed{...}`, carrying the raw material for the probabilistic family of
+metrics. Treated **completely in parallel** with the reflection protocol:
+
+* Protocol body **not entered** into
+  `dataset_metadata.prompt_reconstruction`, **not entered** into
+  `prompt_templates_hash`;
+* Two new columns `belief_protocol_text` / `belief_protocol_hash` are
+  added to `run_meta`, with the same source and semantics as
+  `reflection_protocol_*`;
+* `manifest.json` top-level contains both `reflection_protocol_hash` and
+  `belief_protocol_hash`, so the "grep the protocol fingerprint without
+  opening the DB" retrieval path covers both protocols;
+* The three fingerprints (`prompt_templates_hash` /
+  `reflection_protocol_hash` / `belief_protocol_hash`) are mutually
+  **independent**: swapping one protocol does not affect the main
+  template hash, toggling one protocol does not affect the other
+  protocol's fingerprint — enabling three-way independent ablation
+  studies for belief A/B, reflection A/B, and template A/B.
+
+The belief protocol's parsing path (`parser.parse_belief`) is also fully
+independent of `parse_answer`: belief parse failures MUST NOT affect
+`parse_ok` / `correct` / `final_answer_letters`, keeping the v3 boxed
+path stable. v4 is **layered on**, not a replacement.
+
+#### Phase 2 calibration uses LOO instead of holdout (v4)
+
+Both Platt scaling and temperature scaling in
+`forecast_eval/analysis/calibration.py` are forced to use leave-one-out
+(the calibration parameters for question $q$ are learnt from
+$\mathcal{Q}_t \setminus \{q\}$). Reasoning:
+
+* **N is small**: this dataset has 319 questions, and after stratifying
+  by cell each cell holds 50-150 questions. At this scale, holdout
+  splits make calibration parameters high-variance — different splits of
+  the same dataset can yield (a, b) differences of ±0.3, enough to
+  render ECE comparisons meaningless. LOO uses every question and
+  prevents that question from polluting its own calibration parameters
+  — this is the core anti-overfit mechanism in the paper §C.11, and the
+  project copies it.
+* **Compute is cheap enough**: Platt with IRLS is ~10 Newton iterations
+  per fit, each O(N) for the Hessian. LOO is N refits; a naive total
+  cost of O(N²) ≈ 100k float ops, < 1s for 319 questions.
+  Temperature scaling uses golden-section search with 30 evaluations,
+  each O(N), also sub-second.
+* **Overfit sentinels are in place**: LOO can still overfit on small
+  cells (especially edge cells in the multi class).
+  `ModelCalibrationReport.overfit_warning` returns True when `cal BI -
+  uncal BI > 5`, and `per_model_summary.md` flags the model name with
+  `cal*` — reviewers can tell at a glance that this row's calibration
+  result is not trustworthy.
+
+`scipy` was not introduced: both IRLS and golden-section search are
+written in ~30 lines of pure Python with no dependency bloat. If a
+future Phase 2.x adds variants like Dirichlet calibration that need
+more sophisticated numerical methods, scipy will be introduced as
+needed per design.md Open Q1.
+
+#### Phase 3 confidence-calibration joint diagnosis (v4)
+
+`forecast_eval/analysis/behavior.py::confidence_calibration` treats the
+model's self-reported `confidence ∈ {low, medium, high}` as "subjective
+confidence" and $\max_l p_l$ as "numeric confidence", comparing both
+against hit rates. `confidence_conflict_models` returns a model set
+across two kinds of dislocations:
+
+* **Verbally conservative + numerically overconfident**: `low` bucket
+  with `mean_max_p > 0.70` — the model speaks conservatively but the
+  numbers expose its real confidence;
+* **Verbally confident + numerically underconfident**: `high` bucket
+  with `mean_max_p < 0.55` — the model boasts verbally but max_p
+  cannot back up that posture.
+
+Hitting either → `per_model_summary.md` appends a `conflict*` sentinel
+after the model name (alongside Phase 2's `cal*`). This is a diagnostic
+dimension **absent** from the paper — the BLF paper (arXiv 2604.18576v2)
+covers only binary prediction, where *language confidence* and *numeric
+max_p* degenerate into the same signal under binary $p$; only after
+this project unifies yes_no / multiple_choice to per-option Bernoulli
+do the two quantities decouple for the first time: language confidence
+is a discrete token directly generated by the LLM, numeric max_p is a
+statistic of the first-order probability vector — the two have totally
+different sources. When they are systematically inconsistent, either
+the prompt failed to anchor "low/medium/high" to the numerical
+calibration (calibration prompting failure), or the model hedges in
+prose while writing numbers from the actual token logits
+(hedging-vs-revealing divergence). The former is solvable by rewriting
+the prompt; the latter is a model-intrinsic property reflecting that
+**the model's self-report is unreliable** — pointing to the same
+underlying problem as chain-of-thought faithfulness research.
+`conflict*` is therefore not just an "overfit" sentinel, but an
+exposure of "verbal/numeric inconsistency" as a new quality dimension
+to reviewers, providing empirical grounding for prompt-engineering and
+reflection protocol design.
+
+### 5.2 One writer per model + WAL
+
+Concurrent writes to SQLite are a classic pitfall. The project's
+strategy:
+
+* **One async writer task per model DB**: every worker's results are
+  sent via `asyncio.Queue` to the writer for that model.
+* **`PRAGMA journal_mode=WAL` + `synchronous=NORMAL` +
+  `busy_timeout=5000`**: ample throughput under single-writer
+  multi-reader, with crash recovery still safe.
+* **Batched commits**: flush every `DB_COMMIT_BATCH=10` entries or
+  every 1 second.
+
+The core idea behind this design: **eliminate races via orchestration,
+don't solve races with locks**. Once we pin "one writer per DB", the
+concurrency problem degenerates into ordinary single-threaded batch
+inserts.
+
+### 5.3 The DB stores raw observations only; aggregation happens later in `analysis/`
 
 ```
 DB:        raw observations only
@@ -528,45 +835,57 @@ analysis/: aggregations
 └── error_breakdown
 ```
 
-这是项目最重要的一条架构决策之一。
+This is one of the project's most important architectural decisions.
 
-#### 为什么不在 DB 里预聚合？
+#### Why no pre-aggregation in the DB?
 
-* **指标定义会演进**：今天 `pass@3` 是 "3 中 1 算对"，明天可能改成 "至少 3 个对"。如果聚合落了库，每次改定义都要回填历史。把所有指标推迟到分析层算，随时可重刷。
-* **`analysis.py` 是纯函数**：输入 = `runs/{run_id}/db/*.db`，输出 = `analysis/*.csv|md|json`。可以独立 `python -m forecast_eval.analysis` 重跑。
-* **DB 与论文/报表解耦**：原始记录是工程产出，统计是产品/学术产出，二者节奏完全不同。
+* **Metric definitions evolve**: today `pass@3` is "1 of 3 counts as a
+  pass", tomorrow it might change to "at least 3 correct". If aggregation
+  lands in the DB, every redefinition requires a backfill. Deferring all
+  metrics to the analysis layer makes them re-computable at any time.
+* **`analysis.py` is a pure function**: input = `runs/{run_id}/db/*.db`,
+  output = `analysis/*.csv|md|json`. Can be re-run independently via
+  `python -m forecast_eval.analysis`.
+* **DB and paper/report are decoupled**: raw records are an engineering
+  artefact; statistics are a product/academic artefact — their cadences
+  are completely different.
 
-#### `pass@k` 命名的重新校准
+#### Recalibrating the `pass@k` naming
 
-业界 `pass@k` 一般指 "k 次里至少一次对"。项目早期用了 `pass@3 = sum(correct)≥3`（阈值口径），引发歧义。现在明确：
+In the wider community `pass@k` generally means "at least one correct in
+k". The project early on used `pass@3 = sum(correct)≥3` (a threshold
+semantic), which caused ambiguity. Now made explicit:
 
-* `pass_any@N` ≡ 业界 `pass@k`：N 次里至少一次对
-* `at_least_k_correct@N`：N 次里至少 k 次对（阈值分析）
-* `pass@1 avg`：N 次里平均的正确率（稳定能力）
-* `majority vote correct`：N 次的 frozenset 多数投票后是否正确（self-consistency）
+* `pass_any@N` ≡ standard `pass@k`: at least one correct in N
+* `at_least_k_correct@N`: at least k correct in N (threshold analysis)
+* `pass@1 avg`: average accuracy across N (stable capability)
+* `majority vote correct`: whether the majority-vote frozenset across N
+  is correct (self-consistency)
 
-设计哲学：**命名要么不歧义，要么显式声明自己的口径**。
+Design philosophy: **a name must either be unambiguous or explicitly
+declare its semantics**.
 
 ---
 
-## 6. 错误处理：把"失败"切成 8 种语义
+## 6. Error handling: slicing "failure" into 8 semantics
 
-错误处理表是 `FRAME.md §9`，但精神可以浓缩成几条原则。
+The error-handling table is `FRAME.md §9`, but the spirit can be condensed
+into a few principles.
 
-### 6.1 不是所有错误都该重试
+### 6.1 Not every error should be retried
 
-| 错误         | 重试？               | 理由                              |
-| ------------ | -------------------- | --------------------------------- |
-| Network/5xx  | 是（按退避序列）     | 多半是瞬态                        |
-| Rate limit   | 是（优先 Retry-After）| Provider 已经告诉你等多久         |
-| Auth 401/403 | **整个 run 停止**    | Key 错了重试无意义，越早停越省钱  |
-| Bad request  | 否                   | model_not_found 这种改了配置才能跑 |
-| Content policy | 否                 | 同样 prompt 再发一次结果一样      |
-| Refusal / parse fail | 否           | 不是错误，是模型行为              |
-| Tavily 自身 | 单独有 retry 序列    | 用完后把错误返回给 LLM            |
-| 训练截止过滤 | 不调用              | 直接写 `skipped_training_cutoff`  |
+| Error                | Retry?               | Reason                                    |
+| -------------------- | -------------------- | ----------------------------------------- |
+| Network/5xx          | Yes (per backoff sequence) | Mostly transient                       |
+| Rate limit           | Yes (prefer Retry-After) | The provider has told you how long to wait |
+| Auth 401/403         | **Stop the entire run** | The key is wrong; retrying is pointless and stopping early saves money |
+| Bad request          | No                   | Things like model_not_found only run after a config change |
+| Content policy       | No                   | The same prompt sent again returns the same result |
+| Refusal / parse fail | No                   | Not an error — it is model behaviour      |
+| Tavily itself        | Has its own retry sequence | Once exhausted, return the error to the LLM |
+| Training-cutoff filter | Not invoked        | Write `skipped_training_cutoff` directly  |
 
-### 6.2 三条独立退避序列
+### 6.2 Three independent backoff sequences
 
 ```
 LLM_BACKOFF_NETWORK_S=2,5,15,30,60
@@ -574,226 +893,305 @@ LLM_BACKOFF_RATE_LIMIT_S=10,30,60,120,300
 LLM_BACKOFF_SERVER_5XX_S=5,15,30,60,120
 ```
 
-不同错误类型走不同退避——rate limit 比 network 慢得多，因为前者通常需要分钟级冷却，后者多半几秒就好。退避序列长度同时决定了"最大重试次数"，配置统一在 `.env`。
+Different error types use different backoffs — rate limit is much slower
+than network, because the former typically needs minute-level cooldowns
+while the latter usually clears in a few seconds. The sequence length also
+determines the "max retry count"; configuration is unified in `.env`.
 
-### 6.3 错误分类码是报表的一等公民
+### 6.3 Error classification codes are first-class citizens of the report
 
-`error` 字段不是"出错就填 string"，而是固定的有限分类：
-`network` / `server_5xx` / `bad_request` / `content_policy` / `skipped_training_cutoff`
+The `error` field is not "fill in a string when something errors" but a
+fixed finite enum:
+`network` / `server_5xx` / `bad_request` / `content_policy` /
+`skipped_training_cutoff`
 
-`error_breakdown.csv` 直接按这个分类切片。设计哲学：**所有失败行为都要能在报表里被分类汇总**——一个 `error="something went wrong"` 是没用的。
+`error_breakdown.csv` slices directly by this classification. Design
+philosophy: **every failure behaviour must be categorisable and aggregatable
+in the report** — an `error="something went wrong"` is useless.
 
-#### 6.3.1 v5.1 harness-resilience：分类边界扩展
+#### 6.3.1 v5.1 harness-resilience: classification boundary expansion
 
-跨 provider 评测时遇到的两类常见误分类：
+Two common misclassifications encountered during cross-provider evaluation:
 
-- **Aliyun 内容审核 (`data_inspection_failed`) 被误归 `bad_request`**：
-  v5.0 的 `_body_matches` 只识别 `content_policy / content_filter / safety` 等
-  英文 needle，DashScope (`https://dashscope.aliyuncs.com`) 返回的
-  `code=data_inspection_failed` 落入兜底 `bad_request`。v5.1 把 needle 列表
-  统一到 `errors.CONTENT_POLICY_NEEDLES`，新增 `data_inspection_failed` /
-  `inappropriate content` 与中文 token (`敏感` / `违规` / `不当内容` /
-  `审核未通过`)，命中即归 `content_policy`、保持 `MUST NOT 重试` 语义。
-- **远端断连 `RemoteProtocolError` 被误归 `unknown`**：v5.0 的网络异常元组
-  只列了 `ConnectError` / `ReadTimeout` / `ConnectTimeout` / `WriteTimeout`，
-  `httpx.RemoteProtocolError` ("Server disconnected without sending a response.")
-  落到 `UNKNOWN`，整个 sample 失败而不重试。v5.1 把网络异常族扩到与 httpx
-  现有 `NetworkError` 子集对齐：`+RemoteProtocolError / +WriteError /
-  +PoolTimeout`，LLM 端 (`errors.classify`) 与 Tavily 端 (`search._single_request`)
-  同步扩展。
+- **Aliyun content moderation (`data_inspection_failed`) mis-bucketed as
+  `bad_request`**: v5.0's `_body_matches` only recognised English needles
+  like `content_policy / content_filter / safety`; the
+  `code=data_inspection_failed` returned by DashScope
+  (`https://dashscope.aliyuncs.com`) fell through to the catch-all
+  `bad_request`. v5.1 unified the needle list under
+  `errors.CONTENT_POLICY_NEEDLES`, adding `data_inspection_failed` /
+  `inappropriate content` / `sensitive`; on match → classify as
+  `content_policy`, preserving the `MUST NOT retry` semantics.
+- **Remote disconnect `RemoteProtocolError` mis-bucketed as `unknown`**:
+  v5.0's network exception tuple only listed `ConnectError` /
+  `ReadTimeout` / `ConnectTimeout` / `WriteTimeout`;
+  `httpx.RemoteProtocolError` ("Server disconnected without sending a
+  response.") fell into `UNKNOWN`, and the entire sample failed without
+  retry. v5.1 expanded the network exception family to align with httpx's
+  existing `NetworkError` subset: `+RemoteProtocolError / +WriteError /
+  +PoolTimeout`, with parallel expansion on the LLM side
+  (`errors.classify`) and the Tavily side (`search._single_request`).
 
-### 6.4 v5.1 ReAct 循环兜底机制
+### 6.4 v5.1 ReAct loop fallback mechanism
 
-跨模型对比时，**`parse_failure_rate` 必须只反映模型自身的格式失败，而非
-harness 上游的资源耗尽**。v5.0 在 `REACT_MAX_SEARCH_CALLS` 耗尽后仍向 LLM
-暴露 `web_search` schema，模型继续要工具撞 `REACT_MAX_STEPS` 上限，
-`final_raw=""` 直接 parse_ok=0。这把"工具饥渴"伪装成了"格式失败"。
+For cross-model comparisons, **`parse_failure_rate` must reflect only the
+model's own format failure, not upstream resource exhaustion in the
+harness**. In v5.0, after `REACT_MAX_SEARCH_CALLS` was exhausted the
+`web_search` schema was still exposed to the LLM; the model kept asking
+for the tool and hit the `REACT_MAX_STEPS` ceiling, with `final_raw=""`
+becoming parse_ok=0 directly. That disguised "tool starvation" as "format
+failure".
 
-v5.1 加了两道防线：
+v5.1 added two defences:
 
-- **D1**: `REACT_BUDGET_EXCEEDED_DROP_TOOLS=True`（默认开）— 一旦累计搜索数
-  达到上限，下一轮 `llm_chat` 调用 `tools=[]`，让模型只能输出 content；
-  原有 "no tool_calls → break" 分支自然兜住。
-- **D2**: `REACT_FINAL_ANSWER_RETRY=True`（默认开）— 如果循环正常退出但
-  `final_raw == ""`（典型场景：步数耗尽前还在反复 tool_call），追加一条
-  "Time to commit. Output your final \boxed{...} answer now without further
-  searches or tool calls." user 消息，再以 `tools=[]` 调一次 LLM。该重试
-  计入 `react_steps` 与 `step_metrics`（每步可复盘），不计入 `nudges_used`
-  （语义不同），新独立列 `final_answer_retry_used` 记录 0/1。
+- **D1**: `REACT_BUDGET_EXCEEDED_DROP_TOOLS=True` (default on) — once
+  cumulative searches reach the cap, the next `llm_chat` call passes
+  `tools=[]`, leaving the model only able to emit content; the existing
+  "no tool_calls → break" branch naturally takes over.
+- **D2**: `REACT_FINAL_ANSWER_RETRY=True` (default on) — if the loop exits
+  cleanly but `final_raw == ""` (typical scenario: still hammering
+  tool_calls just before steps run out), append a user message — "Time to
+  commit. Output your final \boxed{...} answer now without further
+  searches or tool calls." — and call the LLM once more with `tools=[]`.
+  This retry counts toward `react_steps` and `step_metrics` (every step
+  remains replayable) but NOT toward `nudges_used` (different semantics);
+  a new dedicated column `final_answer_retry_used` records 0/1.
 
-新分析列 `final_answer_retry_rate` 落在 `per_model_summary.csv`，让分析师
-可以单独看到"兜底兜了多少"，必要时再决定是否把它从 `pass_at_1` 分母里
-扣除。两个开关默认开，只用于 A/B 对照实验时关闭。schema 升级到 v5：
-`run_results` 每个 sample 槽位新增 `s{i}_final_answer_retry_used INTEGER`，
-旧 v4 DB 经 `init_schema` 自动 ALTER ADD（NULL 兼容）。
-
----
-
-## 7. 配置即合约：`.env` 是单一事实来源
-
-### 7.1 几乎所有可调项都在 `.env`
-
-CLI 只暴露 `--question-type` / `--choice-type` / `--skip-analysis` 三个 flag，其余全部走 `.env`。
-
-理由：
-
-* **复跑容易**：`.env` 一份就能完整复现配置；CLI flag 散在 shell history 里很容易丢。
-* **CI/调度兼容**：脚本执行时通常更愿意管文件而不是命令行。
-* **配置 ↔ DB 自洽**：`config_snapshot` 写进 `run_meta`，未来重看一次 run 就能知道"它当时的 `.env` 长什么样"（脱敏后）。
-
-### 7.2 OpenAI-compatible 端点：水平兼容
-
-`LLM_BASE_URL` 接受任何 OpenAI-compatible endpoint：OpenRouter、阿里百炼、OpenAI、DeepSeek、SiliconFlow、本地 vLLM 都行。
-
-设计哲学：**对接面要小、要标准**。OpenAI 的 chat completion + function calling 协议已经成了事实标准，本项目不去做 provider 适配层，而是把适配的责任外推给 endpoint。
-
-### 7.3 训练截止配置就是质量配置
-
-`MODEL_TRAINING_CUTOFFS=openai/gpt-5=2024-10-01,...` 不是可选项，是**评测公平性的一部分**。文档中明确建议每个参评模型都显式声明，未声明则不过滤（带警示）。
+The new analysis column `final_answer_retry_rate` lands in
+`per_model_summary.csv`, letting analysts see "how much the fallback
+caught" separately and decide, when necessary, whether to deduct it from
+the `pass_at_1` denominator. Both switches default on; turn them off only
+for A/B controlled experiments. Schema upgraded to v5: each sample slot
+in `run_results` adds `s{i}_final_answer_retry_used INTEGER`; old v4 DBs
+auto-ALTER ADD via `init_schema` (NULL-compatible).
 
 ---
 
-## 8. 测试：把昂贵的失败前置到便宜的本地
+## 7. Configuration as contract: `.env` is the single source of truth
 
-### 8.1 测试不能联网，不能烧 API
+### 7.1 Almost every tunable is in `.env`
 
-319 题 × 模型数 × N samples 的完整 run 是**几十到几百美金的事情**。一旦在那种规模上踩到 prompt / parser / schema bug，钱就白花了。
+The CLI exposes only three flags — `--question-type` / `--choice-type` /
+`--skip-analysis`; everything else goes through `.env`.
 
-测试设计的核心约束：
+Reasoning:
 
-* `tavily-python` 不能真的发请求 → `respx` mock httpx
-* OpenAI 客户端不能真的发请求 → fixture 替换
-* SQLite 走临时目录 → `tmp_path` fixture
-* 数据集要小但要"长得像真的" → 用源数据库里真实的几道题做 fixture
+* **Easy to re-run**: a single `.env` is enough to reproduce the entire
+  configuration; CLI flags scattered in shell history are easily lost.
+* **CI/scheduler-friendly**: scripted execution generally prefers
+  managing a file rather than a command line.
+* **Config ↔ DB self-consistency**: `config_snapshot` is written into
+  `run_meta`, so reviewing a run later tells you "what its `.env` looked
+  like at the time" (after redaction).
 
-### 8.2 五条 CI 红线
+### 7.2 OpenAI-compatible endpoint: horizontal compatibility
+
+`LLM_BASE_URL` accepts any OpenAI-compatible endpoint: OpenRouter, Aliyun
+Bailian, OpenAI, DeepSeek, SiliconFlow, local vLLM all work.
+
+Design philosophy: **the integration surface should be small and
+standard**. OpenAI's chat completion + function calling protocol has
+become the de facto standard; this project does not build a
+provider-adaptation layer, but pushes adaptation responsibility to the
+endpoint.
+
+### 7.3 Training-cutoff config is quality config
+
+`MODEL_TRAINING_CUTOFFS=openai/gpt-5=2024-10-01,...` is not optional — it
+is **part of evaluation fairness**. The docs explicitly recommend
+declaring an explicit cutoff for every model under evaluation; an
+unspecified model is not filtered (with a warning).
+
+---
+
+## 8. Testing: shifting expensive failures to cheap local runs
+
+### 8.1 Tests must not hit the network or burn the API
+
+A complete run of 319 questions × number of models × N samples is **a few
+tens to a few hundred dollars**. Tripping over a prompt / parser / schema
+bug at that scale just wastes the money.
+
+Core constraints of the test design:
+
+* `tavily-python` must not actually send requests → `respx` mocks httpx
+* The OpenAI client must not actually send requests → fixture replacement
+* SQLite uses a temporary directory → `tmp_path` fixture
+* The dataset must be small yet "look real" → use a few real questions
+  from the source DB as fixtures
+
+### 8.2 Five CI red lines
 
 ```
 test_prompts / test_parser / test_training_cutoff /
 test_llm_no_browsing / test_analysis
 ```
 
-这五条必须始终绿。它们覆盖的是项目最容易"悄悄坏掉"的部分：
+These five must always be green. They cover the parts of the project
+most likely to "silently break":
 
-| 测试                         | 守护的不变量                                      |
-| ---------------------------- | ------------------------------------------------- |
-| `test_prompts`               | prompt 模板渲染对三种 question_type 都正确        |
-| `test_parser`                | 字母解析与严格相等判分                            |
-| `test_training_cutoff`       | 训练截止过滤的语义和 resume 优先级                |
-| `test_llm_no_browsing`       | provider-native browsing 永远不会被偷偷打开       |
-| `test_analysis`              | 报表数值与原始 DB 对得上                          |
+| Test                         | Invariant guarded                                  |
+| ---------------------------- | -------------------------------------------------- |
+| `test_prompts`               | prompt template rendering is correct for all three question_types |
+| `test_parser`                | letter parsing and strict-equality scoring         |
+| `test_training_cutoff`       | training-cutoff filtering semantics and resume priority |
+| `test_llm_no_browsing`       | provider-native browsing is never silently turned on |
+| `test_analysis`              | report numbers reconcile with the raw DB           |
 
-设计哲学：**把"破坏会很贵"的不变量挑出来，用单测当哨兵**。
+Design philosophy: **pick the invariants whose breakage would be
+expensive, and use unit tests as sentinels**.
 
 ### 8.3 dry-run smoke test
 
-`test_smoke_dry_run.py` 用 httpx stub 替换 OpenRouter + Tavily，跑 3 题 × 1 模型 × 1 sample 的端到端流程。它不验证逻辑细节，验证的是"管道还通不通"——schema、宽表、`messages_trace` JSON、`search_calls` 字段是否都齐。
+`test_smoke_dry_run.py` replaces OpenRouter + Tavily with httpx stubs and
+runs an end-to-end pipeline of 3 questions × 1 model × 1 sample. It does
+not validate logic details — it validates "is the pipe still flowing":
+schema, wide table, `messages_trace` JSON, `search_calls` fields all
+present.
 
-这是把 e2e 与 unit 测试拆开的体现：单测验证"局部正确"，smoke 验证"集成不爆"。
+This expresses the e2e/unit test split: unit tests validate "local
+correctness", smoke tests validate "integration doesn't blow up".
 
 ---
 
-## 9. 可观测性：让每一次 sample 都可追溯
+## 9. Observability: every sample is traceable
 
-### 9.1 进度日志
+### 9.1 Progress log
 
 ```
 12:03:44 | INFO | [run=20260424-120344-a7k3] [5/1610] q=69566c13 qt=binary_named ct=single model=openai/gpt-5 sample=2/5 correct=True steps=4 tool_calls=3 latency=8421ms
 ```
 
-每条日志都带：question id、question_type、choice_type、model、sample_idx、是否正确、步数、工具调用次数、延迟。
+Every log line carries: question id, question_type, choice_type, model,
+sample_idx, correctness, step count, tool-call count, latency.
 
-设计哲学：**一条日志能完整描述一次 sample 在系统里走了什么路径**。看 log 等于看 trace，不需要再去 DB join 一遍。
+Design philosophy: **a single log line should fully describe what path a
+sample took through the system**. Reading the log is reading the trace —
+no DB join required.
 
-### 9.2 `messages_trace` 与 `search_calls`
+### 9.2 `messages_trace` and `search_calls`
 
-DB 里直接落两个 JSON：
+The DB stores two JSON blobs directly:
 
-* `messages_trace`：完整的 ReAct 消息序列（LLM 回复、tool_call、tool_result）。
-* `search_calls`：每次 `web_search` 调用的 query、end_date、结果数、各结果的 published_date。
+* `messages_trace`: the complete ReAct message sequence (LLM replies,
+  tool_call, tool_result).
+* `search_calls`: each `web_search` call's query, end_date, result count,
+  and per-result published_date.
 
-体积大（占 DB 的 ~80%），所以提供 `WRITE_MESSAGES_TRACE=false` 开关。
-但默认开着——理由：**调试一次失败的复盘价值远高于多占的几十 MB 磁盘**。
+These are large (~80% of the DB), so the `WRITE_MESSAGES_TRACE=false`
+switch is provided. But the default is on — reasoning: **the value of
+debugging one failure far outweighs the few extra MB of disk**.
 
-### 9.3 `loguru` + 结构化 + 双输出
+### 9.3 `loguru` + structured + dual output
 
-stderr（人看）+ rotating file（机器看）双通道；rotation 100 MB / retention 5。
-设计哲学：**人和机器读 log 的需求不一样，分开伺候**。
+stderr (for humans) + rotating file (for machines), two channels;
+rotation 100 MB / retention 5. Design philosophy: **humans and machines
+have different needs when reading logs — serve them separately**.
 
 ---
 
-## 10. 演进路径：openspec 驱动的 spec-first 变更
+## 10. Evolution path: spec-first changes driven by openspec
 
-项目根目录有 `openspec/changes/`，里面用 spec 形式记录变更。`bootstrap-forecast-eval` 是初始 bootstrap 记录。
+The repo root contains `openspec/changes/`, where changes are recorded in
+spec form. `bootstrap-forecast-eval` is the initial bootstrap record.
 
-设计哲学：
+Design philosophy:
 
-* **变更先写 spec、再写代码**：避免"代码 merge 后才发现设计有问题"。
-* **变更档案与代码 diff 并存**：将来回看一次架构演进时，能看到"为什么改"，而不只是"改了什么"。
+* **Write the spec before the code**: avoid "discovering the design is
+  wrong only after the code is merged".
+* **Change archive and code diff coexist**: when reviewing the
+  architectural evolution later, you can see "why we changed it", not
+  just "what was changed".
 
-### 10.1 grid search via virtual slug（C 方案）
+### 10.1 Grid search via virtual slug (option C)
 
-`react-tavily-grid-search` 把 *(Q × M × N)* 三轴拓展为
-*(Q × M × R × C × N)*，但**不**升级 schema，**不**动 runner 核心循环。
-方法是在 evaluation 入口把每个 `(real_model, R, C)` 三元组编码成
-**虚拟 model slug** `{real}::r{R}::c{C}`，runner / DB / analysis 主流程把
-它当不透明字符串走完——既有产物自然按虚拟 slug 多行展开，新模块
-`forecast_eval/analysis/grid.py` 反解三元组、重聚合、出 paper 长表与图。
-完整决策档案见 `openspec/changes/react-tavily-grid-search/design.md`，
-关键 10 条摘要：
+`react-tavily-grid-search` extends the *(Q × M × N)* three-axis space to
+*(Q × M × R × C × N)*, but **without** schema upgrade and **without**
+touching the runner core loop. The method: at the evaluation entrypoint
+encode each `(real_model, R, C)` triple as a **virtual model slug**
+`{real}::r{R}::c{C}`; runner / DB / analysis main pipeline treats it as
+an opaque string — existing artefacts naturally expand into multiple
+rows by virtual slug, while the new module
+`forecast_eval/analysis/grid.py` decodes the triple, re-aggregates, and
+emits paper long tables and figures. Full decision archive in
+`openspec/changes/react-tavily-grid-search/design.md`; the 10 key
+decisions:
 
-| ID | 决策 |
+| ID | Decision |
 | --- | --- |
-| **D1** | 选 C 方案（虚拟 slug + per-task settings 视图）；拒绝 A（单 run 多 (R, C) DB——schema v5 重写）和 B（每 cell 一个 run_dir——`runs/` 膨胀 + 跨 run 聚合复杂） |
-| **D2** | 虚拟 slug 用 `::r{R}::c{C}` 后缀；`db.model_slug_safe` 把 `::` 替换为 `_` 后落 fs-safe 文件名 `openai__gpt-5__r5__c3.db`；正则 `^(?P<real>.+?)::r(?P<R>\d+)::c(?P<C>\d+)$` non-greedy 抓 real_model |
-| **D3** | `runner.Task` 携带 cell-local `settings: Settings`；dispatcher 用 `model_copy(update={...})` 派生不可变子视图；`react.py` / `search.py` 字节级不动 |
-| **D4** | `REACT_MIN_SEARCH_CALLS > min(C_list)` 才 raise；某 cell `C < MIN` 时 silent clamp `effective_min = min(MIN, C)`，写到 `run_meta.config_snapshot.grid_origin` 留审计 |
-| **D5** | `run_meta.config_snapshot` 写**单值** R/C；新增 `grid_origin = {real_model, R, C, effective_min_search_calls}` 子键；manifest 顶层加 `grid` 段（`r_list / c_list / default_r / default_c / real_models / n_cells`），分析层不必逐 .db 反解三元组 |
-| **D6** | `manifest.models` / `manifest.model_files` 字段语义保持"虚拟 slug 列表"；新增 `grid.real_models` 是去重后的真实 slug 便利字段——v4 analysis 主流程读 `manifest.models` 当 db 文件清单的契约不破 |
-| **D7** | `analysis/__init__.py::run_analysis` 主路径**零侵入**；末尾追加一次 `grid.run_grid_analysis(...)`，用 `try/except` 包裹（与 reflection A/B 同款 best-effort），失败不中断既有流水线 |
-| **D8** | grid CI 全部走 `inference.paired_bootstrap`（5000 次重抽，seed=42）；BI 域 CI 通过"BS 域 paired bootstrap + 单调变换 $\mathrm{BI}=100(1-\sqrt{\mathrm{BS}})$"得到——**不**新增统计代码 |
-| **D9** | Pareto 前沿 cost 维度默认 `mean_search_calls`（实际平均搜索次数，比 C 上限诚实），允许 `mean_latency_ms / C` fallback；y 轴默认 `bi_mean`，可选 `nll_mean`（最小化方向） |
-| **D10** | Fig 1 主图固定 `R = GRID_DEFAULT_R`，每个 real_model 一条曲线；其它 R 值各出一张同款附录图，避免主图叠加 M·\|R\| 条曲线后不可读 |
+| **D1** | Pick option C (virtual slug + per-task settings view); reject A (single run, multi-(R, C) DB — schema v5 rewrite) and B (one run_dir per cell — `runs/` bloat + complex cross-run aggregation) |
+| **D2** | Virtual slug uses `::r{R}::c{C}` suffix; `db.model_slug_safe` replaces `::` with `_` to land an fs-safe filename `openai__gpt-5__r5__c3.db`; the regex `^(?P<real>.+?)::r(?P<R>\d+)::c(?P<C>\d+)$` non-greedy captures real_model |
+| **D3** | `runner.Task` carries a cell-local `settings: Settings`; the dispatcher derives an immutable sub-view via `model_copy(update={...})`; `react.py` / `search.py` are byte-unchanged |
+| **D4** | Only raise when `REACT_MIN_SEARCH_CALLS > min(C_list)`; for a cell with `C < MIN`, silent clamp `effective_min = min(MIN, C)` and record it under `run_meta.config_snapshot.grid_origin` for audit |
+| **D5** | `run_meta.config_snapshot` writes **single-valued** R/C; add a `grid_origin = {real_model, R, C, effective_min_search_calls}` sub-key; manifest top-level adds a `grid` block (`r_list / c_list / default_r / default_c / real_models / n_cells`) so the analysis layer doesn't have to decode the triple per .db |
+| **D6** | `manifest.models` / `manifest.model_files` field semantics remain "list of virtual slugs"; the new `grid.real_models` is a deduped real-slug convenience field — v4 analysis main path's contract of "read `manifest.models` as the db file list" is preserved |
+| **D7** | `analysis/__init__.py::run_analysis` main path is **zero-intrusive**; append a `grid.run_grid_analysis(...)` at the end wrapped in `try/except` (same best-effort pattern as reflection A/B), failures do not interrupt the existing pipeline |
+| **D8** | Grid CIs all go through `inference.paired_bootstrap` (5000 resamples, seed=42); BI-domain CIs are obtained via "BS-domain paired bootstrap + monotone transform $\mathrm{BI}=100(1-\sqrt{\mathrm{BS}})$" — **no** new statistical code introduced |
+| **D9** | Pareto frontier's cost dimension defaults to `mean_search_calls` (actual mean search count, more honest than the C ceiling), with `mean_latency_ms / C` fallback allowed; y-axis defaults to `bi_mean`, with `nll_mean` (minimisation direction) as an option |
+| **D10** | Fig 1 main figure pins `R = GRID_DEFAULT_R` with one curve per real_model; other R values each get a same-format appendix figure to avoid main-figure unreadability after stacking M·\|R\| curves |
 
-`Phase 0 / 1 / 2` 三个 PR 顺序 ship——每阶段都通过 `pytest -q` 与
-`openspec validate --strict`，且每阶段删掉自身代码后系统等价于上阶段
-完成态（Rollback Strategy）。单值 .env 在新代码下解析为长度 1 列表
-→ 笛卡尔生成单一虚拟 slug，**唯一**可见差异是 .db 文件名多了
-`__r{R}__c{C}` 后缀；既有 v4 run（manifest 无 `grid` 段）下 grid
-分析与 grid 图族整体早退，零侵入。
-
----
-
-## 11. 设计一致性原则汇总
-
-把全文的设计哲学浓缩成一组原则，放在最后供 review 时参照：
-
-1. **隔离 > 信任**：能在 Tool 层管住的边界，绝不交给 prompt。
-2. **诚实 > 漂亮**：威胁模型里管不住的部分，明文写在文档里。
-3. **跳过 ≠ 失败**：主动剔除的样本独立分类，不污染错误率。
-4. **原始 > 聚合**：DB 只存观测，统计推迟到 `analysis/` 算。
-5. **严格 > 慷慨**：评分用 frozenset 严格相等；offset 默认偏严格 `-1`。
-6. **可复现 > 方便**：源数据进 Git，每个 DB 自包含，hash 钉死指纹。
-7. **可观测 > 优雅**：完整 messages_trace 默认开；进度日志一行一 sample。
-8. **失败要分类**：错误用有限分类码，报表里每种都有自己的格子。
-9. **配置即合约**：`.env` 一份决定一切，CLI flag 极少。
-10. **测试守住贵的**：五条 CI 红线 + dry-run smoke，把昂贵的失败前置到本地。
+The three PRs `Phase 0 / 1 / 2` ship sequentially — each phase passes
+`pytest -q` and `openspec validate --strict`, and after deleting the
+phase's own code the system is equivalent to the previous phase's
+completed state (Rollback Strategy). Single-value `.env` parses under
+the new code as a length-1 list → Cartesian product produces a single
+virtual slug, with the **only** visible difference being the
+`__r{R}__c{C}` suffix on the .db filename; for legacy v4 runs (manifest
+without a `grid` block), grid analysis and the grid figure family
+early-exit altogether — zero intrusion.
 
 ---
 
-## 12. 阅读路线图
+## 11. Summary of design-consistency principles
 
-如果你刚接触本项目，建议按这个顺序读：
+Condensing the full document's design philosophy into a single set of
+principles, placed at the end for review reference:
 
-1. `README.md` —— 5 分钟搞清楚这是什么、怎么跑。
-2. 本文（`DESIGN.md`）—— 理解每一处取舍背后的动机。
-3. `FRAME.md` —— 字段级、接口级、伪代码级的完整规范。
-4. `forecast_eval/prompts.py` + `forecast_eval/parser.py` —— 评分核心，两文件几乎是项目的"心脏"。
-5. `forecast_eval/runner.py` + `forecast_eval/react.py` —— 编排与 ReAct 循环。
-6. `tests/` —— 看测试反向理解契约。
-7. `openspec/changes/archive/` —— 想知道为什么变成今天这样，回这里看。
+1. **Isolation > trust**: any boundary that can be enforced at the tool
+   layer must never be delegated to the prompt.
+2. **Honesty > prettiness**: parts of the threat model we cannot control
+   are written into the documentation in plain language.
+3. **Skip ≠ fail**: actively excluded samples are categorised
+   independently and do not pollute the error rate.
+4. **Raw > aggregated**: the DB stores observations only; statistics are
+   deferred to `analysis/`.
+5. **Strict > generous**: scoring uses frozenset strict equality; the
+   offset defaults to a strict `-1`.
+6. **Reproducibility > convenience**: source data goes into Git, each DB
+   is self-contained, hashes pin down the fingerprint.
+7. **Observability > elegance**: full messages_trace is on by default;
+   the progress log is one line per sample.
+8. **Categorise failures**: errors use a finite enum; every kind has its
+   own cell in the report.
+9. **Config as contract**: `.env` alone decides everything; CLI flags
+   are minimal.
+10. **Tests guard the expensive**: five CI red lines + dry-run smoke,
+    shifting expensive failures to local.
 
 ---
 
-> **总结成一句话**：
-> 这是一个"用工程纪律守住科学严谨"的项目——所有看似过度的约束（信息隔离、严格匹配、字母 canonical 编码、宽表 + 单 writer、错误分类、CI 红线）都是为了让最终报表里那个数字真的有意义。
+## 12. Reading roadmap
+
+If you are new to the project, we suggest reading in this order:
+
+1. `README.md` — figure out in 5 minutes what this is and how to run it.
+2. This document (`DESIGN.md`) — understand the motivation behind each
+   trade-off.
+3. `FRAME.md` — the complete spec at field, interface, and pseudocode
+   level.
+4. `forecast_eval/prompts.py` + `forecast_eval/parser.py` — the scoring
+   core; these two files are practically the "heart" of the project.
+5. `forecast_eval/runner.py` + `forecast_eval/react.py` — orchestration
+   and the ReAct loop.
+6. `tests/` — read tests to reverse-engineer the contract.
+7. `openspec/changes/archive/` — to find out why things became what they
+   are today, come here.
+
+---
+
+> **Summed up in one sentence**:
+> This is a project that "uses engineering discipline to safeguard
+> scientific rigour" — every seemingly excessive constraint (information
+> isolation, strict matching, canonical letter encoding, wide table +
+> single writer, error classification, CI red lines) exists so that the
+> number in the final report actually means something.

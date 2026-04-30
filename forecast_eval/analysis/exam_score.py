@@ -1,8 +1,9 @@
-"""考试式部分得分（Exam-style partial credit）—— 单文件、可整体摘除。
+"""Exam-style partial credit — single-file, fully removable as a unit.
 
-## 公式
+## Formula
 
-对单个 sample，记题目正确答案集 $G$、模型解析出的选项集 $\\hat S$：
+For a single sample, denote the question's correct-answer set as $G$ and
+the model's parsed option set as $\\hat S$:
 
 $$
 \\text{exam\\_score}(\\hat S, G) = \\begin{cases}
@@ -11,38 +12,47 @@ $$
 \\end{cases}
 $$
 
-聚合采用题内均值 → 题间均值的两步：先对 $q$ 题在基数内的样本算 $e_q$，再对所有
-题等权求平均；任一步空基数返 `None`。
+Aggregation uses two steps: per-question mean -> across-question mean.
+First compute $e_q$ for each question $q$ over the in-base samples, then
+take the equal-weight mean across all questions; an empty base at either
+step returns `None`.
 
-## 语义
+## Semantics
 
-把 SAMPLING_N 在该指标视角下重新解读为"独立测验次数"：每次测验得分独立 0~1，
-最终取算术均值。形式上等价于 **"Recall under zero-FP gate"** —— 把 Recall
-加一个"任何 FP 都一票否决"的硬门。
+Reinterprets SAMPLING_N from this metric's perspective as "the number of
+independent exam attempts": each attempt scores independently in 0~1, and
+the arithmetic mean is taken at the end. Formally equivalent to
+**"Recall under zero-FP gate"** — Recall with an added hard gate of
+"any FP triggers a veto".
 
-## 与既有评分的差异
+## Differences from existing scores
 
-| 指标 | 公式形态 | 错选惩罚 | 漏选惩罚 | 单选退化 |
+| Metric | Formula | FP penalty | FN penalty | Single-choice degeneracy |
 | --- | --- | --- | --- | --- |
-| `parser.is_correct`（strict） | $\\hat S = G$ 才得 1 | 0 分 | 0 分 | 0/1 |
-| `tversky_score(α=2,β=0.5)`+chance correction → `fss` | 软惩罚 FP/FN | α 倍 | β 倍 | 含 chance |
-| `hamming_score` | $1 - \\text{XOR位数}/k$ | 与漏选对称 | 与错选对称 | 0/1 |
-| **`exam_score`（本文件）** | TP/|G|·𝟙(FP=0) | 一票否决 | 按比例扣分 | 0/1 |
+| `parser.is_correct` (strict) | only $\\hat S = G$ scores 1 | 0 | 0 | 0/1 |
+| `tversky_score(alpha=2,beta=0.5)`+chance correction -> `fss` | soft FP/FN penalty | alpha-fold | beta-fold | with chance |
+| `hamming_score` | $1 - \\text{XOR-bits}/k$ | symmetric to FN | symmetric to FP | 0/1 |
+| **`exam_score` (this file)** | TP/|G|·1(FP=0) | veto | proportional deduction | 0/1 |
 
-`exam_score` 的卖点是"用一句话能解释"：含错选 0 分，否则按答对比例给分。
+`exam_score`'s selling point is "explainable in one sentence": any FP
+scores 0, otherwise it scores by the correct-answer proportion.
 
-## 摘除等价性约束
+## Removal-equivalence constraint
 
-本文件、`tests/test_exam_score.py`、`accuracy.py` / `writers.py` 中带 grep-able
-注释标记的少量挂接点、`README.md` / `DESIGN.md` / `FRAME.md` / `.env.example`
-中带 HTML 注释包裹的段落，共同构成可一次性整体移除的最小闭包。删除后仓库须
-回到本次改动前的字节级一致状态（既有测试全 pass、CSV 既有列字节相同、文档段落
-无残留）。Marker 字面值见 `openspec/changes/add-exam-score-metric/design.md` §D8。
+This file, `tests/test_exam_score.py`, the few hook points in `accuracy.py` /
+`writers.py` carrying grep-able comment markers, and the segments wrapped
+in HTML comments inside `README.md` / `DESIGN.md` / `FRAME.md` /
+`.env.example` together form a minimal closure that can be removed in one
+shot. After removal, the repository must return to a byte-identical state
+prior to this change (existing tests must all pass, existing CSV columns
+must be byte-identical, no residue in documentation segments). Marker
+literals are in `openspec/changes/add-exam-score-metric/design.md` §D8.
 
-允许依赖范围：标准库、`flatten.SampleRow`、`flatten._group_by_question`。
-SHALL NOT 反向依赖 `accuracy.py` / `proper_score.py` / `consistency.py` /
-`writers.py` / `inference.py` / `behavior.py` / `grid.py`，否则摘除时无法定位
-最小闭包。
+Allowed dependency surface: standard library, `flatten.SampleRow`,
+`flatten._group_by_question`. SHALL NOT reverse-depend on `accuracy.py` /
+`proper_score.py` / `consistency.py` / `writers.py` / `inference.py` /
+`behavior.py` / `grid.py`; otherwise the minimal closure cannot be located
+during removal.
 """
 from __future__ import annotations
 
@@ -50,16 +60,20 @@ from .flatten import SampleRow, _group_by_question
 
 
 def exam_score(s: SampleRow, gt: frozenset[str]) -> float | None:
-    """单 sample 考试式得分；进基数→浮点 [0,1]，剔除→`None`。
+    """Per-sample exam-style score; included in base -> float in [0,1],
+    skipped -> `None`.
 
-    判定顺序：
-      1. `is_cutoff`（题目晚于训练截止）→ `None`，剔除（信息屏障）；
-      2. `error is not None` 且非 cutoff → `None`，剔除（"未完成过程"）；
-      3. `error is None` 且 `parse_ok != 1` → `0.0`，进基数（"完成但答错"）；
-      4. `parsed_letters is None`（防御性）→ `0.0`，进基数；
-      5. 含错选（FP > 0）→ `0.0`，进基数；
-      6. 防御 `gt` 空集 → `0.0`；
-      7. 否则 → $|\\hat S \\cap G| / |G|$，进基数。
+    Decision order:
+      1. `is_cutoff` (question dated after training cutoff) -> `None`,
+         skipped (information barrier);
+      2. `error is not None` and not cutoff -> `None`, skipped
+         ("process did not complete");
+      3. `error is None` and `parse_ok != 1` -> `0.0`, included in base
+         ("completed but answered wrong");
+      4. `parsed_letters is None` (defensive) -> `0.0`, included in base;
+      5. Contains FP (FP > 0) -> `0.0`, included in base;
+      6. Defensive `gt` empty -> `0.0`;
+      7. Otherwise -> $|\\hat S \\cap G| / |G|$, included in base.
     """
     if s.is_cutoff:
         return None
@@ -81,15 +95,19 @@ def exam_score_at_n_avg(
     samples: list[SampleRow],
     gt_map: dict[str, frozenset[str]],
 ) -> float | None:
-    """题内均值 → 题间均值的两步聚合。
+    """Two-step aggregation: per-question mean -> across-question mean.
 
-    Step 1（题内）：对每题 $q$ 取基数内 sample 的 `exam_score` 算术均值得 $e_q$；
-    若该题全部 sample 均剔除（基数为 0），$e_q = \\text{None}$ 不参与全局。
+    Step 1 (per-question): for each question $q$, take the arithmetic mean
+    of `exam_score` over in-base samples to get $e_q$; if every sample of
+    that question is skipped (base of 0), $e_q = \\text{None}$ does not
+    participate in the global.
 
-    Step 2（题间）：对所有 $e_q \\ne \\text{None}$ 的题等权求均值；若全局基数为 0
-    返 `None`（不返 0.0 / NaN / 抛异常）。
+    Step 2 (across-question): take the equal-weight mean across all
+    questions where $e_q \\ne \\text{None}$; if the global base is 0,
+    return `None` (not 0.0 / NaN / raising).
 
-    `gt_map` 缺该 question_id 时该题被跳过（防御边界，理论数据不会出现）。
+    When `gt_map` is missing this question_id, the question is skipped
+    (defensive edge; not expected in practice).
     """
     by_q = _group_by_question(samples)
     e_q_values: list[float] = []

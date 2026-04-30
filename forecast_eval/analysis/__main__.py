@@ -1,8 +1,9 @@
 """CLI entry: `python -m forecast_eval.analysis RUNS_ROOT/{run_id}`.
 
 Kept as a thin wrapper so `run_analysis` stays importable without argparse
-overhead. composite-score-by-subtype: 在 ``.env`` 可读时, 把子题型权重透传
-给 ``run_analysis``; 否则回退到默认权重 (与 ``Settings`` 默认值同义)。
+overhead. composite-score-by-subtype: when ``.env`` is readable, pass the
+subtype weights through to ``run_analysis``; otherwise fall back to default
+weights (synonymous with ``Settings`` defaults).
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ def _cli(argv: list[str] | None = None) -> int:
         from ..config import load_settings
 
         cfg = load_settings()
-    except Exception:  # noqa: BLE001 — .env 缺失或 LLM_API_KEY 未填都会进来
+    except Exception:  # noqa: BLE001 — covers missing .env or unset LLM_API_KEY
         cfg = None
     if cfg is not None:
         kwargs.update(
