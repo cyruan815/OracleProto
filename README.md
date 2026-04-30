@@ -82,7 +82,7 @@ continues into that same folder.
 
 ## Output layout
 
-```
+```text
 runs/
   {run_id}/
     manifest.json           # run-level metadata: run_id, schema_version,
@@ -249,8 +249,8 @@ Each model DB holds:
   The two protocol fingerprints are independent of `prompt_templates_hash`
   and of each other — see DESIGN.md §5 for why.
 * **`run_results` wide table** — one row per question:
-  - `question_id` (PK), `user_prompt` (rendered once per question)
-  - for each `i` in `0..SAMPLING_N-1`, a `s{i}_*` group of columns
+  * `question_id` (PK), `user_prompt` (rendered once per question)
+  * for each `i` in `0..SAMPLING_N-1`, a `s{i}_*` group of columns
     (v3 = 20 columns; v4 adds 3 belief columns):
     `final_answer_letters / final_answer_raw / correct / parse_ok /
     tool_calls_count / react_steps / prompt_tokens / completion_tokens /
@@ -259,7 +259,7 @@ Each model DB holds:
     `finish_reason / nudges_used / step_metrics / response_id /
     system_fingerprint / service_tier` (v3 observability) +
     `belief_final / belief_trace / belief_parse_ok` (v4 belief).
-  - Old DBs are auto-migrated via `ALTER TABLE ADD COLUMN` on first re-open;
+  * Old DBs are auto-migrated via `ALTER TABLE ADD COLUMN` on first re-open;
     `Settings.BELIEF_PROTOCOL=false` keeps the new belief columns NULL and
     leaves all v3 accuracy metrics byte-identical to pre-v4 runs.
 
@@ -331,7 +331,7 @@ plus a paper figure family under `analysis/figs/`.
 
 Example `.env` snippet:
 
-```
+```bash
 MODELS=openai/gpt-5,anthropic/claude-sonnet-4.5
 TAVILY_MAX_RESULTS=5,10
 REACT_MAX_SEARCH_CALLS=1,3,5,8
@@ -354,10 +354,10 @@ the grid in slug strings rather than introducing a new schema axis.
 
 ## Resume semantics
 
-- `s{i}_created_at IS NOT NULL` and `s{i}_error IS NULL` → finished, not retried.
-- `s{i}_error = 'skipped_training_cutoff'` → actively filtered by
+* `s{i}_created_at IS NOT NULL` and `s{i}_error IS NULL` → finished, not retried.
+* `s{i}_error = 'skipped_training_cutoff'` → actively filtered by
   `MODEL_TRAINING_CUTOFFS`, not retried.
-- Any other `s{i}_error` value (`network`, `server_5xx`, `bad_request`,
+* Any other `s{i}_error` value (`network`, `server_5xx`, `bad_request`,
   `content_policy`, …) → next run reuses the DB and retries that
   `(question_id, sample_idx)` cell.
 
@@ -366,14 +366,14 @@ the grid in slug strings rather than introducing a new schema axis.
 Two opt-out switches default ON; toggle to `false` in `.env` only for A/B
 controls (`openspec/changes/harness-resilience-v1/`):
 
-- `REACT_FINAL_ANSWER_RETRY` — when the ReAct loop exits cleanly with an
+* `REACT_FINAL_ANSWER_RETRY` — when the ReAct loop exits cleanly with an
   empty `final_raw` (model spent all steps on tool_calls and never produced
   content), make one extra `llm_chat` call with `tools=[]` and a fixed
   "commit your `\boxed{...}` answer" user nudge. The retry counts as one
   step in `react_steps` / `step_metrics` but NOT in `nudges_used`. The new
   per-sample column `final_answer_retry_used` (0/1) records the outcome and
   rolls up to `final_answer_retry_rate` in `per_model_summary.csv`.
-- `REACT_BUDGET_EXCEEDED_DROP_TOOLS` — once cumulative `web_search` calls
+* `REACT_BUDGET_EXCEEDED_DROP_TOOLS` — once cumulative `web_search` calls
   reach `REACT_MAX_SEARCH_CALLS`, every subsequent LLM call drops the tool
   schema (`tools=[]`). The model can no longer request more searches; it
   must finalise its answer or the bail-out retry above mops up.
@@ -402,23 +402,23 @@ detector flags `drop` are removed before the main LLM sees the search payload.
 
 Defaults (see `.env.example` for the full annotated block):
 
-- `ENABLE_SEARCH_LEAK_FILTER=true` — required to enable the filter; pair with
+* `ENABLE_SEARCH_LEAK_FILTER=true` — required to enable the filter; pair with
   `LEAK_DETECTOR_API_KEY` + `LEAK_DETECTOR_MODEL`. Mutually requires
   `ENABLE_WEB_SEARCH=true`; otherwise startup fails.
-- `LEAK_DETECTOR_BASE_URL` — optional; empty falls back to `LLM_BASE_URL`.
+* `LEAK_DETECTOR_BASE_URL` — optional; empty falls back to `LLM_BASE_URL`.
   The detector client is independent of the main LLM client even when the
   endpoints coincide (separate quota / timeout / backoff bookkeeping).
-- `LEAK_DETECTOR_FAIL_ACTION=drop` — fail-closed by default: detector errors
+* `LEAK_DETECTOR_FAIL_ACTION=drop` — fail-closed by default: detector errors
   exhaust retries → item is dropped. Set to `keep` only as an A/B escape
   hatch when you need to compare against the unfiltered baseline.
-- `LEAK_DETECTOR_RETRY_MAX` / `LEAK_DETECTOR_BACKOFF_S` — independent from
+* `LEAK_DETECTOR_RETRY_MAX` / `LEAK_DETECTOR_BACKOFF_S` — independent from
   the main LLM's retry settings, so detector hiccups never push back on the
   main LLM's quota window.
 
 Audit fields persisted per `web_search` call (`run_results.search_calls`
 JSON entry):
 
-```
+```text
 { "query": ..., "end_date": ..., "n_results": <kept>,
   "published_dates": [<raw-order, length == n_results_raw>],
   "n_results_raw": <int>, "n_results_kept": <int>,

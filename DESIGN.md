@@ -189,7 +189,7 @@ fingerprint of "exactly which inputs this run is based on".
 
 ### 2.2 Each run gets its own directory
 
-```
+```text
 runs/{run_id}/
   manifest.json          # run-level metadata
   db/{model_slug}.db     # one sqlite per model
@@ -315,8 +315,8 @@ things and cannot be lumped under a single total error rate.
 ### 3.3 ASCII continuation: imperfect, but keeps the mapping stable
 
 The DB contains 4 `multiple_choice` questions with > 26 options, of which 3
-have ground-truth answers landing on ASCII continuation characters like
-`[ \ ] ^ _ ` ` ` a b c ...`.
+have ground-truth answers landing on ASCII continuation characters such as
+`[`, `\`, `]`, `^`, `_`, `` ` ``, `a`, `b`, `c`, and so on.
 
 These characters are extremely unfriendly to LLMs (backticks are eaten by
 markdown, lower/upper-case a/A are easily confused), but the project still
@@ -360,7 +360,7 @@ hard "any FP vetoes" gate.
 | non-cutoff `error` (sensitive word, API timeout, etc.) | `None` | no |
 | `error=None` and `parse_ok != 1` | `0.0` | yes ("completed but wrong") |
 | `error=None` and `parse_ok=1`, FP > 0 | `0.0` | yes |
-| `error=None` and `parse_ok=1`, FP = 0 | $|\hat S \cap G|/|G|$ | yes |
+| `error=None` and `parse_ok=1`, FP = 0 | $\lvert \hat S \cap G\rvert / \lvert G\rvert$ | yes |
 
 Semantic difference between excluding vs counting as 0: cutoff / error means
 "the process did not complete" (infrastructure failure / information
@@ -818,7 +818,7 @@ inserts.
 
 ### 5.3 The DB stores raw observations only; aggregation happens later in `analysis/`
 
-```
+```text
 DB:        raw observations only
 ├── correct (bool, NULL)
 ├── parse_ok (bool)
@@ -887,7 +887,7 @@ into a few principles.
 
 ### 6.2 Three independent backoff sequences
 
-```
+```bash
 LLM_BACKOFF_NETWORK_S=2,5,15,30,60
 LLM_BACKOFF_RATE_LIMIT_S=10,30,60,120,300
 LLM_BACKOFF_SERVER_5XX_S=5,15,30,60,120
@@ -913,7 +913,7 @@ in the report** — an `error="something went wrong"` is useless.
 
 Two common misclassifications encountered during cross-provider evaluation:
 
-- **Aliyun content moderation (`data_inspection_failed`) mis-bucketed as
+* **Aliyun content moderation (`data_inspection_failed`) mis-bucketed as
   `bad_request`**: v5.0's `_body_matches` only recognised English needles
   like `content_policy / content_filter / safety`; the
   `code=data_inspection_failed` returned by DashScope
@@ -922,7 +922,7 @@ Two common misclassifications encountered during cross-provider evaluation:
   `errors.CONTENT_POLICY_NEEDLES`, adding `data_inspection_failed` /
   `inappropriate content` / `sensitive`; on match → classify as
   `content_policy`, preserving the `MUST NOT retry` semantics.
-- **Remote disconnect `RemoteProtocolError` mis-bucketed as `unknown`**:
+* **Remote disconnect `RemoteProtocolError` mis-bucketed as `unknown`**:
   v5.0's network exception tuple only listed `ConnectError` /
   `ReadTimeout` / `ConnectTimeout` / `WriteTimeout`;
   `httpx.RemoteProtocolError` ("Server disconnected without sending a
@@ -944,11 +944,11 @@ failure".
 
 v5.1 added two defences:
 
-- **D1**: `REACT_BUDGET_EXCEEDED_DROP_TOOLS=True` (default on) — once
+* **D1**: `REACT_BUDGET_EXCEEDED_DROP_TOOLS=True` (default on) — once
   cumulative searches reach the cap, the next `llm_chat` call passes
   `tools=[]`, leaving the model only able to emit content; the existing
   "no tool_calls → break" branch naturally takes over.
-- **D2**: `REACT_FINAL_ANSWER_RETRY=True` (default on) — if the loop exits
+* **D2**: `REACT_FINAL_ANSWER_RETRY=True` (default on) — if the loop exits
   cleanly but `final_raw == ""` (typical scenario: still hammering
   tool_calls just before steps run out), append a user message — "Time to
   commit. Output your final \boxed{...} answer now without further
@@ -1022,7 +1022,7 @@ Core constraints of the test design:
 
 ### 8.2 Five CI red lines
 
-```
+```text
 test_prompts / test_parser / test_training_cutoff /
 test_llm_no_browsing / test_analysis
 ```
@@ -1058,7 +1058,7 @@ correctness", smoke tests validate "integration doesn't blow up".
 
 ### 9.1 Progress log
 
-```
+```text
 12:03:44 | INFO | [run=20260424-120344-a7k3] [5/1610] q=69566c13 qt=binary_named ct=single model=openai/gpt-5 sample=2/5 correct=True steps=4 tool_calls=3 latency=8421ms
 ```
 

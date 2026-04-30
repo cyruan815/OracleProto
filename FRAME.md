@@ -17,12 +17,12 @@ point in time" scenario and preventing information leakage.
 > blocked by the tool layer. The complete threat model and mitigations are
 > in §3.8.
 
-- 319 questions (`yes_no` 93 + `binary_named` 11 + `multiple_choice` 215),
+* 319 questions (`yes_no` 93 + `binary_named` 11 + `multiple_choice` 215),
   including 285 single-select + 34 multi-select
-- Evaluates multiple models concurrently via OpenRouter's OpenAI-compatible
+* Evaluates multiple models concurrently via OpenRouter's OpenAI-compatible
   API
-- The LLM interacts with the `web_search` tool in ReAct + Tool Use mode
-- Evaluation results are written into independent `results.db` files, with
+* The LLM interacts with the `web_search` tool in ReAct + Tool Use mode
+* Evaluation results are written into independent `results.db` files, with
   analysis performed independently afterwards
 
 ---
@@ -75,24 +75,27 @@ ASCII continuation, see §3.7).
 
 ### 2.3 Examples
 
-`yes_no`：
-```
+`yes_no`:
+
+```yaml
 event:    "2026 a dream year for trump?"
 options:  ["Yes","No"]
 answer:   "B"           # B = No
 end_time: "2026-01-31"
 ```
 
-`binary_named`：
-```
+`binary_named`:
+
+```yaml
 event:    "Golden Knights vs. Kings"
 options:  ["Golden Knights","Kings"]
 answer:   "A"           # A = Golden Knights
 end_time: "2026-01-15"
 ```
 
-`multiple_choice`（single）：
-```
+`multiple_choice` (single):
+
+```yaml
 event:    "Bank of Brazil decision in January?"
 options:  ["No change in the Selic rate ...",
            "the Bank of Brazil raise ...",
@@ -102,7 +105,8 @@ end_time: "2026-01-27"
 ```
 
 `multiple_choice` (multi):
-```
+
+```yaml
 event:    "Oscars 2026: Achievement in Casting Nominations"
 options:  [<12 nominee list entries>]
 answer:   "A, B, D, E"
@@ -159,7 +163,7 @@ information leakage" (many events/news are resolved the same day), the
 default is `TAVILY_END_DATE_OFFSET_DAYS=-1` (the recommended strict
 default; smaller values are more conservative):
 
-```
+```text
 question.end_time = 2026-01-18
 → Tavily end_date = 2026-01-17
 ```
@@ -174,7 +178,7 @@ baseline, and all reports default to comparison under `-1`.
 `python evaluation.py` creates an independent `{run_id}/` subdirectory
 under `RUNS_ROOT` (default `./runs`), with the following structure:
 
-```
+```text
 {run_id}/
   manifest.json     # run-level metadata (run_id, sampling_n, models, filters, hashes...)
   db/<model_slug>.db  # one sqlite per evaluated model, self-contains questions + prompt_templates copies
@@ -192,11 +196,11 @@ separately by the post-hoc `analysis/` process and written back to disk
 Scoring happens **entirely at the letter-set level**, independent of each
 question type's output form:
 
-- The DB `answer` field is a comma-separated letter string (`'A'` / `'A,
+* The DB `answer` field is a comma-separated letter string (`'A'` / `'A,
   B'`), split into `frozenset({'A'})` / `frozenset({'A','B'})`
-- The LLM's `\boxed{...}` output is normalised by the parser per
+* The LLM's `\boxed{...}` output is normalised by the parser per
   `question_type` into the same `frozenset[str]` (see §3.7)
-- `frozenset == frozenset` is correct; missed selections / extra
+* `frozenset == frozenset` is correct; missed selections / extra
   selections / ordering are all scored as "strict equality"
 
 ### 3.5 Parse failure is not an error
@@ -215,7 +219,8 @@ and assembles a complete user message per `question_type` to feed to the
 LLM.
 
 Template (`prompt_template`, stored in metadata):
-```
+
+```text
 {agent_role} The event to be predicted: "{event} (resolved around {end_time} (GMT+8)).{outcomes_block}"
 
 IMPORTANT: Your final answer MUST end with this exact format:
@@ -235,9 +240,9 @@ Per-slot rendering rules:
 | `guidance`        | constant `"Do not use any other format. Do not refuse to make a prediction. ..."`, inserted as-is                       |
 
 Shape of the three `output_format`s:
-- `yes_no` — requires `\boxed{Yes}` or `\boxed{No}`
-- `binary_named` — template contains placeholders; after rendering looks like `\boxed{Golden Knights} or \boxed{Kings}`
-- `multiple_choice` — requires `\boxed{A}` or `\boxed{B, C}`, with an example attached
+* `yes_no` — requires `\boxed{Yes}` or `\boxed{No}`
+* `binary_named` — template contains placeholders; after rendering looks like `\boxed{Golden Knights} or \boxed{Kings}`
+* `multiple_choice` — requires `\boxed{A}` or `\boxed{B, C}`, with an example attached
 
 How the `system` / `user` roles are split is decided by the runner (see
 §10's simplified approach: as a single user message in its entirety —
@@ -255,7 +260,8 @@ output form varies by `question_type`:
 | `multiple_choice`  | one or more letters, comma- or space-separated (`A` / `B, C` / `B,C`) | split directly → frozenset[str]                                        |
 
 Letter ↔ index rule (supports up to 35 options for multiple_choice):
-```
+
+```text
 index = ord(letter) - ord('A')
 A=0, B=1, ..., Z=25
 [ =26, \ =27, ] =28, ^ =29, _ =30, ` =31, a =32, b =33, c =34, ...
@@ -290,6 +296,7 @@ Reverse (when assembling the prompt, index → letter):
 
 Ground-truth reverse lookup (`answer` letters → labels, for display or
 logging):
+
 ```python
 opts    = json.loads(row["options"])
 letters = [t.strip() for t in row["answer"].split(",")]
@@ -311,10 +318,10 @@ channel. The full leakage surface and the project's mitigation strategy:
 | External knowledge backflow appearing after LLM training      | ❌ Uncontrollable | accept this bias                                                                                        |
 
 Code-layer hard constraints:
-- In `llm.chat` calls, `tools=[WEB_SEARCH_SCHEMA]` is the only allowed
+* In `llm.chat` calls, `tools=[WEB_SEARCH_SCHEMA]` is the only allowed
   tool schema; **no** provider-native browsing/online switch may be
   added.
-- If a provider forcibly attaches a built-in tool that cannot be
+* If a provider forcibly attaches a built-in tool that cannot be
   disabled, explicitly mark "this model is unsuitable for strict
   evaluation" in the README and reports.
 
@@ -326,29 +333,29 @@ training corpus; such samples cannot reflect the "predict the future"
 ability and must be removed from that model's evaluation set.
 
 **Mechanism**:
-- Configure `MODEL_TRAINING_CUTOFFS` in `.env`, declaring a training
+* Configure `MODEL_TRAINING_CUTOFFS` in `.env`, declaring a training
   cutoff date (`YYYY-MM-DD`) for each model
-- During task-queue generation, filter each `(question, model)`:
+* During task-queue generation, filter each `(question, model)`:
   ```
   cutoff = MODEL_TRAINING_CUTOFFS.get(model)   # None = not declared, no filtering
   if cutoff is not None and question.end_time <= cutoff:
       # skip all sample_idx for this model
   ```
-- Filtered `(question, model, sample_idx)` **still records a row** into
+* Filtered `(question, model, sample_idx)` **still records a row** into
   `run_results`, with fields:
-  - `error = "skipped_training_cutoff"`
-  - `parse_ok = 0`, `correct = NULL`
-  - `final_answer_raw = NULL`, `messages_trace = NULL`,
+  * `error = "skipped_training_cutoff"`
+  * `parse_ok = 0`, `correct = NULL`
+  * `final_answer_raw = NULL`, `messages_trace = NULL`,
     `search_calls = NULL`
-  - numeric fields set to 0
-- Purpose: reports can clearly show "how many questions were filtered
+  * numeric fields set to 0
+* Purpose: reports can clearly show "how many questions were filtered
   out per model, and how many remain comparable", and resume will not
   retry the row
 
 **Resume semantics refinement** (see §5.3):
-- `error IS NULL` → completed normally
-- `error = "skipped_training_cutoff"` → actively excluded, **no retry**
-- other `error` values (`network` / `server_5xx` / `bad_request` /
+* `error IS NULL` → completed normally
+* `error = "skipped_training_cutoff"` → actively excluded, **no retry**
+* other `error` values (`network` / `server_5xx` / `bad_request` /
   `content_policy`) → handled per §9
 
 When a user does not declare a cutoff for a model, that model is not
@@ -359,7 +366,7 @@ evaluation in `.env` to ensure fairness.
 
 ## 4. End-to-end pipeline
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        Evaluation Pipeline                             │
 └────────────────────────────────────────────────────────────────────────┘
@@ -580,6 +587,7 @@ CREATE INDEX idx_run_results_question ON run_results(question_id);
 > `ANALYSIS_DESIGN_v4.md`.
 
 Connection-init PRAGMA (executed on every sqlite3 connection):
+
 ```sql
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -639,12 +647,14 @@ PRAGMA busy_timeout = 5000;      -- avoid SQLITE_BUSY in multi-reader scenarios
 ### 5.3 Resume
 
 Each sample slot is judged independently:
+
 ```sql
 -- execute once per i ∈ 0..N-1:
 SELECT question_id FROM run_results
  WHERE s{i}_created_at IS NOT NULL
    AND (s{i}_error IS NULL OR s{i}_error = 'skipped_training_cutoff');
 ```
+
 Results are merged into `set[(question_id, sample_idx)]` and removed from
 the task queue. Since each model's own DB contains only one run, `run_id`
 no longer enters the filter (the single row in `run_meta` decides it).
@@ -659,34 +669,34 @@ State classification:
 | `'content_policy'`               | provider refusal       | optional: default retry once and overwrite the original row |
 
 Rules:
-- Re-running with the same `run_id` = resume; writes into the existing
+* Re-running with the same `run_id` = resume; writes into the existing
   `runs/{run_id}/db/<slug>.db`
-- Changing `run_id` = a fresh run; creates a new
+* Changing `run_id` = a fresh run; creates a new
   `runs/{new_run_id}/` directory
-- Overwrite semantics are backed by `INSERT ... ON CONFLICT(question_id)
+* Overwrite semantics are backed by `INSERT ... ON CONFLICT(question_id)
   DO UPDATE SET s{i}_* = excluded.s{i}_*`; `user_prompt` is preserved
   with `COALESCE` to keep the first sample's value
 
 ### 5.4 Concurrent-write strategy
 
-- Every DB connection executes PRAGMA `journal_mode=WAL /
+* Every DB connection executes PRAGMA `journal_mode=WAL /
   foreign_keys=ON / synchronous=NORMAL / busy_timeout=5000` at startup
-- **One async writer task per model**: the runner opens a
+* **One async writer task per model**: the runner opens a
   `forecast_eval.db.AsyncWriter` for each model DB; every worker's
   result is enqueued via the writer for that model
-- The writer task flushes every `DB_COMMIT_BATCH` entries or every 1
+* The writer task flushes every `DB_COMMIT_BATCH` entries or every 1
   second, with short transactions; sqlite writes go through `await
   asyncio.to_thread(...)` to avoid blocking the event loop
-- A single-model DB has only one writer and multiple readers; under WAL,
+* A single-model DB has only one writer and multiple readers; under WAL,
   concurrency is sufficient
-- If switched to cross-thread consumption, `queue.Queue` /
+* If switched to cross-thread consumption, `queue.Queue` /
   `janus.Queue` is required; `asyncio.Queue` is not cross-thread safe
 
 ---
 
 ## 6. Directory layout
 
-```
+```text
 Forecast/
 ├── .env                           # gitignored, user-filled
 ├── .env.example                   # template, git-managed
@@ -846,21 +856,21 @@ LOG_DIR=./logs
 
 ### 7.1 Key parameter notes
 
-- **`MODELS`**: comma-separated, Cartesian product. To run a single model just leave one. Empty → error and exit. **Do not** append `:online` to the slug or enable provider built-in browsing (see §3.8).
-- **`MODEL_TRAINING_CUTOFFS`**: list of `model=YYYY-MM-DD`, comma-separated. `config.py` parses it as `dict[str, date]`. Models not declared are not filtered. Filtering happens during the runner's task-generation phase; skipped samples write a row of `error="skipped_training_cutoff"` into `run_results`.
-- **`LLM_MAX_CONCURRENCY` vs `SEARCH_MAX_CONCURRENCY`**: separately controlled, because Tavily's rate limit is generally tighter than the LLM's.
-- **The three `LLM_BACKOFF_*` sequences**: correspond to different error types (see §9); the sequence length determines the max retry count.
-- **`TAVILY_SEARCH_DEPTH`**: `basic` (default, 1 credit) / `advanced` (2 credits, higher recall). A single prediction averages 3-5 searches; `basic` controls cost.
-- **`TAVILY_INCLUDE_RAW_CONTENT`**: `false` / `markdown` (default) / `text`. Controls the page-body form the LLM sees. When the volume is large, also set `TAVILY_RAW_CONTENT_MAX_CHARS`. The legacy `bool` value is still compatible (`true → markdown`).
-- **`TAVILY_RAW_CONTENT_MAX_CHARS`**: per-result `raw_content` truncation threshold (chars), default `8000` ≈ 2k tokens. `0` = no truncation (caution: 5 results combined can exceed 200k chars, easily blowing the LLM context).
-- **`TAVILY_INCLUDE_ANSWER`**: `false` (default) / `basic` / `advanced`. Default off to avoid introducing a "second LLM judgement" that pollutes evaluation purity (when enabled, differences between strong and weak models compress).
-- **`TAVILY_END_DATE_OFFSET_DAYS`**: project default `-1` (one day before, the recommended strict default). Smaller is more conservative; `0` is for debug only. All reports default to comparison under `-1`.
-- **`RUN_ID` auto-generation format**: `YYYYMMDD-HHMMSS-xxxx`, e.g. `20260424-120344-a7k3`; `ls` naturally sorts by time, and this is also the directory name under `RUNS_ROOT/{run_id}/`.
-- **`RUNS_ROOT`**: root directory for evaluation outputs (default `./runs`); each run takes one subdirectory.
-- **`WRITE_MESSAGES_TRACE`**: `true` stores the full messages JSON (handy for debugging, increases DB size); `false` stores only key fields.
-- **`REACT_REFLECTION_PROTOCOL`**: `true` (default) appends a multi-step reasoning scaffold to the end of each sample's user message (decompose / ≥3 retrieval angles / reflect after each search / cross-validate / opposite-direction self-check / confidence statement). The protocol text is not entered into `dataset_metadata`, so `prompt_templates_hash` is unaffected, but the rendered full user message goes into each sample's `user_prompt` field; the toggle is also recorded in `run_meta.config_snapshot`, allowing post-hoc behaviour comparison between protocol on / off.
-- **`REACT_MIN_SEARCH_CALLS` / `REACT_MAX_NUDGES`**: optional fallback mechanism. When the LLM tries to give a final answer with fewer `web_search` calls than `REACT_MIN_SEARCH_CALLS`, the system injects a user nudge into the message sequence asking it to retrieve from another angle; the same sample is nudged at most `REACT_MAX_NUDGES` times, with the overall flow still bounded by `REACT_MAX_STEPS` / `REACT_MAX_SEARCH_CALLS` ceilings. `REACT_MIN_SEARCH_CALLS=0` (default) is equivalent to disabling the fallback, relying solely on the reflection protocol; when `ENABLE_WEB_SEARCH=false`, the nudge is automatically disabled (no search to do). Settings validation rejects `min > max`.
-- **Redaction**: before writing `run_meta.config_snapshot`, `config.py` MUST redact sensitive fields like `LLM_API_KEY` / `TAVILY_API_KEY` (keep only the first 4 chars + length + `sha256[:12]`); sensitive plaintext is never persisted. `TAVILY_API_KEY` is now `list[str]`, each key redacted independently and persisted as `[{prefix, sha256_12, length, provider}, ...]`, for later auditing of "which keys this run used".
+* **`MODELS`**: comma-separated, Cartesian product. To run a single model just leave one. Empty → error and exit. **Do not** append `:online` to the slug or enable provider built-in browsing (see §3.8).
+* **`MODEL_TRAINING_CUTOFFS`**: list of `model=YYYY-MM-DD`, comma-separated. `config.py` parses it as `dict[str, date]`. Models not declared are not filtered. Filtering happens during the runner's task-generation phase; skipped samples write a row of `error="skipped_training_cutoff"` into `run_results`.
+* **`LLM_MAX_CONCURRENCY` vs `SEARCH_MAX_CONCURRENCY`**: separately controlled, because Tavily's rate limit is generally tighter than the LLM's.
+* **The three `LLM_BACKOFF_*` sequences**: correspond to different error types (see §9); the sequence length determines the max retry count.
+* **`TAVILY_SEARCH_DEPTH`**: `basic` (default, 1 credit) / `advanced` (2 credits, higher recall). A single prediction averages 3-5 searches; `basic` controls cost.
+* **`TAVILY_INCLUDE_RAW_CONTENT`**: `false` / `markdown` (default) / `text`. Controls the page-body form the LLM sees. When the volume is large, also set `TAVILY_RAW_CONTENT_MAX_CHARS`. The legacy `bool` value is still compatible (`true → markdown`).
+* **`TAVILY_RAW_CONTENT_MAX_CHARS`**: per-result `raw_content` truncation threshold (chars), default `8000` ≈ 2k tokens. `0` = no truncation (caution: 5 results combined can exceed 200k chars, easily blowing the LLM context).
+* **`TAVILY_INCLUDE_ANSWER`**: `false` (default) / `basic` / `advanced`. Default off to avoid introducing a "second LLM judgement" that pollutes evaluation purity (when enabled, differences between strong and weak models compress).
+* **`TAVILY_END_DATE_OFFSET_DAYS`**: project default `-1` (one day before, the recommended strict default). Smaller is more conservative; `0` is for debug only. All reports default to comparison under `-1`.
+* **`RUN_ID` auto-generation format**: `YYYYMMDD-HHMMSS-xxxx`, e.g. `20260424-120344-a7k3`; `ls` naturally sorts by time, and this is also the directory name under `RUNS_ROOT/{run_id}/`.
+* **`RUNS_ROOT`**: root directory for evaluation outputs (default `./runs`); each run takes one subdirectory.
+* **`WRITE_MESSAGES_TRACE`**: `true` stores the full messages JSON (handy for debugging, increases DB size); `false` stores only key fields.
+* **`REACT_REFLECTION_PROTOCOL`**: `true` (default) appends a multi-step reasoning scaffold to the end of each sample's user message (decompose / ≥3 retrieval angles / reflect after each search / cross-validate / opposite-direction self-check / confidence statement). The protocol text is not entered into `dataset_metadata`, so `prompt_templates_hash` is unaffected, but the rendered full user message goes into each sample's `user_prompt` field; the toggle is also recorded in `run_meta.config_snapshot`, allowing post-hoc behaviour comparison between protocol on / off.
+* **`REACT_MIN_SEARCH_CALLS` / `REACT_MAX_NUDGES`**: optional fallback mechanism. When the LLM tries to give a final answer with fewer `web_search` calls than `REACT_MIN_SEARCH_CALLS`, the system injects a user nudge into the message sequence asking it to retrieve from another angle; the same sample is nudged at most `REACT_MAX_NUDGES` times, with the overall flow still bounded by `REACT_MAX_STEPS` / `REACT_MAX_SEARCH_CALLS` ceilings. `REACT_MIN_SEARCH_CALLS=0` (default) is equivalent to disabling the fallback, relying solely on the reflection protocol; when `ENABLE_WEB_SEARCH=false`, the nudge is automatically disabled (no search to do). Settings validation rejects `min > max`.
+* **Redaction**: before writing `run_meta.config_snapshot`, `config.py` MUST redact sensitive fields like `LLM_API_KEY` / `TAVILY_API_KEY` (keep only the first 4 chars + length + `sha256[:12]`); sensitive plaintext is never persisted. `TAVILY_API_KEY` is now `list[str]`, each key redacted independently and persisted as `[{prefix, sha256_12, length, provider}, ...]`, for later auditing of "which keys this run used".
 
 ---
 
@@ -1191,7 +1201,7 @@ to the **discrete-native** metric family suited for K=5; BS / NLL / MBS
 | **FSS** | Tversky α=2 / β=0.5 per-sample → per-question mean → chance correction $s_q = (c_q - p_e)/(1 - p_e)$ → cross-question mean | primary metric. Multi-select wrong cost = 4× missed; single-select degenerates to strict 0/1 |
 | Tversky baseline | multi-select $p_e$ exact enumeration $O(m \times (k-m))$; single-select $p_e = 1/k$ | the chance-correction term in the FSS chain |
 | Cohen's κ | $(\mathrm{acc} - p_e)/(1 - p_e)$, single-select $p_e = 1/k$ / multi-select $p_e = 0.5$ | chance correction for strict 0/1 acc |
-| Hamming Score | $1 - \tfrac{1}{k}\sum_l|\hat{y}_l - o_l|$ | partial credit for multi-select question types; pure single-select runs return NULL |
+| Hamming Score | $1 - \tfrac{1}{k}\sum_l\vert \hat{y}_l - o_l\vert $ | partial credit for multi-select question types; pure single-select runs return NULL |
 | **Fleiss' κ** | $(\bar{P}-\bar{P}_e)/(1-\bar{P}_e)$ on the $K$-trial vote matrix; single uses letter argmax / multi uses the mean of per-label binary Fleiss | multi-rater agreement, K-trial exclusive |
 | Predictive entropy $H_q$ | single: $-\sum_l \hat{p}_l \log_2 \hat{p}_l$; multi: per-label binary-entropy mean | per-question uncertainty |
 | **Entropy-accuracy joint** | per-model tertile buckets → per-bucket Acc / MV Acc / Fleiss κ | "how does the model perform on high-entropy questions vs low-entropy ones" — v5's most academically original diagnostic dimension |
@@ -1244,7 +1254,7 @@ set.
 | Brier Index | $\mathrm{BI} = 100(1 - \sqrt{\overline{\mathrm{BS}^{\text{lab}}}})$, **average first then square root** | all question types | `bi` |
 | NLL | single: $-\log p_{q,l^*}$; multi: label-wise BCE; clip $\epsilon = 10^{-3}$ | all question types | `nll` |
 | MBS | $100(\log_2 p_{q,l^*} + 1)$, clip same as NLL | single only; multi writes NULL | `mbs` |
-| ABI (crowd) | $\mathrm{ABI}^{(m_0)} = $ sign-aware $100(1\mp\sqrt{|\overline{\mathrm{ABS}^{(m_0)}}|})$, $\overline{\mathbf{p}}$ excludes $m_0$ | multi-model run | `abi_crowd` |
+| ABI (crowd) | $\mathrm{ABI}^{(m_0)} = $ sign-aware $100(1\mp\sqrt{\vert \overline{\mathrm{ABS}^{(m_0)}}\vert })$, $\overline{\mathbf{p}}$ excludes $m_0$ | multi-model run | `abi_crowd` |
 | ABI (uniform) | same as above, but baseline is $\mathbf{p}=(1/k,\dots,1/k)$ | all runs; for single-model runs `abi_crowd` degenerates to equal this column | `abi_uniform` |
 | fallback share | the question count that went through §2.4 fallback / the model's scoreable question count | all runs | `fallback_share` |
 
@@ -1351,9 +1361,9 @@ protocol A/B, tool-usage PDP, confidence joint diagnosis:
 
 | Metric | Formula | Interpretation |
 | --- | --- | --- |
-| Trial-internal volatility | $V_{q,k} = \tfrac{1}{T-1}\sum_t \|b_t-b_{t-1}\|_2$ | total magnitude of belief change within this trial |
+| Trial-internal volatility | $V_{q,k} = \tfrac{1}{T-1}\sum_t \\vert b_t-b_{t-1}\\vert _2$ | total magnitude of belief change within this trial |
 | Inter-trial variance | $\sigma_q = \mathrm{std}_k\,b^{(q,k)}_T$ | matches paper §4 Figure 2 |
-| Convergence step | $C_{q,k} = \min\{t : \|b_T-b_t\|_2<0.05\}$ | how many steps to reach the final belief |
+| Convergence step | $C_{q,k} = \min\{t : \\vert b_T-b_t\\vert _2<0.05\}$ | how many steps to reach the final belief |
 | Evidence efficiency | $\eta_{q,k} = (\mathrm{NLL}(b_0) - \mathrm{NLL}(b_T))/\max(1, \text{search\_calls})$ | information gain per search |
 | Counterevidence engagement | at least one counterevidence string contains a letter that is not the final choice (letter match, no NLP) | whether opposite-direction self-check was performed |
 
@@ -1462,7 +1472,7 @@ state.
 
 Module: `forecast_eval/analysis/composite.py`; writes:
 `per_model_composite_by_question_type.csv` /
-`per_model_composite_by_choice_type.csv` / `composite_meta.json`，
+`per_model_composite_by_choice_type.csv` / `composite_meta.json`,
 and embeds a `composite` section in `overall.json`.
 
 **Input collection**:
@@ -1602,7 +1612,7 @@ through `.env`.
 
 ### 12.2 Flow
 
-```
+```text
 1. argparse parses --question-type / --choice-type / --skip-analysis, assembling a QFilter
 2. Settings() loads and validates .env (including MODEL_TRAINING_CUTOFFS + RUNS_ROOT)
 3. Generate or reuse run_id -> determine run_dir = RUNS_ROOT/{run_id}; create db/ / analysis/ / logs/
@@ -1650,13 +1660,14 @@ logger.add(
 ### 13.1 Progress printing
 
 Format:
-```
+
+```text
 12:03:44 | INFO    | [run=20260424-120344-a7k3] [5/1610] q=69566c13 qt=binary_named ct=single model=openai/gpt-5 sample=2/5 correct=True steps=4 tool_calls=3 latency=8421ms
 ```
 
-- `[5/1610]` denominator = `len(questions_after_filter) × len(MODELS) × SAMPLING_N` (minus completed resume tasks)
-- One line printed per sample completion
-- On error, print at `ERROR` level: `[x/xx] q=.. model=.. error=rate_limit retry_exhausted`
+* `[5/1610]` denominator = `len(questions_after_filter) × len(MODELS) × SAMPLING_N` (minus completed resume tasks)
+* One line printed per sample completion
+* On error, print at `ERROR` level: `[x/xx] q=.. model=.. error=rate_limit retry_exhausted`
 
 ---
 
@@ -1684,6 +1695,7 @@ dependencies:
 ```
 
 Create the environment:
+
 ```bash
 conda env create -f environment.yml
 conda activate forecast
@@ -1766,9 +1778,11 @@ exist as fixtures or mocked stand-ins.
 | `test_smoke_dry_run.py`     | end-to-end dry-run    | replace OpenRouter + Tavily with httpx stubs, run 3 questions × 1 model × 1 sample, verify the wide-table `s0_*` fields are complete, `messages_trace` is legal JSON, and `search_calls` records `end_date`                                                               |
 
 Run:
+
 ```bash
 pytest tests/ -q
 ```
+
 CI minimum: `test_prompts.py` / `test_parser.py` / `test_training_cutoff.py`
 / `test_llm_no_browsing.py` / `test_analysis.py` — these five must stay
 green (core semantics + safety boundary + statistical correctness).
