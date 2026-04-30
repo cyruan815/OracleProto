@@ -103,5 +103,6 @@ forecast_eval_set_smoke.db
 # Local Documentation
 openspec/
 tavily_doc/
+paper/
 CLAUDE.md
 Agent.md
