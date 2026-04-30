@@ -10,7 +10,7 @@ prints a helpful install hint and exits 1.
 
 Each figure is best-effort: a missing source file (e.g. no `reflection_ab.csv`
 because no paired runs were found) skips the corresponding plot rather than
-failing the whole pipeline. This matches the design.md "按需出图" decision.
+failing the whole pipeline. This matches the design.md "on-demand plotting" decision.
 """
 from __future__ import annotations
 

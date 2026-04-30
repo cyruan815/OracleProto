@@ -1,14 +1,16 @@
-"""端到端验证 search-leak-filter-v1 真实拦截能力.
+"""End-to-end verification of search-leak-filter-v1 real-world filtering capability.
 
-只调一次真实 Tavily, 然后:
-  Step 1: 打印原始 5 条 result (filter=OFF 等价路径) 供人工核对
-  Step 2: 把同一份 result deepcopy 后丢给 leak_filter.filter_search_result
-          得到每条的 verdict + audit 元数据
-  Step 3: 逐条对齐 raw_content 与 verdict, 让人工判断拦截是否合理
+Calls real Tavily exactly once, then:
+  Step 1: Print the raw 5 results (equivalent to filter=OFF path) for manual review
+  Step 2: deepcopy the same results and feed them to leak_filter.filter_search_result;
+          collect per-item verdict + audit metadata
+  Step 3: Align raw_content with verdict item-by-item; let a human judge whether
+          the filtering decision is reasonable
 
-查询故意选 cutoff (q.end_time + offset = 2026-04-26) 后才会真正发生的
-事件 — Tavily 受 end_date 过滤只能拿到 pre-cutoff 的预测/分析文章,
-raw_content 中应大量包含 forward-looking 描述, detector 应将其多数 drop.
+The query is deliberately chosen so that the event only truly happens after the
+cutoff (q.end_time + offset = 2026-04-26) — under end_date filtering Tavily can
+only return pre-cutoff prediction/analysis articles, raw_content should contain
+abundant forward-looking descriptions, and the detector should drop most of them.
 
 Usage:
     python scripts/verify_leak_filter_e2e.py
@@ -48,8 +50,9 @@ async def main() -> int:
         print(f"[verify] Settings boot failed: {exc}", file=sys.stderr)
         return 2
 
-    # Collapse grid axes (TAVILY_MAX_RESULTS / REACT_MAX_SEARCH_CALLS 是 list[int],
-    # dispatcher 真实派生 cell 时会 collapse 为单 int; 我们这里手动等价).
+    # Collapse grid axes (TAVILY_MAX_RESULTS / REACT_MAX_SEARCH_CALLS are list[int];
+    # the dispatcher collapses them to a single int when deriving a real cell —
+    # we do the equivalent manually here).
     R = raw.TAVILY_MAX_RESULTS[0] if raw.TAVILY_MAX_RESULTS else 5
     C = raw.REACT_MAX_SEARCH_CALLS[0] if raw.REACT_MAX_SEARCH_CALLS else 8
     base = raw.model_copy(update={
@@ -64,17 +67,17 @@ async def main() -> int:
     print(f"[setup] prompt_hash={leak_filter._compute_prompt_hash()}")
     print()
 
-    # ─────────── Step 1: 单次真实 Tavily 调用 (filter OFF) ───────────
+    # ─────────── Step 1: single real Tavily call (filter OFF) ───────────
     off = base.model_copy(update={"ENABLE_SEARCH_LEAK_FILTER": False})
     print("=" * 80)
-    print("[Step 1] 真实 Tavily (filter=OFF, 不调 detector)")
+    print("[Step 1] Real Tavily (filter=OFF, detector not invoked)")
     print("=" * 80)
     raw_res = await tavily_search(query=QUERY, end_date=END_DATE, settings=off)
     if raw_res.error_message:
         print(f"  ERROR: {raw_res.error_message}")
         return 3
     if not raw_res.results:
-        print(f"  Tavily 返回 0 条 result, 换 query 再试")
+        print(f"  Tavily returned 0 results, try another query")
         return 3
     print(f"  audit={raw_res.audit}  (expect: None)")
     print(f"  n={len(raw_res.results)}")
@@ -86,9 +89,9 @@ async def main() -> int:
         print(f"      raw[:{SNIPPET_CHARS}]={_snippet(it.raw_content)}")
     print()
 
-    # ─────────── Step 2: 同一份 result 喂给 detector (filter=ON) ───────────
+    # ─────────── Step 2: feed the same results to the detector (filter=ON) ───────────
     print("=" * 80)
-    print("[Step 2] 复用同一份 result 走 leak_filter.filter_search_result")
+    print("[Step 2] Reuse the same results through leak_filter.filter_search_result")
     print("=" * 80)
     raw_copy = copy.deepcopy(raw_res)
     filtered = await leak_filter.filter_search_result(
@@ -103,10 +106,10 @@ async def main() -> int:
     )
     verdicts = list(audit.get("detector_verdicts", []))
 
-    # ─────────── Step 3: 严格对齐 raw items × verdicts ───────────
+    # ─────────── Step 3: strict alignment of raw items × verdicts ───────────
     print()
     print("=" * 80)
-    print("[Step 3] verdict-by-result (raw items × verdicts 严格对齐)")
+    print("[Step 3] verdict-by-result (raw items × verdicts strictly aligned)")
     print("=" * 80)
     kept = dropped = 0
     for i, (it, v) in enumerate(zip(raw_res.results, verdicts)):
@@ -124,7 +127,7 @@ async def main() -> int:
     print(f"\n  ─── summary ──────────────────────────────────────────────────")
     print(f"  kept={kept}  dropped={dropped}  total={kept + dropped}")
 
-    print(f"\n  filtered.results (经 detector 后留下的):")
+    print(f"\n  filtered.results (the items kept after the detector):")
     for i, it in enumerate(filtered.results):
         print(f"    [{i}] {it.title[:80]!r}")
 

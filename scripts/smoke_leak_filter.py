@@ -19,7 +19,7 @@ classes plus one safe baseline:
     1. specific observed event AFTER cutoff  → expect drop
     2. scheduled future event AFTER cutoff   → expect drop
     3. speculative future prediction         → expect drop
-    4. ambiguous wording                     → expect drop (per "暧昧 → drop" rule)
+    4. ambiguous wording                     → expect drop (per "ambiguous → drop" rule)
     5. fully pre-cutoff factual statement    → expect keep
 """
 from __future__ import annotations
