@@ -399,7 +399,7 @@ dimensions:
 Per-bucket scoring uses exam-style partial credit, implemented at
 `forecast_eval/analysis/exam_score.py:L62`:
 
-$$\text{exam-score}(\hat{S}, G) = \begin{cases} |\hat{S} \cap G| / |G|, & \hat{S} \setminus G = \varnothing,\\ 0, & \hat{S} \setminus G \ne \varnothing.\end{cases}$$
+$$\text{exam-score}(\hat{S}, G) = \begin{cases} |\hat{S} \cap G| / |G|, & \hat{S} \setminus G = \varnothing,\\\\ 0, & \hat{S} \setminus G \ne \varnothing.\end{cases}$$
 
 Intuitively, any false positive vetoes the score to zero; otherwise the score is the
 proportion correctly recovered, $`|TP|/|G|`$. This is recall under a zero-FP hard gate.

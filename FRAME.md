@@ -1373,7 +1373,7 @@ corresponds to `s{i}_correct` in the DB.
 
 $$
 \text{exam-score}(\hat S, G) = \begin{cases}
-\dfrac{|\hat S \cap G|}{|G|}, & \hat S \setminus G = \varnothing \\
+\dfrac{|\hat S \cap G|}{|G|}, & \hat S \setminus G = \varnothing \\\\
 0, & \hat S \setminus G \ne \varnothing
 \end{cases}
 $$
@@ -1445,7 +1445,7 @@ The chance-baseline closed form is
 
 $$
 T_q^{\mathrm{chance}} = \begin{cases}
-\dfrac{1}{k_q}, & \text{single-answer} \\[6pt]
+\dfrac{1}{k_q}, & \text{single-answer} \\\\[6pt]
 2^{-k_q}\sum_{tp=1}^{m_q}\sum_{fp=0}^{k_q-m_q}\binom{m_q}{tp}\binom{k_q-m_q}{fp}\cdot\dfrac{tp}{tp+\alpha\,fp+\beta(m_q-tp)}, & \text{multi-answer}
 \end{cases}
 $$
@@ -1545,7 +1545,7 @@ Legacy v3 runs and v4 belief-parse-failures still benefit from a degenerate
 probability vector for proper scoring:
 
 $$
-p_l = \begin{cases} 1 - \epsilon, & \ell \in \widehat{G}_{i,M} \\ \dfrac{\epsilon}{k - |\widehat{G}_{i,M}|}, & \text{otherwise} \end{cases},\quad \epsilon = 0.05
+p_l = \begin{cases} 1 - \epsilon, & \ell \in \widehat{G}_{i,M} \\\\ \dfrac{\epsilon}{k - |\widehat{G}_{i,M}|}, & \text{otherwise} \end{cases},\quad \epsilon = 0.05
 $$
 
 The sample is recorded with `belief_parse_ok=0`. Samples with full failure

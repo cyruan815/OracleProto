@@ -363,7 +363,7 @@ python -m forecast_eval.analysis runs/{run_id}
 
 每桶评分使用考试式部分得分，实现于 `forecast_eval/analysis/exam_score.py:L62`:
 
-$$\text{exam-score}(\hat{S}, G) = \begin{cases} |\hat{S} \cap G| / |G|, & \hat{S} \setminus G = \varnothing,\\ 0, & \hat{S} \setminus G \ne \varnothing.\end{cases}$$
+$$\text{exam-score}(\hat{S}, G) = \begin{cases} |\hat{S} \cap G| / |G|, & \hat{S} \setminus G = \varnothing,\\\\ 0, & \hat{S} \setminus G \ne \varnothing.\end{cases}$$
 
 直观上，任何假阳性即否决得分至零；否则得分为正确恢复的比例 $`|TP|/|G|`$。这是在零 FP
 硬性闸门下的召回率。$`m_q = 1`$ 的单答案问题退化为 $`\{0, 1\}`$ 的严格相等情形，多答案
