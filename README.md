@@ -1,6 +1,10 @@
-# OracleProto
+<div align="center">
 
-**A reproducible framework for benchmarking LLM native forecasting via knowledge cutoff and temporal masking.**
+<em>A reproducible framework for benchmarking LLM native forecasting via knowledge cutoff and temporal masking</em>
+
+[English](./README.md) | [中文文档](./README-ZH.md)
+
+</div>
 
 OracleProto reconstructs resolved events into time-bounded forecasting samples whose
 evaluation lives at the dataset level, so a run is auditable, replayable, and comparable
