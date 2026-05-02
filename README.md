@@ -13,7 +13,7 @@ evaluation lives at the dataset level, so a run is auditable, replayable, and co
 across models and across calendar years.
 
 > **In one sentence.** The codebase turns a forecasting evaluation into a single reproducible
-> run unit $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$ that
+> run unit $`\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)`$ that
 > fixes every input from questions through aggregation rules, and emits scoring artefacts
 > whose bytes match whenever the configuration matches.
 
@@ -41,11 +41,11 @@ inference side: a single-inference defence does not generalise across runs, so t
 discipline must live one level deeper, inside the dataset itself.
 
 OracleProto pushes that discipline into the dataset schema. A question is admitted for model
-$M$ only when its prediction cutoff $\chi_i$ satisfies
+$`M`$ only when its prediction cutoff $`\chi_i`$ satisfies
 
 $$\kappa_M \le \chi_i < \tau_i,$$
 
-where $\kappa_M$ denotes the model's training cutoff and $\tau_i$ the event-resolution time.
+where $`\kappa_M`$ denotes the model's training cutoff and $`\tau_i`$ the event-resolution time.
 The model's parametric knowledge is therefore no more recent than the permitted prediction
 environment, while the resolution time has not yet arrived in the simulated information
 state. Inadmissible questions are not counted as model errors. They are filtered out at
@@ -56,44 +56,44 @@ state. Inadmissible questions are not counted as model errors. They are filtered
 
 ## 2. The framework
 
-OracleProto rests on two artefacts: a single run unit $\mathcal{R}$ that names every input to
+OracleProto rests on two artefacts: a single run unit $`\mathcal{R}`$ that names every input to
 the evaluation, and a four-channel information boundary that controls every path by which the
 model could learn the answer.
 
-### 2.1 The run unit $\mathcal{R}$
+### 2.1 The run unit $`\mathcal{R}`$
 
 Every invocation of `evaluation.py` materialises a single run unit
-$\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$. Each symbol
+$`\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)`$. Each symbol
 resolves to one configuration knob, one code path, and one pinning test.
 
 | Symbol             | Object                       | Config / code path                                                                                          | Pin test                          |
 | ------------------ | ---------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------- |
-| $\mathcal{D}$      | Discrete forecasting dataset | `SOURCE_DB` / `SOURCE_TABLE` (config.py:L391/L395); `loader.sync_questions` (loader.py:L77)                  | `tests/test_db.py`                |
-| $M$                | Evaluated model              | one entry of `MODELS` (config.py:L223); one SQLite per model under `runs/{run_id}/db/`                       | `tests/test_runner_grid_model.py` |
-| $\kappa_M$         | Knowledge cutoff             | `MODEL_TRAINING_CUTOFFS[M]` (config.py:L224); admissibility filter at `runner.build_task_plan` (runner.py:L132) | `tests/test_training_cutoff.py`   |
-| $\delta$           | Temporal masking offset      | `TAVILY_END_DATE_OFFSET_DAYS` default `-1` (config.py:L273); injected at the tool layer in `react.py`        | `tests/test_search.py`, `tests/test_react.py` |
-| $T$                | Max ReAct steps              | `REACT_MAX_STEPS` default `12` (config.py:L279); outer loop `react.run_react` (react.py:L162)                | `tests/test_react.py`             |
-| $C$                | Max search calls             | `REACT_MAX_SEARCH_CALLS` default `[8]` (config.py:L283); budget gate (react.py:L276–L279)                    | `tests/test_react.py`             |
-| $R$                | Input renderer               | `forecast_eval/prompts.py::render_user_prompt`                                                              | `tests/test_prompts.py`           |
-| $\Psi$             | Output parser and validity   | `forecast_eval/parser.py::parse_answer` (parser.py:L40)                                                     | `tests/test_parser.py`            |
-| $\phi$             | Answer normalization map     | letter encoding `A` or `A,B` etc. defined per `question_type`; `parser.parse_gt` (parser.py:L92)             | `tests/test_parser.py`            |
-| $\Gamma$           | Aggregation rule             | `forecast_eval/analysis/*` (composite accuracy, FSS, κ, BI, …)                                              | `tests/test_analysis.py`          |
-| $H_{\mathrm{aux}}$ | Auxiliary leakage detector   | `leak_filter.filter_search_result`; logged in `run_meta.config_snapshot` rather than inside the $\mathcal{R}$ tuple itself | `tests/test_leak_filter.py` |
+| $`\mathcal{D}`$      | Discrete forecasting dataset | `SOURCE_DB` / `SOURCE_TABLE` (config.py:L391/L395); `loader.sync_questions` (loader.py:L77)                  | `tests/test_db.py`                |
+| $`M`$                | Evaluated model              | one entry of `MODELS` (config.py:L223); one SQLite per model under `runs/{run_id}/db/`                       | `tests/test_runner_grid_model.py` |
+| $`\kappa_M`$         | Knowledge cutoff             | `MODEL_TRAINING_CUTOFFS[M]` (config.py:L224); admissibility filter at `runner.build_task_plan` (runner.py:L132) | `tests/test_training_cutoff.py`   |
+| $`\delta`$           | Temporal masking offset      | `TAVILY_END_DATE_OFFSET_DAYS` default `-1` (config.py:L273); injected at the tool layer in `react.py`        | `tests/test_search.py`, `tests/test_react.py` |
+| $`T`$                | Max ReAct steps              | `REACT_MAX_STEPS` default `12` (config.py:L279); outer loop `react.run_react` (react.py:L162)                | `tests/test_react.py`             |
+| $`C`$                | Max search calls             | `REACT_MAX_SEARCH_CALLS` default `[8]` (config.py:L283); budget gate (react.py:L276–L279)                    | `tests/test_react.py`             |
+| $`R`$                | Input renderer               | `forecast_eval/prompts.py::render_user_prompt`                                                              | `tests/test_prompts.py`           |
+| $`\Psi`$             | Output parser and validity   | `forecast_eval/parser.py::parse_answer` (parser.py:L40)                                                     | `tests/test_parser.py`            |
+| $`\phi`$             | Answer normalization map     | letter encoding `A` or `A,B` etc. defined per `question_type`; `parser.parse_gt` (parser.py:L92)             | `tests/test_parser.py`            |
+| $`\Gamma`$           | Aggregation rule             | `forecast_eval/analysis/*` (composite accuracy, FSS, κ, BI, …)                                              | `tests/test_analysis.py`          |
+| $`H_{\mathrm{aux}}`$ | Auxiliary leakage detector   | `leak_filter.filter_search_result`; logged in `run_meta.config_snapshot` rather than inside the $`\mathcal{R}`$ tuple itself | `tests/test_leak_filter.py` |
 
-The auxiliary detector $H_{\mathrm{aux}}$ lies outside the formal tuple by design. It is a
+The auxiliary detector $`H_{\mathrm{aux}}`$ lies outside the formal tuple by design. It is a
 replaceable empirical engineering layer that supports the boundary, not a primitive
 component of the forecasting system. Its prompt SHA-256 is stored in
 `run_meta.config_snapshot.leak_detector_prompt_hash`, so the leakage barrier is itself
 byte-reproducible (`leak_filter.py:L55–L104`).
 
-The information visible to model $M$ on question $q_i$ is
+The information visible to model $`M`$ on question $`q_i`$ is
 
 $$\mathcal{I}_{i,M}^{\mathrm{vis}} = \mathcal{K}^{M}_{\le\kappa_M} \cup \mathcal{T}_{\le\chi_i},$$
 
-where $\mathcal{K}^{M}_{\le \kappa_M}$ is the parametric knowledge available before the
-model's cutoff and $\mathcal{T}_{\le\chi_i}$ is the temporally masked external information.
-The forecasting system $F_M$ produces $\widehat{Y}_{i,M} = F_M(q_i^{\mathrm{in}}; \mathcal{I}_{i,M}^{\mathrm{vis}})$
-with $\widehat{Y}_{i,M}\subseteq\mathcal{A}_i$. The time-masked discrete forecasting loop is
+where $`\mathcal{K}^{M}_{\le \kappa_M}`$ is the parametric knowledge available before the
+model's cutoff and $`\mathcal{T}_{\le\chi_i}`$ is the temporally masked external information.
+The forecasting system $`F_M`$ produces $`\widehat{Y}_{i,M} = F_M(q_i^{\mathrm{in}}; \mathcal{I}_{i,M}^{\mathrm{vis}})`$
+with $`\widehat{Y}_{i,M}\subseteq\mathcal{A}_i`$. The time-masked discrete forecasting loop is
 implemented in `react.run_react` (react.py:L162).
 
 For the field-level grand map mapping every symbol to a module, a DB column, and a test, see
@@ -109,8 +109,8 @@ mechanical defence with declared coverage.
 | Channel                                       | Defence layer                                                | Where (code)                                                                                                                                | Default                                  | Residual leakage rate                                                                                       |
 | --------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | **L0 manual curation**                        | Upstream dataset construction                                | `forecast_eval_set_example.db` curation                                                                                                     | always                                   | 0% (manual annotation floor)                                                                                |
-| **L1 parametric (admissibility filter)**      | $\kappa_M \le \chi_i$ check at task generation               | `runner.build_task_plan` (runner.py:L132–L199)                                                                                              | `MODEL_TRAINING_CUTOFFS` per model       | filters parametric-memory leakage upstream                                                                  |
-| **L2 tool-mediated (Tavily)**                 | `end_date = \chi_i` injected at the tool layer               | `react._compute_end_date` (react.py:L39); `search.tavily_search`                                                                            | $\delta=-1$ day                          | non-trivial on its own; Tavily index/crawl-date metadata is noisy                                            |
+| **L1 parametric (admissibility filter)**      | $`\kappa_M \le \chi_i`$ check at task generation               | `runner.build_task_plan` (runner.py:L132–L199)                                                                                              | `MODEL_TRAINING_CUTOFFS` per model       | filters parametric-memory leakage upstream                                                                  |
+| **L2 tool-mediated (Tavily)**                 | `end_date = \chi_i` injected at the tool layer               | `react._compute_end_date` (react.py:L39); `search.tavily_search`                                                                            | $`\delta=-1`$ day                          | non-trivial on its own; Tavily index/crawl-date metadata is noisy                                            |
 | **L3 retrieval-content (Stage-2 detector)**   | Independent LLM auditor on each Tavily item                  | `leak_filter.filter_search_result` (leak_filter.py:L348)                                                                                    | `claude-sonnet-4.6`                      | drives the per-audit-item residual to the low-single-digit-percent range against L2 alone                   |
 | **L4 provider-side residual (declared)**      | Provider-native browsing forbidden                           | `Settings._post_validate` (config.py:L602–L606, L747–L751); `llm._assert_no_browsing` (llm.py:L74–L98); `leak_filter._assert_detector_safe` (leak_filter.py:L139) | always                                   | declared as evaluation bias rather than pretended-away                                                      |
 
@@ -121,7 +121,7 @@ the same checks in the detector client. Both `tests/test_llm_no_browsing.py` and
 before any billable LLM call leaves the process.
 
 For the threat model and the broader "what we can and cannot control" decomposition, see
-`DESIGN.md` §2. For the eight hard constraints derived from $\mathcal{R}$, see `FRAME.md`
+`DESIGN.md` §2. For the eight hard constraints derived from $`\mathcal{R}`$, see `FRAME.md`
 §1.2.
 
 ---
@@ -149,12 +149,12 @@ cp .env.example .env
 #   MODELS, MODEL_TRAINING_CUTOFFS: list every model under evaluation and its κ_M
 ```
 
-Declaring $\kappa_M$ for every model is mandatory for a fair run, since the framework's
+Declaring $`\kappa_M`$ for every model is mandatory for a fair run, since the framework's
 admissibility filter is what separates "the model failed to forecast" from "the model already
 knew the answer". Models without a declared cutoff are not filtered, a warning is emitted,
 and their numbers are not directly comparable to the rest. Cutoffs may be written at month
 granularity; the recommended convention is to use the **last day of the disclosed month** as
-$\kappa_M$, which is the conservative choice (admits fewer questions, never falsely admits a
+$`\kappa_M`$, which is the conservative choice (admits fewer questions, never falsely admits a
 question whose answer the model could have memorised).
 
 `Settings._post_validate` (config.py:L598) runs before any LLM call leaves the process. It
@@ -171,8 +171,8 @@ pytest tests/ -q
 
 The CI baseline is `test_prompts / test_parser / test_training_cutoff /
 test_llm_no_browsing / test_analysis`, and these five must stay green. They guard the
-renderer $R$, the parser $\Psi$, the admissibility filter $\kappa_M$, the
-provider-native-browsing ban from §2.2 L4, and the aggregation rule $\Gamma$, respectively.
+renderer $`R`$, the parser $`\Psi`$, the admissibility filter $`\kappa_M`$, the
+provider-native-browsing ban from §2.2 L4, and the aggregation rule $`\Gamma`$, respectively.
 The full suite spans 33 test files and roughly 13k lines, covering the v3/v4 DB migrations,
 the leak filter, exam-score and composite weights, the grid dispatcher, the react budget
 chain, and behavioural diagnostics.
@@ -204,7 +204,7 @@ same `run_id` continues into the existing folder; see §8.1.
 
 The codebase defaults trade a wider search budget for smoother behavioural analysis. For
 discrimination-focused runs, the framework supports a "tight" preset at
-$R_{\mathrm{tav}}\cdot C = 5\cdot 4 = 20$, equivalent to "two pages of Google search
+$`R_{\mathrm{tav}}\cdot C = 5\cdot 4 = 20`$, equivalent to "two pages of Google search
 results". The tight configuration is reproduced by the following `.env` overrides:
 
 ```ini
@@ -225,7 +225,7 @@ ENABLE_SEARCH_LEAK_FILTER=true              # Stage-2 detector on
 BELIEF_PROTOCOL=false                       # strict-letter mode (no companion belief)
 ```
 
-Each model's $\kappa_M$ must then be declared via `MODEL_TRAINING_CUTOFFS`.
+Each model's $`\kappa_M`$ must then be declared via `MODEL_TRAINING_CUTOFFS`.
 
 The rationale for which knobs are contract knobs that change cross-run comparability and
 which knobs are pure engineering knobs lives in `DESIGN.md` §12.
@@ -255,8 +255,8 @@ SOURCE_TABLE=my_questions
 
 Once the schema is satisfied, the evaluation is dataset-agnostic. Domain-specific corpora
 such as medical, scientific, or engineering forecasting can be dropped in directly, and the
-same run unit $\mathcal{R}$ guarantees the same audit and replay properties. $\mathcal{D}$
-is a replaceable input component of $\mathcal{R}$, so cross-domain extension is a natural
+same run unit $`\mathcal{R}`$ guarantees the same audit and replay properties. $`\mathcal{D}`$
+is a replaceable input component of $`\mathcal{R}`$, so cross-domain extension is a natural
 unfolding of the framework rather than an internal defect of it.
 
 ---
@@ -354,7 +354,7 @@ Each model DB holds three tables.
   two protocol fingerprints are independent of `prompt_templates_hash` and of each other.
   `DESIGN.md` §7.3 explains why three independent fingerprints, namely template,
   reflection, and belief, enable three-axis ablation A/B pairing without collisions.
-* **`run_results`** is a wide table with one row per question. For each $i$ in
+* **`run_results`** is a wide table with one row per question. For each $`i`$ in
   `0..SAMPLING_N-1` there is an `s{i}_*` group of 20 columns at the v3 base, plus 3 belief
   columns added at v4 and 1 retry column added at v5.1. The full set is `final_answer_letters
   / final_answer_raw / correct / parse_ok / tool_calls_count / react_steps / prompt_tokens /
@@ -399,17 +399,17 @@ dimensions:
 Per-bucket scoring uses exam-style partial credit, implemented at
 `forecast_eval/analysis/exam_score.py:L62`:
 
-$$\text{exam-score}(\hat{S}, G) = \begin{cases} |\hat{S} \cap G| / |G|, & \hat{S} \setminus G = \varnothing,\\\\ 0, & \hat{S} \setminus G \ne \varnothing.\end{cases}$$
+$$\text{exam-score}(\hat{S}, G) = \begin{cases} |\hat{S} \cap G| / |G|, & \hat{S} \setminus G = \varnothing,\\ 0, & \hat{S} \setminus G \ne \varnothing.\end{cases}$$
 
 Intuitively, any false positive vetoes the score to zero; otherwise the score is the
-proportion correctly recovered, $|TP|/|G|$. This is recall under a zero-FP hard gate.
-Single-answer questions where $m_q = 1$ degenerate to the strict-equality $\{0, 1\}$ case,
+proportion correctly recovered, $`|TP|/|G|`$. This is recall under a zero-FP hard gate.
+Single-answer questions where $`m_q = 1`$ degenerate to the strict-equality $`\{0, 1\}`$ case,
 and multi-answer questions retain the asymmetry "rather miss than wrongly select". The
 composite formula (implemented at `analysis/composite.py`) is
 
 $$\text{composite}_m = \frac{\sum_{b \in B_{\text{valid}}(m)} w_{m,b}\cdot v_{m,b}}{\sum_{b \in B_{\text{valid}}(m)} w_{m,b}}.$$
 
-$B_{\text{valid}}$ is the set of buckets where the measurement is non-None and the weight is
+$`B_{\text{valid}}`$ is the set of buckets where the measurement is non-None and the weight is
 positive. Missing buckets are dropped and the remaining weights renormalised; they are not
 treated as zero. This contract is pinned by `tests/test_composite_score.py` and
 `tests/test_exam_score.py`.
@@ -434,7 +434,7 @@ one-to-one reproducible audit trail.
 
 The exam-vs-strict difference matters only on the multi-choice multi-answer bucket. The
 three single-answer buckets satisfy
-$\text{exam}_{\text{avg}}^{(b)} \equiv \text{pass@1}_{\text{avg}}^{(b)}$, so the composite
+$`\text{exam}_{\text{avg}}^{(b)} \equiv \text{pass@1}_{\text{avg}}^{(b)}`$, so the composite
 formula's value depends on the exam-vs-strict choice only through the multi-multi bucket,
 which carries the largest discrimination signal under the tight preset in §4.
 
@@ -455,19 +455,19 @@ companion suite covers stability, consistency, and chance-corrected skill.
 
 | Metric                                                 | What it measures                                                                                                  | Code                                                      |
 | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| $\text{pass@1}_{\text{avg}}$                           | Single-trial strict-equality hit rate                                                                             | `analysis/accuracy.py`                                    |
-| $\text{pass}^{\text{any}}@n$                           | Best-of-$n$ hit upper bound                                                                                       | `analysis/accuracy.py`                                    |
-| $\text{pass}^{\text{all}}@n$                           | All-of-$n$ stability lower bound                                                                                  | `analysis/accuracy.py`                                    |
-| Cohen's $\kappa$                                       | Chance-corrected strict accuracy against a question-type-conditional baseline                                     | `analysis/accuracy.py::cohen_kappa`                       |
-| Fleiss' $\kappa$                                       | Inter-trial agreement across $K^{\mathrm{eff}}_q$ samples                                                          | `analysis/consistency.py`                                 |
-| Tversky $T$                                            | Set similarity with FP penalty $\alpha$ and FN penalty $\beta$                                                    | `analysis/accuracy.py::tversky_score` (accuracy.py:L286)  |
-| FSS                                                    | Tversky-based, chance-corrected skill score; default $(\alpha, \beta) = (2.0, 0.5)$ penalises FP four times more than FN | `analysis/accuracy.py::fss` (accuracy.py:L386)            |
+| $`\text{pass@1}_{\text{avg}}`$                           | Single-trial strict-equality hit rate                                                                             | `analysis/accuracy.py`                                    |
+| $`\text{pass}^{\text{any}}@n`$                           | Best-of-$`n`$ hit upper bound                                                                                       | `analysis/accuracy.py`                                    |
+| $`\text{pass}^{\text{all}}@n`$                           | All-of-$`n`$ stability lower bound                                                                                  | `analysis/accuracy.py`                                    |
+| Cohen's $`\kappa`$                                       | Chance-corrected strict accuracy against a question-type-conditional baseline                                     | `analysis/accuracy.py::cohen_kappa`                       |
+| Fleiss' $`\kappa`$                                       | Inter-trial agreement across $`K^{\mathrm{eff}}_q`$ samples                                                          | `analysis/consistency.py`                                 |
+| Tversky $`T`$                                            | Set similarity with FP penalty $`\alpha`$ and FN penalty $`\beta`$                                                    | `analysis/accuracy.py::tversky_score` (accuracy.py:L286)  |
+| FSS                                                    | Tversky-based, chance-corrected skill score; default $`(\alpha, \beta) = (2.0, 0.5)`$ penalises FP four times more than FN | `analysis/accuracy.py::fss` (accuracy.py:L386)            |
 | MV-Acc / MVG / VCI / Hamming / mean-entropy            | Discrete-native consistency family                                                                                | `analysis/consistency.py`                                 |
 
 FSS is designed to surface a class of cross-model reorderings that strict
-$\text{pass@1}_{\text{avg}}$ misses. Two models can tie on strict accuracy yet differ
+$`\text{pass@1}_{\text{avg}}`$ misses. Two models can tie on strict accuracy yet differ
 substantially in how restrained their multi-answer selection sets are; under FSS at
-$(\alpha, \beta) = (2.0, 0.5)$ the more FP-conservative model is correctly preferred. This
+$`(\alpha, \beta) = (2.0, 0.5)`$ the more FP-conservative model is correctly preferred. This
 is the empirical justification for the asymmetric Tversky weights: encoding "rather miss
 than wrongly select" directly into the score function flips real cross-model rankings that
 a symmetric Jaccard would not have caught.
@@ -489,14 +489,14 @@ This populates `runs/{run_id}/analysis/figs/`, which is gitignored, with:
 * Companion figures: BI bar with CI (BLF anchor), ΔBI forest, difficulty-grid heatmap,
   per-question belief trajectories on 5 sample questions, tool-usage PDP per feature.
 
-v5 removed the reliability-diagram and Murphy-three-decomposition figures, since at $K=5$
+v5 removed the reliability-diagram and Murphy-three-decomposition figures, since at $`K=5`$
 they are statistically meaningless given only six unique probability levels per label.
 
 Each plot is best-effort: when the corresponding CSV or JSON is missing, the plot is
 silently skipped instead of failing the pipeline.
 
-`per_model_summary.csv` reports a single canonical FSS at $(\alpha, \beta) = (2, 0.5)$.
-Reviewers asking "why not Jaccard $(1, 1)$ or strict $(3, 0.5)$?" run the sensitivity sweep
+`per_model_summary.csv` reports a single canonical FSS at $`(\alpha, \beta) = (2, 0.5)`$.
+Reviewers asking "why not Jaccard $`(1, 1)`$ or strict $`(3, 0.5)`$?" run the sensitivity sweep
 on demand:
 
 ```bash
@@ -525,7 +525,7 @@ Each `(question_id, sample_idx)` slot is judged independently:
 
 * `s{i}_created_at IS NOT NULL` and `s{i}_error IS NULL` means finished and not retried.
 * `s{i}_error = 'skipped_training_cutoff'` was actively excluded by the
-  $\kappa_M \le \chi_i$ check, and is not retried, since it was never a model failure.
+  $`\kappa_M \le \chi_i`$ check, and is not retried, since it was never a model failure.
 * Any other `s{i}_error` value such as `network`, `server_5xx`, `bad_request`, or
   `content_policy` is retried on the next run, which reuses the existing DB. Error
   classification lives in `forecast_eval/errors.py:classify` (errors.py:L86); the bucket
@@ -540,9 +540,9 @@ under the original retry policy.
 
 ### 8.2 Grid search via virtual model slug
 
-`TAVILY_MAX_RESULTS` (which is $R_{\mathrm{tav}}$) and `REACT_MAX_SEARCH_CALLS` (which is
-$C$) accept comma-separated lists of positive integers. Setting both to multi-value lists
-produces $\lvert\text{MODELS}\rvert \cdot \lvert R\rvert \cdot \lvert C\rvert$ independent
+`TAVILY_MAX_RESULTS` (which is $`R_{\mathrm{tav}}`$) and `REACT_MAX_SEARCH_CALLS` (which is
+$`C`$) accept comma-separated lists of positive integers. Setting both to multi-value lists
+produces $`\lvert\text{MODELS}\rvert \cdot \lvert R\rvert \cdot \lvert C\rvert`$ independent
 virtual model slugs of the form `{real_model}::r{R}::c{C}` (`db.compose_virtual_slug` and
 `db.parse_virtual_slug`, db.py:L477/L500). Each cell lives in its own DB file at
 `runs/<id>/db/<real>__r{R}__c{C}.db` and re-uses every existing analysis stage. An extra
@@ -630,7 +630,7 @@ client retry these instead of treating them as fatal.
 
 ### 8.4 Search leak filter (v5.2)
 
-Tavily filters by crawl or index date, not by content time. A page indexed before $\chi_i$
+Tavily filters by crawl or index date, not by content time. A page indexed before $`\chi_i`$
 may still describe events that happened after it, such as wiki updates, aggregator pages,
 or "looking ahead" sections. To plug that hole the framework adds a Stage-2 LLM-based
 semantic audit. Every Tavily result is sent through an independent `detector` LLM that
@@ -717,8 +717,8 @@ If you are new to the project, we suggest reading in this order:
 3. **`FRAME.md`** for the technical specification at field, interface, and pseudocode
    level. §1.1 (the grand map) is the cross-reference scaffold; §2–6 walk top-down from
    data to pipeline.
-4. **`forecast_eval/prompts.py` and `forecast_eval/parser.py`** for the renderer $R$ and
-   the parser $\Psi$, which are the heart of the project's information boundary.
+4. **`forecast_eval/prompts.py` and `forecast_eval/parser.py`** for the renderer $`R`$ and
+   the parser $`\Psi`$, which are the heart of the project's information boundary.
 5. **`forecast_eval/runner.py` and `forecast_eval/react.py`** for orchestration. The
    admissibility filter sits at runner.py:L132 and the ReAct loop at react.py:L162, with
    the priority chain at react.py:L266.
@@ -734,7 +734,7 @@ If you are new to the project, we suggest reading in this order:
 | ------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | v3      | Wide-table schema, per-sample observability columns                                                | strict-letter scoring, no belief, no detector                      |
 | v4      | Belief protocol via companion JSON block; probabilistic suite (BI / NLL / MBS / ABI)                | `BELIEF_PROTOCOL=false`; v3 byte-equivalent until enabled          |
-| v5      | Discrete-native pivot: FSS / Cohen κ / Fleiss κ / Hamming as primary; dropped reliability and Murphy figures at $K=5$ | exam-style and composite weights are the headline   |
+| v5      | Discrete-native pivot: FSS / Cohen κ / Fleiss κ / Hamming as primary; dropped reliability and Murphy figures at $`K=5`$ | exam-style and composite weights are the headline   |
 | v5.1    | Harness resilience: in-loop force-final, budget-drop tools, retry backstop; widened error needles  | force-final on, retry-backstop off by default                      |
 | v5.2    | Stage-2 LLM detector for retrieval-content leakage                                                 | `ENABLE_SEARCH_LEAK_FILTER=true` (default-strict, fail-closed)     |
 
