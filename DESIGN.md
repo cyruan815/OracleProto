@@ -1,21 +1,18 @@
 # OracleProto — Design Rationale
 
 > *This document explains why the codebase looks the way it does. For the field-level
-> mechanics (schemas, signatures, error codes, line numbers), pair it with `FRAME.md`. For
-> the formal framework, read `paper/main.tex` §§1–3. The reading order is paper §§1–3 →
-> DESIGN → FRAME → source. Almost every "weird" choice in this codebase is the unique fixed
-> point where two paper-level constraints meet one empirical observation; reading the source
-> without that context is the fastest way to misread an engineering decision as either
-> over-engineering or laziness.*
+> mechanics (schemas, signatures, error codes, line numbers), pair it with `FRAME.md`. The
+> reading order is DESIGN → FRAME → source. Almost every "weird" choice in this codebase
+> is the unique fixed point where two framework-level constraints meet one empirical
+> observation; reading the source without that context is the fastest way to misread an
+> engineering decision as either over-engineering or laziness.*
 
 ## How to read this document
 
 Each section opens with the constraint it discharges, walks through the engineering choice
 that satisfies it, and ends with the alternatives we rejected and the file path that pins
-the decision. Paper citations use the section names from `paper/main.tex` (e.g. paper §3.5
-Reproducibility and Leakage Boundary) and the canonical equation numbers as compiled by
-LaTeX (e.g. paper Eq. 40 for strict-equality scoring). File anchors use `module.py:Lnnn`
-relative to `forecast_eval/`, and the line numbers track the current main branch.
+the decision. File anchors use `module.py:Lnnn` relative to `forecast_eval/`, and the
+line numbers track the current main branch.
 
 ---
 
@@ -27,41 +24,39 @@ relative to `forecast_eval/`, and the line numbers track the current main branch
 > resolved, how strong is its native forecasting capability across a leakage-controlled
 > dataset?
 
-Paper §1 and §2.3 articulate why the question is non-trivial. Existing evaluation practice
-sits on an unstable middle ground between two regimes that each fail in their own way.
-**Prospective live evaluation** such as ForecastBench and FutureX admits only events whose
-answers do not yet exist when the forecast is submitted; this is the gold standard for
-contamination control, but the leaderboard is a one-way temporal stream whose entries
-disappear once they resolve, so the resulting evaluation is impermanent and not reusable.
-**Retrospective evaluation** such as FutureX-Past or any archive of resolved live questions
-is auditable and comparable, but is highly prone to mistaking factual recall for
-forecasting capability; the FutureX-Past dataset card itself warns that historical
-outcomes may already have entered newer models' training data.
+Existing evaluation practice sits on an unstable middle ground between two regimes that
+each fail in their own way. **Prospective live evaluation** such as ForecastBench and
+FutureX admits only events whose answers do not yet exist when the forecast is submitted;
+this is the gold standard for contamination control, but the leaderboard is a one-way
+temporal stream whose entries disappear once they resolve, so the resulting evaluation is
+impermanent and not reusable. **Retrospective evaluation** such as FutureX-Past or any
+archive of resolved live questions is auditable and comparable, but is highly prone to
+mistaking factual recall for forecasting capability; the FutureX-Past dataset card itself
+warns that historical outcomes may already have entered newer models' training data.
 
-The diagnostic literature surveyed in paper §2.3 has empirically shown that *simulated
-ignorance* and *true ignorance* are systematically different: reasoning-optimised models
-are particularly bad at the simulation, and a 1–5% label-noise rate alone is enough to
-break proper scoring rules (Paleka et al. 2025; Li et al. 2026). BLF (Murphy 2026) reaches
-the same conclusion from the inference side, namely that a single-inference defence does
-not generalise across runs and that the discipline must live one level deeper, inside the
-dataset itself.
+The diagnostic literature has empirically shown that *simulated ignorance* and *true
+ignorance* are systematically different: reasoning-optimised models are particularly bad
+at the simulation, and a 1–5% label-noise rate alone is enough to break proper scoring
+rules. BLF reaches the same conclusion from the inference side, namely that a
+single-inference defence does not generalise across runs and that the discipline must
+live one level deeper, inside the dataset itself.
 
 OracleProto's response is to push the discipline into the dataset schema and the run unit
-$\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$ defined in
-paper §3.5. Three almost religious hard constraints fall out immediately, and every other
-decision in this document is downstream of these three.
+$\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$. Three
+almost religious hard constraints fall out immediately, and every other decision in this
+document is downstream of these three.
 
 1. **The information boundary lives at the dataset and tool layer, not the prompt layer.**
-   Sample admission ($\kappa_M \le \chi_i < \tau_i$, paper Eq. 4) is an upstream filter
-   rather than instructions to the model; tool-level temporal masking is injected by the
-   tool implementation rather than a parameter the model can fill in. The model can
-   propose queries, but it cannot alter the cutoff.
+   Sample admission ($\kappa_M \le \chi_i < \tau_i$) is an upstream filter rather than
+   instructions to the model; tool-level temporal masking is injected by the tool
+   implementation rather than a parameter the model can fill in. The model can propose
+   queries, but it cannot alter the cutoff.
 2. **Results are byte-reproducible.** A `git clone` plus the `.env` is enough for a
    third party to re-run the evaluation and obtain comparable numbers. The source DB is
    checked into the repository, and a six-part hash fingerprint pins down which inputs
    each run was based on.
 3. **Every leakage path that we can control is controlled, and every path we cannot is
-   declared.** The threat model in paper §3.5 is honest about what we cannot fix.
+   declared.** The threat model is honest about what we cannot fix.
 
 Once these three constraints are internalised, every "seemingly over-strict" choice in
 the following sections looks natural.
@@ -106,14 +101,14 @@ output parsing, metric aggregation) has a single audit-replay path.
 | $\Gamma$           | Aggregation rule                    | `analysis/*` (composite accuracy, FSS, $\kappa$, BI, …)                          | `test_analysis.py`          |
 | $H_{\mathrm{aux}}$ | Auxiliary leakage detector          | `leak_filter.filter_search_result`; logged in `run_meta.config_snapshot`         | `test_leak_filter.py`       |
 
-The paper deliberately keeps $H_{\mathrm{aux}}$ outside the formal tuple (paper §3.5) and
-binds it via SHA-256 fingerprint to run metadata, because the detector is a replaceable
-empirical engineering layer that supports the boundary rather than a primitive component
-of the forecasting system itself. The codebase mirrors this distinction: `MODELS` /
+The framework deliberately keeps $H_{\mathrm{aux}}$ outside the formal tuple and binds it
+via SHA-256 fingerprint to run metadata, because the detector is a replaceable empirical
+engineering layer that supports the boundary rather than a primitive component of the
+forecasting system itself. The codebase mirrors this distinction: `MODELS` /
 `MODEL_TRAINING_CUTOFFS` / `REACT_MAX_*` enter `run_meta` directly, while `LEAK_DETECTOR_*`
 enters via `run_meta.config_snapshot.detector_*` plus `run_meta.leak_detector_prompt_hash`.
 
-The information visible to model $M$ on question $q_i$ is given by paper Eq. 16:
+The information visible to model $M$ on question $q_i$ is
 
 $$\mathcal{I}_{i,M}^{\mathrm{vis}} = \mathcal{K}^{M}_{\le\kappa_M} \cup \mathcal{T}_{\le\chi_i},$$
 
@@ -135,10 +130,10 @@ different in an alternative implementation.
 | Engineering choice               | Mandated by $\mathcal{R}$? | What is left to the implementor                                |
 | -------------------------------- | -------------------------- | -------------------------------------------------------------- |
 | Storage backend                  | No                         | We chose SQLite (one file per model); a row store like Postgres would also work |
-| Retrieval backend                | No                         | We chose Tavily; any time-filterable retrieval is permitted (paper §3.3) |
+| Retrieval backend                | No                         | We chose Tavily; any time-filterable retrieval is permitted               |
 | Detector model                   | No                         | We default to `Qwen3.5-Flash` for the audit; any sufficiently strict model works |
 | Concurrency model                | No                         | We chose `asyncio` with one writer task per model; threads or processes also work |
-| Backoff sequences                | No                         | Three sequences in `LLM_BACKOFF_*`, tuned for OpenRouter rather than fixed by paper |
+| Backoff sequences                | No                         | Three sequences in `LLM_BACKOFF_*`, tuned for OpenRouter rather than fixed by the framework |
 | Logging stack                    | No                         | We chose `loguru`; any structured logger works                  |
 
 Decisions in this column would change *which implementation it is*, but not *which
@@ -151,7 +146,7 @@ you exactly which knobs are safe to swap when porting OracleProto to a different
 
 ## 2. The information boundary
 
-Paper §3.5 organises the boundary along three controlled channels plus an uncontrollable
+The boundary is organised along three controlled channels plus an uncontrollable
 residual.
 
 | Leakage source                                 | Controllable?              | Mitigation                                       | Audited?                       |
@@ -210,12 +205,12 @@ little information granularity for strictness.
 
 Reports also default to comparison at $\delta = -1$, which is itself a design constraint:
 numbers under different offsets are not directly comparable, because $\chi_i$ defines a
-different admissible information state for each value of $\delta$ (§1.2). The audit
-formula in paper §4.3.4 (paper Eq. 61) anchors on $\chi_i$ rather than $\tau_i$ when
-classifying "leak / no leak", precisely because the audit definition must match the
-operational cutoff actually enforced at the tool layer; any fact that falls in the
-half-open interval $(\chi_i, \tau_i]$ is therefore both system-filtered and
-audit-classified as a leak, which eliminates the otherwise-ambiguous border zone.
+different admissible information state for each value of $\delta$ (§1.2). The Stage-2
+detector's audit anchors on $\chi_i$ rather than $\tau_i$ when classifying "leak / no
+leak", precisely because the audit definition must match the operational cutoff actually
+enforced at the tool layer; any fact that falls in the half-open interval $(\chi_i,
+\tau_i]$ is therefore both system-filtered and audit-classified as a leak, which
+eliminates the otherwise-ambiguous border zone.
 
 Two alternatives we rejected. With $\delta = 0$, the search cutoff is the question's
 resolution day; on the example DB this empirically catches roughly 30–50% of same-day
@@ -255,19 +250,17 @@ cannot be silently ignored.
 ### 2.5 Parametric memory: filter, do not lie
 
 The tool cutoff cannot constrain facts the model has already memorised in its parameters.
-The project takes a very plain strategy following paper §4.1.2: declare each model's
-training cutoff $\kappa_M$, and if a question's $\tau_i \le \kappa_M$ (equivalently
-$\chi_i < \kappa_M$ at $\delta = -1$ day-rounded timestamps), the question is simply
-skipped for that model.
+The project takes a very plain strategy: declare each model's training cutoff $\kappa_M$,
+and if a question's $\tau_i \le \kappa_M$ (equivalently $\chi_i < \kappa_M$ at $\delta =
+-1$ day-rounded timestamps), the question is simply skipped for that model.
 
 Skipped samples still write a row into the DB with `error="skipped_training_cutoff"`,
 generated by `_skipped_cutoff_row` (runner.py:L94) and persisted by the runner main loop
 (runner.py:L181). Three properties follow from keeping the skip explicit. Reports can
 clearly show how many questions were filtered out per model and how many remain
-comparable, which is exactly how paper Table 2's "Excluded by Cutoff" column is built.
-`resume` will not retry that row, distinguishing it from transient errors like `network`.
-And the row is not counted in the error rate by kind, because it is not a failure but
-*active data cleansing*.
+comparable. `resume` will not retry that row, distinguishing it from transient errors
+like `network`. And the row is not counted in the error rate by kind, because it is not a
+failure but *active data cleansing*.
 
 Behind this is a principle the project repeatedly invokes: **"filtered out" and "failed"
 are two different semantics and must be separated at the data layer.** Were we to use a
@@ -276,11 +269,11 @@ The filter is applied during task generation, before the LLM is ever called, so 
 exclusions consume zero API budget; `test_training_cutoff.py` enforces this by asserting
 that no `llm.chat` mock is hit on a cutoff-skipped sample.
 
-The paper takes the most conservative interpretation when a model card discloses cutoff
-only at month-level granularity (paper §4.1.2 footnote): adopt the *last day* of the
-disclosed month as $\kappa_M$. The codebase loads this date as a `datetime.date` in
+When a model card discloses cutoff only at month-level granularity, the recommended
+convention is to adopt the *last day* of the disclosed month as $\kappa_M$, which is the
+most conservative choice. The codebase loads this date as a `datetime.date` in
 `_parse_training_cutoffs` (config.py:L181), so the comparison `q_end <= cutoff` is a
-strict day-rounded equality match aligned with the paper convention.
+strict day-rounded equality match aligned with this convention.
 
 We considered two alternatives. *Weighted exclusion*, where samples close to the cutoff
 are discounted rather than dropped, adds analytic complexity without removing the
@@ -299,10 +292,10 @@ The defences in §2.2 through §2.5 are protocol-layer (schema, `end_date` injec
 a Tavily-returned page describing events that happened after $\chi_i$**: Tavily's
 `end_date` filter operates on a page's crawl/index time, not on the event time described
 in the page content. A wiki, an aggregator page, or a long article indexed before
-$\chi_i$ can perfectly well reference future events in its body. Paper Table 3 places
-the residual leakage rate of the Tavily-only baseline in the 3–16% range, high enough
-that the single-digit accuracy gaps in paper Table 5 would become statistically
-meaningless without further filtering.
+$\chi_i$ can perfectly well reference future events in its body. The Tavily-only
+baseline's residual leakage rate has been observed in the single-digit-to-mid-double-digit
+percent range, high enough that single-digit accuracy gaps between models would become
+statistically meaningless without further filtering.
 
 The `search-leak-filter-v1` solution adds an independent LLM audit layer (the
 "detector") at the tail of `tavily_search`, before the main LLM ever sees `tool_result`.
@@ -330,9 +323,9 @@ Three design choices deserve emphasis.
 into an "answer auditor" that drops everything arguing against the model's tentative
 answer, producing question-specific second-order leakage. The whitelist enforces the
 detector's role: classify temporal leakage of facts (does this page mention an event
-after $\chi_i$?) rather than relevance to the answer. This is paper §3.3 and §3.5's
-design rationale encoded as an inviolable input contract; pinned by `test_leak_filter.py`
-asserting that the detector's user message never contains question fields.
+after $\chi_i$?) rather than relevance to the answer. This rationale is encoded as an
+inviolable input contract; pinned by `test_leak_filter.py` asserting that the detector's
+user message never contains question fields.
 
 **Fail-closed by default.** Detector hiccups (timeout, network) are uncorrelated with
 item content; biasing the residual towards "drop on uncertainty" is the conservative
@@ -354,30 +347,26 @@ same source as Tavily's `end_date`, and is independent of §2.5's `MODEL_TRAININ
 through the admissibility filter and enters execution, the detector still audits the
 search results for that question; the two filters do not substitute for each other.
 
-The BLF paper (Murphy 2026, §B.1 Stage 2) used an LLM-based leak classifier on top of
-Brave's date filter and reported the runtime filter catching 320/341 = 93.8% of actual
-leakage, leaving residual leakage on the order of 1.5%. Our own audit (paper Table 8)
-on $N=270$ items measures recall 98.7% (235 / (235 + 3)) and per-audit-item residual
-rate 1.1% (3/270, with Wilson 95% upper bound 3.2%), comparable to the lower end of the
-Tavily-only baseline at two orders of magnitude lower marginal cost. Stage 2 is an
-empirically validated "algorithmic-layer plus semantic-layer double insurance"
-engineering practice. Full spec at `openspec/changes/search-leak-filter-v1/specs/`
-(capabilities `search-leak-filter`, `search-tool`, `information-barrier`,
-`results-persistence`).
+A prior LLM-based-leak-classifier baseline on top of a date-filtered search backend
+demonstrated that runtime filtering can catch the bulk of actual leakage and reduce
+residual leakage to the low single digits. Stage 2 is the project's instantiation of
+this "algorithmic-layer plus semantic-layer double insurance" engineering practice. Full
+spec at `openspec/changes/search-leak-filter-v1/specs/` (capabilities
+`search-leak-filter`, `search-tool`, `information-barrier`, `results-persistence`).
 
 ---
 
 ## 3. Dataset reconstruction
 
-The paper's central conceptual move (paper §3.2) is to rewrite a resolved event $z_i$ as
-a time-bounded prediction:
+The framework's central conceptual move is to rewrite a resolved event $z_i$ as a
+time-bounded prediction:
 
 $$(x_i, \mathcal{A}_i, Y_i, \tau_i, \rho_i) \quad \Rightarrow \quad q_i^{\mathrm{in}} = (x_i, \mathcal{A}_i, \chi_i, \rho_i).$$
 
 The ground truth $Y_i$ is retained only for scoring; the visible prompt is rendered
 deterministically from the structured fields. This construction equips the dataset with
-four properties that make the evaluation object dataset-level rather than event-level
-(paper §3.2). *Temporal reproducibility* means the same source row plus the same $\delta$
+four properties that make the evaluation object dataset-level rather than event-level.
+*Temporal reproducibility* means the same source row plus the same $\delta$
 always yields the same $\chi_i$. *Model-dependent admissibility* means admissible question
 sets vary by $\kappa_M$ while the underlying corpus is shared. *Discrete scorability* means
 $\widehat{G}_{i,M}, G_i \subseteq \mathcal{L}_i$ are finite-cardinality sets rather than
@@ -388,8 +377,8 @@ shifting.
 ### 3.1 Discrete answer space, not free generation
 
 Each question must have a finite answer space $2 \le K_i < \infty$ and a verified answer
-set $Y_i \subseteq \mathcal{A}_i$ (paper §3.2). This prevents open-ended generation from
-bypassing the evaluation constraint. The three question types `yes_no`, `binary_named`,
+set $Y_i \subseteq \mathcal{A}_i$. This prevents open-ended generation from bypassing the
+evaluation constraint. The three question types `yes_no`, `binary_named`,
 and `multiple_choice` all collapse to letter sets at the scoring layer, with single-answer
 questions satisfying $|Y_i|=1$ and multi-answer questions $|Y_i| \ge 1$. The structural
 constraint $\rho_i$ (single vs multi) is recorded in `choice_type` and consumed by the
@@ -427,12 +416,11 @@ predicted_letters == ground_truth_letters  # both are frozenset[str]
 ```
 
 Missed selections, extra selections, ordering: all are scored as wrong by strict
-equality. This is the project's most fastidious design and implements paper Eq. 40
-verbatim.
+equality. This is the project's most fastidious design.
 
 We do not use Jaccard, F1, or partial credit at the strict level for three reasons.
 First, *explanation cost is too high*: `pass@1=0.62` is far more intuitive than `mean
-Jaccard=0.74`, and one number is enough for a paper. Second, *avoid half-credit masking
+Jaccard=0.74`, and one number is enough for a report. Second, *avoid half-credit masking
 the real problem*: a model that misses one or two selections every time can still average
 70+ on a soft scorer while fundamentally not having mastered the question; strict
 matching scores this behaviour as 0 and forces the report to be honest. Third, *unify
@@ -440,17 +428,17 @@ the scoring interface across three question types*: all three reduce to frozense
 equality at the scoring stage, so the code is written once and works for everything.
 
 For multi-answer questions the project adds two soft-penalty companions alongside strict
-equality (paper §4.2.2 and §4.2.7), without ever replacing it.
+equality, without ever replacing it.
 
-* **Exam-style partial credit** (paper Eq. 37, `analysis/exam_score.py:L62`) follows the
-  rule "any FP vetoes to 0; otherwise score $|TP|/|G|$", which is recall under a zero-FP
-  gate. It makes the headline composite-accuracy more nuanced for multi-answer buckets
-  where strict equality has near-zero variance.
-* **Format Skill Score (FSS)** (paper Eq. 59, `analysis/accuracy.py:L386`) is a
-  chance-corrected Tversky similarity at $(\alpha, \beta) = (2.0, 0.5)$, penalising
-  false positives 4× more than false negatives. The intuition is that *claiming an
-  event will happen* is more dangerous than *missing an event*. Single-select questions
-  degenerate to strict 0/1; the asymmetry only matters in multi-answer buckets.
+* **Exam-style partial credit** (`analysis/exam_score.py:L62`) follows the rule "any FP
+  vetoes to 0; otherwise score $|TP|/|G|$", which is recall under a zero-FP gate. It
+  makes the headline composite-accuracy more nuanced for multi-answer buckets where
+  strict equality has near-zero variance.
+* **Format Skill Score (FSS)** (`analysis/accuracy.py:L386`) is a chance-corrected
+  Tversky similarity at $(\alpha, \beta) = (2.0, 0.5)$, penalising false positives 4×
+  more than false negatives. The intuition is that *claiming an event will happen* is
+  more dangerous than *missing an event*. Single-select questions degenerate to strict
+  0/1; the asymmetry only matters in multi-answer buckets.
 
 The two soft penalties coexist with strict equality precisely so that the choice of
 metric becomes an analyst-side decision rather than a system-side bias. The audit trail
@@ -469,12 +457,11 @@ the asymmetry being held fixed across runs.
 
 ### 3.4 ASCII continuation labels: documented debt
 
-The example DB contains 4 `multiple_choice` questions with > 26 options, of which 3 have
-ground-truth answers landing on ASCII continuation characters such as `[`, `\`, `]`,
-`^`, `_`, `` ` ``, `a`, `b`, `c`. These characters are extremely unfriendly to LLMs
-(backticks are eaten by markdown, lower- and upper-case `a`/`A` are easily confused),
-but the project still keeps them because doing so preserves a one-to-one letter ↔ index
-mapping.
+When a `multiple_choice` question carries more than 26 options, the encoding lands on
+ASCII continuation characters such as `[`, `\`, `]`, `^`, `_`, `` ` ``, `a`, `b`, `c`.
+These characters are extremely unfriendly to LLMs (backticks are eaten by markdown,
+lower- and upper-case `a`/`A` are easily confused), but the project still keeps them
+because doing so preserves a one-to-one letter ↔ index mapping.
 
 The cost is mitigated by several defences: `prompts.render_user_prompt` explicitly quotes
 or escapes labels when generating an `outcomes_block` for > 26 options;
@@ -484,14 +471,14 @@ or escapes labels when generating an `outcomes_block` for > 26 options;
 If we later confirm LLM performance is meaningfully dragged down by the labelling
 scheme, we will migrate to a stable scheme like `AA/AB` or `A01/A02`. **This is a
 documented debt, not an ignored bug.** The alternative of skipping the > 26 questions
-discards roughly 4 / 215 multi-choice questions on the example DB, which loses
-dataset-level coverage; we prefer the round-trip test plus the option-stable encoding.
+loses dataset-level coverage on any custom dataset that includes them; we prefer the
+round-trip test plus the option-stable encoding.
 
 ### 3.5 Parse failure is not an error
 
 When the LLM does not output `\boxed{...}`, or writes "I cannot predict the future",
-this is not a system failure but part of the model's capability (paper §4.2.5). Three
-mechanical consequences follow.
+this is not a system failure but part of the model's capability. Three mechanical
+consequences follow.
 
 `parse_ok=0` and `correct=NULL`: parse failures and refusals are accumulated separately
 into "refusal rate" and surfaced in reports. *No retry*: when the model itself says it
@@ -499,7 +486,7 @@ cannot answer, asking again yields the same answer, and backoff retries only was
 tokens. `error` field stays NULL: the `error rate by kind` report is not polluted by
 such soft failures.
 
-The same coupling rule is encoded in paper §4.2.4 as a four-state matrix; `exam_score`
+The same coupling rule is encoded as a four-state matrix; `exam_score`
 (exam_score.py:L62) implements the matrix in a 7-line decision tree, pinned by
 `test_exam_score.py` and `test_aggregation.py`. The principle is that **every behaviour
 must have its own cell in the report**: "system error rate" and "model refusal rate" are
@@ -514,7 +501,7 @@ multiply API spend without changing the population mean.
 
 ## 4. Hierarchical evaluation
 
-The paper's evaluation system (paper §3.4) is
+The evaluation system is
 
 $$\mathcal{E}_M = (\mathcal{E}^{\mathrm{valid}}_M, \mathcal{E}^{\mathrm{item}}_M, \mathcal{E}^{\mathrm{question}}_M, \mathcal{E}^{\mathrm{model}}_M).$$
 
@@ -541,19 +528,19 @@ tomorrow it might change to "at least 3 correct"; if aggregation lands in the DB
 redefinition requires a backfill, and deferring all metrics to the analysis layer makes
 them re-computable at any time. *`analysis.py` is a pure function*, where the input is
 `runs/{run_id}/db/*.db` and the output is `analysis/*.csv|md|json`, and it can be re-run
-independently via `python -m forecast_eval.analysis`. *DB and paper/report are
-decoupled*: raw records are an engineering artefact, statistics are an academic artefact,
-and their cadences are completely different.
+independently via `python -m forecast_eval.analysis`. *DB and reports are decoupled*:
+raw records are an operational artefact, statistics are an analytical artefact, and
+their cadences are completely different.
 
-This is the operational embodiment of the paper's "metric-agnostic design" claim
-(paper §3.4). Pinned by `test_analysis.py` constructing a hand-crafted DB fixture and
-confirming that `run_analysis` neither writes back nor mutates.
+This is the operational embodiment of the framework's metric-agnostic design. Pinned by
+`test_analysis.py` constructing a hand-crafted DB fixture and confirming that
+`run_analysis` neither writes back nor mutates.
 
 ### 4.2 Recalibrating the `pass@k` naming
 
 In the wider community `pass@k` generally means "at least one correct in $k$". The
 project historically used `pass@3 = sum(correct) ≥ 3` (a threshold semantic), which
-caused ambiguity. Now made explicit (paper §4.2.5, paper Eq. 42–45):
+caused ambiguity. The naming is now made explicit:
 
 * `pass_any@N` is the standard `pass@k`: at least one correct in $N$.
 * `at_least_k_correct@N`: at least $k$ correct in $N$ (threshold analysis).
@@ -569,12 +556,10 @@ unambiguous or must explicitly declare its semantics.
 
 ### 4.3 Question-level signals: stability is not correctness
 
-Paper §4.3.3 reports an instructive divergence among the six tested models that motivated
-the entire question-level signal column family. DeepSeek and Kimi tie on
-$\mathrm{pass\_any}@N$ ($0.80$, the best-of-3 hit upper bound), but Qwen leads on
-$\mathrm{pass\_all}@N$ ($0.39$) and Fleiss' $\kappa$ ($0.45$, consistently same-answer
-behaviour), while Doubao ranks 3rd on Fleiss ($0.42$) but last on $\mathrm{pass}@1$,
-which is *consistently giving wrong answers*.
+Cross-model evaluation has repeatedly surfaced an instructive pattern: two models can tie
+on $\mathrm{pass\_any}@N$ (the best-of-N hit ceiling) while diverging sharply on
+$\mathrm{pass\_all}@N$ and Fleiss' $\kappa$, and a model can rank highly on consistency
+while ranking last on $\mathrm{pass}@1$, which is *consistently giving wrong answers*.
 
 This is exactly the diagnostic the question-level signals are designed to expose: high
 consistency does not imply correctness, and a high best-of-N ceiling can come from
@@ -582,19 +567,17 @@ consistency does not imply correctness, and a high best-of-N ceiling can come fr
 correct each time". The project therefore reports both axes side by side rather than
 collapsing them.
 
-The Fleiss' $\kappa$ implementation (consistency.py:L176) follows paper §4.2.6 (paper
-Eq. 49–53) verbatim, including the per-stratum decomposition for single-answer questions
-where each $k_q$ stratum is its own $\kappa$ weighted by question count, and the
-per-label binary decomposition for multi-answer questions. `test_consistency.py` pins
-both decompositions on hand-crafted vote tables.
+The Fleiss' $\kappa$ implementation (consistency.py:L176) covers both the per-stratum
+decomposition for single-answer questions (each $k_q$ stratum is its own $\kappa$
+weighted by question count) and the per-label binary decomposition for multi-answer
+questions. `test_consistency.py` pins both decompositions on hand-crafted vote tables.
 
 ### 4.4 Composite accuracy weighted by sub-question type
 
 `per_model_summary.csv` reports a flat mixed mean for backwards compatibility. For
-headline scoring the paper uses composite accuracy: per-bucket exam-score followed by
-subtype-weighted average (paper Eq. 35, paper §4.2.3). Two dimensions are computed
-independently, since `multiple_choice` itself contains both single and multi and the two
-are not orthogonal.
+headline scoring the framework uses composite accuracy: per-bucket exam-score followed by
+subtype-weighted average. Two dimensions are computed independently, since
+`multiple_choice` itself contains both single and multi and the two are not orthogonal.
 
 The `question_type` dimension (yes_no / binary_named / multiple_choice) lands in
 `per_model_composite_by_question_type.csv`, while the `choice_type` dimension (single /
@@ -627,10 +610,9 @@ of evaluation scenarios, and users who disagree solve it by overriding one line 
 `.env`.
 
 Two alternatives are tempting but wrong. *Equal weights across buckets* sounds neutral
-but is not, since the empirical question-type prevalence on the paper's curated
-80-question set is roughly $\{\text{yes\_no}: 37/80, \text{binary}: 3/80, \text{mc}:
-40/80\}$; equal weights would double-count yes_no relative to mc and erase the most
-discriminative bucket. *Empirical-prevalence weights* are equivalent to a flat
+but is not, since the empirical question-type prevalence on the example DB is roughly
+$\{\text{yes\_no}: 37/80, \text{binary}: 3/80, \text{mc}: 40/80\}$; equal weights would
+double-count yes_no relative to mc and erase the most discriminative bucket. *Empirical-prevalence weights* are equivalent to a flat
 unweighted mean and fail for the same discrimination reason: when 50% of questions are
 near-random-baseline, weighting the composite by prevalence drowns out the
 signal-bearing buckets.
@@ -638,15 +620,13 @@ signal-bearing buckets.
 #### Why the chance baseline matters under the exam view
 
 Under the exam view, the chance baseline on the multi-choice multi-answer bucket is
-$T^{\text{chance}}_q = 2^{-(k_q - m_q + 1)}$ (paper Eq. 41), which lands in $[0.06,
-0.25]$ for typical $(k_q, m_q)$. Compare this with the strict-equality baseline
-$0.5^{k_q}$, which is essentially zero for $k_q \ge 5$. The exam view places the
-multi-answer column on the same order of magnitude as single-answer buckets in absolute
-terms, so the multi-answer signal, which is the one that actually discriminates models,
-is no longer drowned out by its near-zero strict-view variance. This is the core gain
-of the exam composite over a strict-equality composite, documented in paper §4.2.4 as
-the explicit rationale for choosing `exam_score_at_n_avg` rather than strict
-$\mathrm{pass@1}$ as the *headline* composite.
+$T^{\text{chance}}_q = 2^{-(k_q - m_q + 1)}$, which lands in $[0.06, 0.25]$ for typical
+$(k_q, m_q)$. Compare this with the strict-equality baseline $0.5^{k_q}$, which is
+essentially zero for $k_q \ge 5$. The exam view places the multi-answer column on the
+same order of magnitude as single-answer buckets in absolute terms, so the multi-answer
+signal, which is the one that actually discriminates models, is no longer drowned out by
+its near-zero strict-view variance. This is the core rationale for choosing
+`exam_score_at_n_avg` rather than strict $\mathrm{pass@1}$ as the *headline* composite.
 
 #### Configuration entrypoint
 
@@ -662,7 +642,7 @@ set, weight $\ge 0$, and at least one weight $> 0$.
 
 ### 4.5 Per-correct cost as a Pareto axis
 
-The paper proposes (paper Eq. 60)
+The cost-effectiveness scalar is
 
 $$C^{\text{per-correct}}_m = \frac{C^{\text{total}}_m}{|\mathcal{D}^{\text{eval}}| \cdot n \cdot \text{Composite\,Accuracy}_m}.$$
 
@@ -679,12 +659,10 @@ illusion produced by "low per-sample unit price but high error rate". Semantical
 $C^{\text{per-correct}}$ is the reciprocal of "how many difficulty-weighted correct
 predictions does one USD buy".
 
-The paper's experimental table (Table 5) demonstrates the value of this axis: at
-composite accuracy within 1.2pp of DeepSeek's lead ($0.6016$ vs $0.5896$), Qwen costs
-$1/8$ the total ($\$0.45$ vs $\$3.60$). The joint (accuracy, cost-per-correct) Pareto
-frontier is the only meaningful comparison surface; ranking on accuracy alone or cost
-alone is misleading. On this axis Qwen and DeepSeek jointly span the frontier, while the
-other four models are Pareto-dominated by at least one endpoint.
+In practice, the joint (accuracy, cost-per-correct) Pareto frontier is the only
+meaningful comparison surface; ranking on accuracy alone or cost alone is misleading. A
+model that lags the leader by a fraction of a point in accuracy while costing a fraction
+of the total is not "worse"; it is on the frontier from a different direction.
 
 ---
 
@@ -702,8 +680,8 @@ extracting a system part would lose the semantics of the original concatenation.
 **preserves cross-model consistency**: different providers handle system messages
 differently (OpenAI hard-caches them, Anthropic uses an independent field), and going
 uniformly through a user message yields the most stable comparability, which is exactly
-the property paper §3.5 demands of $R$ as a deterministic renderer. And it **stays easy to
-hash and diff**, since the entire prompt content is written directly into the
+the property the framework demands of $R$ as a deterministic renderer. And it **stays
+easy to hash and diff**, since the entire prompt content is written directly into the
 `user_prompt` field, so any future template change is visible through a hash at a
 glance.
 
@@ -717,9 +695,7 @@ of LLM-system interaction rounds per sample; enabling the reflection protocol or
 adds 2–4 rounds beyond a single-step direct answer, so the default is slightly higher
 than the historical value. `REACT_MAX_SEARCH_CALLS = [8]` (config.py:L283) is the
 cumulative `web_search` budget per sample; once spent, the tool returns `search budget
-exceeded` directly to the LLM. The paper main-table runs use $C = 4$ as the headline
-configuration, with the rationale $R_{\mathrm{tav}} \cdot C = 5 \cdot 4 = 20$,
-approximately two pages of Google search results.
+exceeded` directly to the LLM.
 
 Defining an upper bound on the model's autonomous searching via a budget serves two
 purposes. Without a cap, malicious or degenerate models could call indefinitely and
@@ -730,17 +706,17 @@ separates "out of budget" from "system crashed".
 Exceeding step count without producing a boxed answer is treated identically to a
 refusal: `parse_ok=0` (§3.5).
 
-The codebase default $C = 8$ is *deeper* than the paper main run $C = 4$, and this is
-intentional. The paper's main-table configuration is a deliberately tight budget for
-discrimination (paper §4.1.4, "two pages of Google"), while the example DB ships with a
-wider budget for smoother behavioural analysis. To exactly reproduce the paper main run,
-override `REACT_MAX_SEARCH_CALLS=4` in `.env` (FRAME §1.3 reconciliation table).
+The codebase default $C = 8$ is intentionally generous for behavioural analysis. A
+tighter budget such as $C = 4$ — with the rationale $R_{\mathrm{tav}} \cdot C = 5 \cdot
+4 = 20$, approximately two pages of Google search results — pushes the configuration
+into a deliberately tight discrimination regime; switching is a one-line `.env`
+override.
 
 ### 5.3 Reflection protocol pulls the model off "one-shot direct answer"
 
 Some models give a final answer after only ~1.6 searches on average; this confident
 one-shot behaviour drastically lowers `pass@1` on long-tail events. The project responds
-with a three-part protocol family (paper §4.1.3 inference-protocol bullets).
+with a three-part protocol family.
 
 The **reflection protocol** (`REACT_REFLECTION_PROTOCOL=true`, default on,
 config.py:L288) appends a *Forecasting Protocol* to the end of each sample's user
@@ -995,7 +971,7 @@ analysis/: aggregations
 ```
 
 This is one of the project's most important architectural decisions and is the
-operational embodiment of the paper's "metric-agnostic design" claim (paper §3.4).
+operational embodiment of the framework's metric-agnostic design.
 
 ### 6.7 v5 demotion of probabilistic metrics under K=5
 
@@ -1015,7 +991,7 @@ Hamming, Fleiss $\kappa$, mean entropy, VCI, MVG) becomes the v5 main line, with
 $K$ is increased to $\ge 30$ in the future, calibration can be reintroduced in a new
 change.
 
-This decision is **not** a paper-level constraint; it is a v5 *engineering* choice
+This decision is **not** a framework-level constraint; it is a v5 *engineering* choice
 motivated by sample-size statistics. Reverting to $K = 30$ would re-enable the
 probabilistic line; the demotion is by analyst convention rather than by hard-coded
 gate.
@@ -1081,11 +1057,10 @@ a redacted DB rather than the git repo.
 The alternative of a single composite hash loses ablation discrimination: once any of
 the three changes, everything looks "different", and we can no longer pair runs along
 one axis. The alternative of a 6-way compound key including the detector hash and the
-source DB hash was considered and rejected; the paper's design declares
-$H_{\mathrm{aux}}$ outside the $\mathcal{R}$ tuple precisely because the detector is an
-auxiliary engineering layer, and carrying it as a separate axis
-(`leak_detector_prompt_hash`) preserves the "strict-equality except one axis" pairing
-pattern at the ablation layer.
+source DB hash was considered and rejected; the framework keeps $H_{\mathrm{aux}}$
+outside the $\mathcal{R}$ tuple precisely because the detector is an auxiliary
+engineering layer, and carrying it as a separate axis (`leak_detector_prompt_hash`)
+preserves the "strict-equality except one axis" pairing pattern at the ablation layer.
 
 ### 7.4 Config snapshot redaction
 
@@ -1226,18 +1201,18 @@ later tells you what its `.env` looked like at the time, after redaction.
 OpenAI, DeepSeek, SiliconFlow, and local vLLM all work. The integration surface is
 deliberately small and standard. OpenAI's chat completion plus function calling protocol
 has become the de facto standard, so this project does not build a provider-adaptation
-layer but pushes adaptation responsibility to the endpoint. The paper's six-model
-comparison spans across providers (DeepSeek, Z.ai, Alibaba, MiniMax, Moonshot,
-ByteDance) precisely because of this neutrality.
+layer but pushes adaptation responsibility to the endpoint. This neutrality is what
+allows a single evaluation pipeline to compare models hosted across diverse providers
+without provider-specific code paths.
 
 ### 9.3 Training-cutoff config is quality config
 
 `MODEL_TRAINING_CUTOFFS=openai/gpt-5=2024-10-01,...` (config.py:L224) is not optional;
 it is **part of evaluation fairness**. The docs explicitly recommend declaring an
 explicit cutoff for every model under evaluation; an unspecified model is not filtered
-(with a warning). The paper takes the most conservative interpretation: when a model
+(with a warning). The recommended convention is the most conservative one: when a model
 card discloses cutoff only at month-level granularity, adopt the *last day* of the
-disclosed month as $\kappa_M$ (paper §4.1.2 footnote).
+disclosed month as $\kappa_M$.
 
 ### 9.4 Startup validation as enforcement
 
@@ -1255,7 +1230,7 @@ if any of the following fail.
   or all-zero weights (config.py:L515);
 * `GRID_DEFAULT_R` or `GRID_DEFAULT_C` not in their respective lists.
 
-The full set is enumerated in FRAME §7.1. The principle is **fail fast, before any
+The full set is enumerated in FRAME §7.2. The principle is **fail fast, before any
 billable call**: an evaluation that would have been silently miscounted is much more
 expensive than an evaluation that did not start. Pinned by `test_config.py`, where each
 rule has at least one fixture exercising both the accept and reject path.
@@ -1299,7 +1274,7 @@ The principle is **pick the invariants whose breakage would be expensive, and us
 tests as sentinels**. Each red line corresponds to one component of $\mathcal{R}$ that,
 if broken, makes the entire run unit invalid. The "if it breaks" column is deliberately
 blunt; this is the cost of skipping the test, not the cost of running it. The full
-mapping (33 tests to 11 framework components) is in FRAME §15.1.
+mapping (33 tests to 11 framework components) is in FRAME §11.2.
 
 ### 10.3 Dry-run smoke test
 
@@ -1312,7 +1287,7 @@ blow up.
 
 ### 10.4 Tests as documentation
 
-Every paper-level invariant has a test. When the prose in paper, FRAME, or DESIGN drifts
+Every framework-level invariant has a test. When the prose in FRAME or DESIGN drifts
 from the code, the test is the tie-breaker. The 33 test files in `tests/` (~13K LOC, all
 offline) are the most authoritative form of "what this codebase actually does"; if you
 cannot reconcile what you read here with what a test asserts, the test wins.
@@ -1344,7 +1319,7 @@ $(\text{real\_model}, R, C)$ triple as a **virtual model slug** `{real}::r{R}::c
 db.py:L500); the runner, DB, and analysis main pipeline treat it as an opaque string.
 Existing artefacts naturally expand into multiple rows by virtual slug, while the new
 module `forecast_eval/analysis/grid.py` decodes the triple, re-aggregates, and emits
-paper long tables and figures. Full decision archive in
+the long-form grid tables and per-cell figure family. Full decision archive in
 `openspec/changes/react-tavily-grid-search/design.md`; the 10 key decisions:
 
 | ID  | Decision                                                                                     |
@@ -1520,36 +1495,33 @@ detail.
 ## Appendix B. Reading roadmap
 
 If you are new to the project, we suggest reading in this order. The order is
-engineered: each step gives you the language for the next. Steps 1–4 build the
-conceptual model; steps 5–8 ground it in code; steps 9–10 give you the change history
+engineered: each step gives you the language for the next. Steps 1–3 build the
+conceptual model; steps 4–7 ground it in code; steps 8–9 give you the change history
 and the test contract.
 
 1. `README.md`: figure out in 10 minutes what OracleProto is and how to run it.
 2. This document (`DESIGN.md`): understand the motivation behind each trade-off.
-3. `paper/main.tex` §§1–3: read the formal framework, and sit with the tuple
-   $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$ until
-   each symbol has a clear name in your head.
-4. `FRAME.md`: the complete spec at field, interface, and pseudocode level. Use the
+3. `FRAME.md`: the complete spec at field, interface, and pseudocode level. Use the
    §1.1 grand map as your symbol-to-code lookup table whenever DESIGN says "see
    file:line".
-5. `forecast_eval/prompts.py` and `forecast_eval/parser.py`: the renderer $R$ and the
+4. `forecast_eval/prompts.py` and `forecast_eval/parser.py`: the renderer $R$ and the
    parser $\Psi$; these two files are practically the heart of the project.
-6. `forecast_eval/runner.py` and `forecast_eval/react.py`: orchestration and the ReAct
+5. `forecast_eval/runner.py` and `forecast_eval/react.py`: orchestration and the ReAct
    loop. Pay special attention to react.py:L266, where the four-knob priority chain
    lives.
-7. `forecast_eval/leak_filter.py` and `forecast_eval/search.py`: the temporal masking
+6. `forecast_eval/leak_filter.py` and `forecast_eval/search.py`: the temporal masking
    implementation and the Stage-2 detector. The prompt template at leak_filter.py:L55
    is what enforces the "no question fields" whitelist.
-8. `forecast_eval/analysis/`: the metric layer. Start with `exam_score.py`, which is
+7. `forecast_eval/analysis/`: the metric layer. Start with `exam_score.py`, which is
    single-file, self-contained, and reads in five minutes; then `accuracy.py` for
    Tversky, FSS, and Cohen $\kappa$; then `composite.py` for subtype-weighted
    aggregation; then `consistency.py` for Fleiss $\kappa$, VCI, and MVG.
-9. `tests/`: read tests to reverse-engineer the contracts. The five CI red lines
+8. `tests/`: read tests to reverse-engineer the contracts. The five CI red lines
    (§10.2) are the highest-priority entry points.
-10. `openspec/changes/archive/`: to find out *why* things became what they are today,
-    come here. Each change has a `proposal.md` (motivation), a `design.md` (decision
-    archive), a `specs/.../spec.md` (capability deltas), and a `tasks.md`
-    (implementation checklist).
+9. `openspec/changes/archive/`: to find out *why* things became what they are today,
+   come here. Each change has a `proposal.md` (motivation), a `design.md` (decision
+   archive), a `specs/.../spec.md` (capability deltas), and a `tasks.md`
+   (implementation checklist).
 
 ---
 
