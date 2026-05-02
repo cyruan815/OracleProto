@@ -2,8 +2,6 @@
 
 <h1>OracleProto</h1>
 
-<br>
-
 <em>A reproducible framework for benchmarking LLM native forecasting via knowledge cutoff and temporal masking</em>
 
 [English](./README.md) | [中文文档](./README-ZH.md)
