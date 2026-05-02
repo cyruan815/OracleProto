@@ -2,203 +2,191 @@
 
 **A reproducible framework for benchmarking LLM native forecasting via knowledge cutoff and temporal masking.**
 
-This repository is the reference implementation of the paper *OracleProto: A Reproducible
+OracleProto is the reference implementation of the paper *OracleProto: A Reproducible
 Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking*
-(Ma, Ruan, Huang, Yang & Zhou; BUPT — `paper/main.tex`). The framework reconstructs **resolved
-events** into **time-bounded forecasting samples** so that the evaluation object lives at the
-dataset level — auditable, replayable, and comparable across models and across calendar years.
+by Ma, Ruan, Huang, Yang and Zhou at the Beijing University of Posts and Telecommunications
+(`paper/main.tex`). The framework reconstructs resolved events into time-bounded forecasting
+samples whose evaluation lives at the dataset level, so a run is auditable, replayable, and
+comparable across models and across calendar years.
 
-> **Summed up in one sentence.** This codebase turns a forecasting evaluation into a single,
-> reproducible run unit
-> $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$ (paper §3.5,
-> "Run definition"), fixes every input — questions, knowledge cutoffs, temporal masking, ReAct
-> budgets, prompt rendering, output parsing, label normalization, and aggregation rules — and
-> emits scoring artefacts that are bit-identical from byte-identical configurations.
+> **In one sentence.** The codebase turns a forecasting evaluation into a single reproducible
+> run unit $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$
+> (paper §3.5, "Run definition") that fixes every input from questions through aggregation
+> rules, and emits scoring artefacts whose bytes match whenever the configuration matches.
 
-This README is the **10-minute orientation**: what the project is, how to run it, where each
-artefact comes from. For *why* each constraint exists, read `DESIGN.md`; for the field-level
-specification (every symbol → module → DB column → test) read `FRAME.md`; for the formal
-framework and the FutureX-Past evaluation read `paper/main.tex`.
+This README is a ten-minute orientation. It explains what the project is, how to run it, and
+where each artefact comes from. For the rationale behind every constraint, read `DESIGN.md`.
+For the field-level specification mapping each symbol to a module, a database column, and a
+pinning test, read `FRAME.md`. For the formal framework and the FutureX-Past evaluation, read
+`paper/main.tex`.
 
 ---
 
-## 1. The problem this project solves
+## 1. The problem
 
-Existing forecasting evaluations sit on an unstable middle ground (paper §1, §2.3):
+Existing forecasting evaluations sit on unstable middle ground (paper §1, §2.3). Prospective
+live benchmarks such as ForecastBench and FutureX are contamination-controlled by
+construction, yet they evaporate the moment events resolve, so the leaderboard becomes a
+one-way temporal stream rather than a reusable artefact. Retrospective benchmarks such as
+FutureX-Past or archived live questions are reproducible, yet they readily mistake factual
+recall for forecasting capability, since by the time the paper is written the answer already
+sits in the model's training corpus.
 
-* **Prospective live benchmarks** (ForecastBench, FutureX) are contamination-controlled by
-  construction but evaporate the moment the event resolves; the leaderboard is a one-way
-  temporal stream rather than a reusable artefact.
-* **Retrospective benchmarks** (FutureX-Past, archived live questions) are reproducible but
-  highly prone to mistaking *factual recall* for *forecasting capability*: by the time the
-  paper is written, the answer is sitting in the model's training corpus.
+Prompt-time discipline of the form "imagine you do not know that the election has resolved"
+cannot bridge this gap. Paleka et al. (2025) and Li et al. (2026), surveyed in paper §2.3,
+empirically document a substantial systematic gap between simulated ignorance and true
+ignorance, and they show that a 1–5% label-noise rate alone is enough to break proper scoring
+rules. Murphy (2026) reaches the same conclusion from the inference side in BLF: a
+single-inference defence does not generalise across runs, so the discipline must live one
+level deeper, inside the dataset itself.
 
-Prompt-time discipline ("imagine you do not know that the election has resolved") cannot
-bridge this gap. The diagnostic literature surveyed in paper §2.3 (Paleka et al. 2025; Li et
-al. 2026) has empirically shown a substantial systematic gap between **simulated ignorance**
-and **true ignorance**, and that a 1–5% label-noise rate alone is enough to break proper
-scoring rules. BLF (Murphy 2026) reaches the same conclusion from the inference side: a
-single-inference defence does not generalise across runs; the discipline must live one level
-deeper, *inside the dataset itself*.
-
-OracleProto's response is to push the discipline **one level deeper, into the dataset
-schema**. For a given (model, question) pair, the question is admitted only if its prediction
-cutoff $\chi_i$ satisfies (paper §3.1, Eq. 4 `eq:pred-set`)
+OracleProto pushes that discipline into the dataset schema. A question is admitted for model
+$M$ only when its prediction cutoff $\chi_i$ satisfies paper §3.1, Eq. 4 (`eq:pred-set`),
 
 $$\kappa_M \le \chi_i < \tau_i,$$
 
-where $\kappa_M$ is the model's training cutoff and $\tau_i$ is the event-resolution time —
-the model's parametric knowledge is not more recent than the permitted prediction
-environment, and the resolution time has not yet arrived in the simulated information state.
-Inadmissible questions are *not counted as model errors*; they are filtered out and audited
-separately (`runner.build_task_plan`, runner.py:L132–L199; pinned by
-`tests/test_training_cutoff.py`).
+where $\kappa_M$ denotes the model's training cutoff and $\tau_i$ the event-resolution time.
+The model's parametric knowledge is therefore no more recent than the permitted prediction
+environment, while the resolution time has not yet arrived in the simulated information
+state. Inadmissible questions are not counted as model errors. They are filtered out at
+`runner.build_task_plan` (runner.py:L132), audited separately, and pinned by
+`tests/test_training_cutoff.py`.
 
-## 2. Three contributions
+---
 
-Following paper §1, this repository delivers:
+## 2. The framework
 
-1. **A formal dataset-level framework for LLM forecasting evaluation.** The evaluation object
-   is no longer a one-shot live result, but a dataset-level task that is definable, auditable,
-   and reproducible — anyone can re-run the same
-   $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$ and obtain
-   comparable numbers (paper §3, materialised across `forecast_eval/*`).
-2. **The OracleProto unified evaluation protocol.** Knowledge cutoffs (sample admission),
-   tool-level temporal masking, content-level leakage detection (a Stage-2 LLM auditor),
-   discrete answer normalization, and hierarchical scoring (validity → item → question →
-   model) are wired into one pipeline (paper §3.3, §3.4, §3.5; `forecast_eval/runner.py`,
-   `react.py`, `leak_filter.py`, `parser.py`, `analysis/`).
-3. **A systematic evaluation benchmark and a trainable forecasting harness.** The example
-   dataset bundled with the repo (`forecast_eval_set_example.db`, 319 questions), plus the
-   FutureX-Past instantiation reported in the paper (curated 80-question subset, paper
-   §4.1.1), together provide a leakage-controlled forecasting evaluation set. Outputs
-   (per-sample raw records, per-model SQLite databases, hierarchical analytics) are
-   immediately reusable as signals for SFT, RL, and forecasting-agent training (paper §1, §5).
+OracleProto rests on two artefacts: a single run unit $\mathcal{R}$ that names every input to
+the evaluation, and a four-channel information boundary that controls every path by which the
+model could learn the answer.
 
-## 3. The run unit $\mathcal{R}$
+### 2.1 The run unit $\mathcal{R}$
 
 Every invocation of `evaluation.py` materialises a single run unit
 $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$ (paper §3.5,
-"Run definition"; the run unit is the 34th equation of the paper, immediately followed by the
-stochastic-trial definition $\widehat{Y}_{i,M}^{(s)}$). Each symbol resolves to **one**
-configuration knob, **one** code path, and **one** test that pins the contract:
+"Run definition"). Each symbol resolves to one configuration knob, one code path, and one
+pinning test.
 
-| Symbol             | Object                       | Config / code path                                                     | Pin test                       |
-| ------------------ | ---------------------------- | --------------------------------------------------------------------- | ------------------------------ |
-| $\mathcal{D}$      | Discrete forecasting dataset | `SOURCE_DB` / `SOURCE_TABLE` (config.py:L391/L395); `loader.sync_questions` (loader.py:L77) | `tests/test_db.py`             |
-| $M$                | Evaluated model              | one entry of `MODELS` (config.py:L223); one SQLite per model under `runs/{run_id}/db/` | `tests/test_runner_grid_model.py` |
-| $\kappa_M$         | Knowledge cutoff             | `MODEL_TRAINING_CUTOFFS[M]` (config.py:L224); admissibility filter at `runner.build_task_plan` (runner.py:L132) | `tests/test_training_cutoff.py` |
-| $\delta$           | Temporal masking offset      | `TAVILY_END_DATE_OFFSET_DAYS` default `-1` (config.py:L273); injected at the tool layer in `react.py` | `tests/test_search.py`, `tests/test_react.py` |
-| $T$                | Max ReAct steps              | `REACT_MAX_STEPS` default `12` (config.py:L279); outer loop `react.run_react` (react.py:L248) | `tests/test_react.py`          |
-| $C$                | Max search calls             | `REACT_MAX_SEARCH_CALLS` default `[8]` (config.py:L283); budget gate (react.py:L276–L279) | `tests/test_react.py`          |
-| $R$                | Input renderer               | `forecast_eval/prompts.py::render_user_prompt`                         | `tests/test_prompts.py`        |
-| $\Psi$             | Output parser & validity     | `forecast_eval/parser.py::parse_answer` (parser.py:L40)                 | `tests/test_parser.py`         |
-| $\phi$             | Answer normalization map     | letter encoding (`A`, `A,B` …) defined per `question_type`; `parser.parse_gt` (parser.py:L92) | `tests/test_parser.py`         |
-| $\Gamma$           | Aggregation rule             | `forecast_eval/analysis/*` (composite accuracy, FSS, κ, BI, …)          | `tests/test_analysis.py`       |
-| $H_{\mathrm{aux}}$ | Auxiliary leakage detector   | `leak_filter.filter_search_result`; logged in `run_meta.config_snapshot` rather than in the $\mathcal{R}$ tuple (paper §3.5 "Run definition") | `tests/test_leak_filter.py` |
+| Symbol             | Object                       | Config / code path                                                                                          | Pin test                          |
+| ------------------ | ---------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| $\mathcal{D}$      | Discrete forecasting dataset | `SOURCE_DB` / `SOURCE_TABLE` (config.py:L391/L395); `loader.sync_questions` (loader.py:L77)                  | `tests/test_db.py`                |
+| $M$                | Evaluated model              | one entry of `MODELS` (config.py:L223); one SQLite per model under `runs/{run_id}/db/`                       | `tests/test_runner_grid_model.py` |
+| $\kappa_M$         | Knowledge cutoff             | `MODEL_TRAINING_CUTOFFS[M]` (config.py:L224); admissibility filter at `runner.build_task_plan` (runner.py:L132) | `tests/test_training_cutoff.py`   |
+| $\delta$           | Temporal masking offset      | `TAVILY_END_DATE_OFFSET_DAYS` default `-1` (config.py:L273); injected at the tool layer in `react.py`        | `tests/test_search.py`, `tests/test_react.py` |
+| $T$                | Max ReAct steps              | `REACT_MAX_STEPS` default `12` (config.py:L279); outer loop `react.run_react` (react.py:L162)                | `tests/test_react.py`             |
+| $C$                | Max search calls             | `REACT_MAX_SEARCH_CALLS` default `[8]` (config.py:L283); budget gate (react.py:L276–L279)                    | `tests/test_react.py`             |
+| $R$                | Input renderer               | `forecast_eval/prompts.py::render_user_prompt`                                                              | `tests/test_prompts.py`           |
+| $\Psi$             | Output parser and validity   | `forecast_eval/parser.py::parse_answer` (parser.py:L40)                                                     | `tests/test_parser.py`            |
+| $\phi$             | Answer normalization map     | letter encoding `A` or `A,B` etc. defined per `question_type`; `parser.parse_gt` (parser.py:L92)             | `tests/test_parser.py`            |
+| $\Gamma$           | Aggregation rule             | `forecast_eval/analysis/*` (composite accuracy, FSS, κ, BI, …)                                              | `tests/test_analysis.py`          |
+| $H_{\mathrm{aux}}$ | Auxiliary leakage detector   | `leak_filter.filter_search_result`; logged in `run_meta.config_snapshot` rather than inside the $\mathcal{R}$ tuple itself (paper §3.5) | `tests/test_leak_filter.py` |
 
-The auxiliary detector $H_{\mathrm{aux}}$ is deliberately kept **outside** the formal tuple
-in the paper (§3.5) and bound via SHA-256 fingerprint to run metadata, because the detector
-is a *replaceable empirical engineering layer* that supports the boundary, not a primitive
-component of the forecasting system itself. Its prompt SHA-256 is stored in
+The auxiliary detector $H_{\mathrm{aux}}$ lies outside the formal tuple by design (paper
+§3.5). It is a replaceable empirical engineering layer that supports the boundary, not a
+primitive component of the forecasting system. Its prompt SHA-256 is stored in
 `run_meta.config_snapshot.leak_detector_prompt_hash`, so the leakage barrier is itself
-byte-reproducible (`leak_filter.py:L55`–L104).
+byte-reproducible (`leak_filter.py:L55–L104`).
 
 The information visible to model $M$ on question $q_i$ is, by paper §3.3 Eq. 16
 (`eq:visible-info`),
 
 $$\mathcal{I}_{i,M}^{\mathrm{vis}} = \mathcal{K}^{M}_{\le\kappa_M} \cup \mathcal{T}_{\le\chi_i},$$
 
-with $\mathcal{K}^{M}_{\le\kappa_M}$ the parametric knowledge before the model's cutoff and
-$\mathcal{T}_{\le\chi_i}$ the temporally masked external information. The forecasting system
-$F_M$ produces $\widehat{Y}_{i,M} = F_M(q_i^{\mathrm{in}}; \mathcal{I}_{i,M}^{\mathrm{vis}})$
-with $\widehat{Y}_{i,M}\subseteq\mathcal{A}_i$ — see paper Algorithm 1 for the time-masked
-discrete forecasting loop, mirrored almost line-for-line in `react.run_react` (react.py:L248).
+where $\mathcal{K}^{M}_{\le\kappa_M}$ is the parametric knowledge available before the
+model's cutoff and $\mathcal{T}_{\le\chi_i}$ is the temporally masked external information.
+The forecasting system $F_M$ produces $\widehat{Y}_{i,M} = F_M(q_i^{\mathrm{in}}; \mathcal{I}_{i,M}^{\mathrm{vis}})$
+with $\widehat{Y}_{i,M}\subseteq\mathcal{A}_i$. Paper Algorithm 1 specifies the time-masked
+discrete forecasting loop, mirrored almost line-for-line in `react.run_react`
+(react.py:L162).
 
-For the field-level grand map (every symbol → module → DB column → test), see `FRAME.md` §1.1.
+For the field-level grand map mapping every symbol to a module, a DB column, and a test, see
+`FRAME.md` §1.1.
 
-## 4. The four-channel information boundary
+### 2.2 The four-channel information boundary
 
-Paper §3.5 decomposes the residual leakage surface into **three controlled channels** —
-parametric, tool-mediated, and retrieval-content — plus a **fourth provider-side residual**
-that is not under the evaluator's control. The implementation maps each channel to a
-mechanical defence with declared coverage, summarised below; the empirical residual rates
-come from paper §4.1.5 Table 3 (270-item manual audit, paper §4.3.4).
+Paper §3.5 decomposes residual leakage into three controlled channels and a fourth
+provider-side residual. The three controlled channels are parametric, tool-mediated, and
+retrieval-content; the fourth lies outside the evaluator's control. Each channel maps to a
+mechanical defence with declared coverage. The empirical residual rates come from the
+270-item manual audit at paper §4.3.4, Table 8.
 
-| Channel (paper §3.5)        | Defence layer                                       | Where (code)                                              | Default            | Residual leakage rate (paper §4.1.5) |
-| --------------------------- | --------------------------------------------------- | --------------------------------------------------------- | ------------------ | ------------------------------------ |
-| **L0 manual curation**      | Upstream dataset construction                       | `forecast_eval_set_example.db` / FutureX-Past curation     | always             | 0% (manual annotation floor)          |
-| **L1 parametric (admissibility filter)** | $\kappa_M \le \chi_i$ check at task generation | `runner.build_task_plan` (runner.py:L132–L199)            | `MODEL_TRAINING_CUTOFFS` declared per model | filters parametric-memory leakage upstream |
-| **L2 tool-mediated (Tavily)** | `end_date = \chi_i` injected at the tool layer    | `react._compute_end_date` (react.py:L182); `search.tavily_search` | $\delta=-1$ day  | 3%–16% on its own (Tavily metadata noise) |
-| **L3 retrieval-content (Stage-2 detector)** | Independent LLM auditor on each Tavily item | `leak_filter.filter_search_result` (leak_filter.py:L348) | `claude-sonnet-4.6` | **1.1%** per-audit-item; **1.3%** leak-conditional (Wilson 95% UB **3.2%**) |
-| **L4 provider-side residual (declared)**  | Provider-native browsing **forbidden**           | `Settings._post_validate` (config.py:L602–L606, L747–L751); `llm._assert_no_browsing` (llm.py:L74–L98); `leak_filter._assert_detector_safe` (leak_filter.py:L139) | always             | declared as evaluation bias rather than pretended-away |
+| Channel (paper §3.5)                          | Defence layer                                                | Where (code)                                                                                                                                | Default                                  | Residual leakage rate                                                                                       |
+| --------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| **L0 manual curation**                        | Upstream dataset construction                                | `forecast_eval_set_example.db` and FutureX-Past curation                                                                                    | always                                   | 0% (manual annotation floor)                                                                                |
+| **L1 parametric (admissibility filter)**      | $\kappa_M \le \chi_i$ check at task generation               | `runner.build_task_plan` (runner.py:L132–L199)                                                                                              | `MODEL_TRAINING_CUTOFFS` per model       | filters parametric-memory leakage upstream                                                                  |
+| **L2 tool-mediated (Tavily)**                 | `end_date = \chi_i` injected at the tool layer               | `react._compute_end_date` (react.py:L39); `search.tavily_search`                                                                            | $\delta=-1$ day                          | 3%–16% on its own; Tavily metadata noise (paper §4.1.5 Table 3)                                              |
+| **L3 retrieval-content (Stage-2 detector)**   | Independent LLM auditor on each Tavily item                  | `leak_filter.filter_search_result` (leak_filter.py:L348)                                                                                    | `claude-sonnet-4.6`                      | **1.1%** per-audit-item; **1.3%** leak-conditional; Wilson 95% UB **3.2%** (paper §4.3.4 Table 8)            |
+| **L4 provider-side residual (declared)**      | Provider-native browsing forbidden                           | `Settings._post_validate` (config.py:L602–L606, L747–L751); `llm._assert_no_browsing` (llm.py:L74–L98); `leak_filter._assert_detector_safe` (leak_filter.py:L139) | always                                   | declared as evaluation bias rather than pretended-away                                                      |
 
-The triple-layer enforcement of L4 — (a) startup validation rejects `:online` slugs and the
-`::` reserved delimiter, (b) `llm.chat` re-asserts on the wire, (c) the detector client
-duplicates the same checks — is pinned by `tests/test_llm_no_browsing.py` and
-`tests/test_config.py`. It is structurally the one defence that must pass *before* any
-billable LLM call leaves the process.
+The triple-layer enforcement of L4 first rejects `:online` slugs and the `::` reserved
+delimiter at startup, then re-asserts on the wire inside `llm.chat`, and finally duplicates
+the same checks in the detector client. Both `tests/test_llm_no_browsing.py` and
+`tests/test_config.py` pin the contract. Structurally, L4 is the one defence that must pass
+before any billable LLM call leaves the process.
 
-The 270-item audit (paper §4.3.4, Table 8) was sampled across 3 models × 30 questions × 3
-trials. The detector recall is 98.7% (235 TP / 238 real leaks), specificity 96.9% (31 TN /
-32 real non-leaks), per-audit-item residual rate 3/270 ≈ 1.1%, with the Wilson 95% upper
-bound landing at ≈ 3.2% — an order of magnitude below the Tavily-only baseline and
-approaching the manual-annotation floor at two orders of magnitude lower marginal cost.
+The 270-item audit was sampled across 3 models, 30 questions, and 3 trials. The detector
+recall is 98.7% (235 TP / 238 real leaks), specificity is 96.9% (31 TN / 32 real
+non-leaks), and the per-audit-item residual rate is 3/270 ≈ 1.1%. The Wilson 95% upper
+bound lands at ≈ 3.2%, an order of magnitude below the Tavily-only baseline and approaching
+the manual-annotation floor at two orders of magnitude lower marginal cost.
 
-For the threat model and the "what we can/cannot control" decomposition, see DESIGN.md §2;
-for the eight hard constraints derived from $\mathcal{R}$, see FRAME.md §1.2.
+For the threat model and the broader "what we can and cannot control" decomposition, see
+`DESIGN.md` §2. For the eight hard constraints derived from $\mathcal{R}$, see `FRAME.md`
+§1.2.
 
 ---
 
-## 5. Quickstart
+## 3. Quickstart
 
-### 5.1 Create the conda environment
+### 3.1 Create the conda environment
 
 ```bash
 conda env create -f environment.yml
 conda activate forecast
 ```
 
-### 5.2 Configure `.env`
+### 3.2 Configure `.env`
 
 ```bash
 cp .env.example .env
 # Edit .env and fill in:
-#   LLM_API_KEY (and LLM_BASE_URL: any OpenAI-compatible endpoint — OpenRouter / Aliyun
-#                Bailian / OpenAI / DeepSeek / SiliconFlow / local vLLM)
+#   LLM_API_KEY (and LLM_BASE_URL: any OpenAI-compatible endpoint such as
+#                OpenRouter, Aliyun Bailian, OpenAI, DeepSeek, SiliconFlow,
+#                or local vLLM)
 #   TAVILY_API_KEY (single value or CSV multi-key for higher quota)
 #   LEAK_DETECTOR_API_KEY (Stage-2 auditor; can reuse LLM_API_KEY by leaving
-#                          LEAK_DETECTOR_BASE_URL empty — see §16)
-#   MODELS, MODEL_TRAINING_CUTOFFS — list every model under evaluation and its κ_M
+#                          LEAK_DETECTOR_BASE_URL empty; see §8.4)
+#   MODELS, MODEL_TRAINING_CUTOFFS: list every model under evaluation and its κ_M
 ```
 
-Declaring $\kappa_M$ for **every** model is mandatory for a fair run: the framework's
+Declaring $\kappa_M$ for every model is mandatory for a fair run, since the framework's
 admissibility filter is what separates "the model failed to forecast" from "the model already
-knew the answer" (paper §3.1, Eq. 4). Models without a declared cutoff are not filtered (a
-warning is emitted) and their numbers are not directly comparable to the rest. Cutoffs may be
-written at month granularity; FRAME.md §1.3 records the convention "use the last day of the
+knew the answer" (paper §3.1, Eq. 4). Models without a declared cutoff are not filtered, a
+warning is emitted, and their numbers are not directly comparable to the rest. Cutoffs may be
+written at month granularity; `FRAME.md` §1.3 records the convention "use the last day of the
 disclosed month as $\kappa_M$" for safety.
 
-`Settings._post_validate` (config.py:L597) runs **before** any LLM call leaves the process —
-empty `LLM_API_KEY`, empty `MODELS`, `:online` suffixes, `::` in slugs, `MIN_SEARCH > min(C)`,
-disabled `ENABLE_SEARCH_LEAK_FILTER` paired with a present `LEAK_DETECTOR_API_KEY`,
-`GRID_DEFAULT_R/C` outside the configured cells, etc. — all fail-fast so a misconfigured
-`.env` cannot waste budget.
+`Settings._post_validate` (config.py:L598) runs before any LLM call leaves the process. It
+fails fast on empty `LLM_API_KEY`, empty `MODELS`, `:online` suffixes, `::` in slugs,
+`MIN_SEARCH > min(C)`, disabled `ENABLE_SEARCH_LEAK_FILTER` paired with a present
+`LEAK_DETECTOR_API_KEY`, and `GRID_DEFAULT_R/C` outside the configured cells, so a
+misconfigured `.env` cannot waste budget.
 
-### 5.3 Run tests (no API calls required)
+### 3.3 Run tests (no API calls required)
 
 ```bash
 pytest tests/ -q
 ```
 
-The CI baseline is `test_prompts / test_parser / test_training_cutoff / test_llm_no_browsing /
-test_analysis` — those five must stay green. They guard, respectively, the renderer $R$, the
-parser $\Psi$, the admissibility filter $\kappa_M$, the provider-native-browsing ban (§4 L4),
-and the aggregation rule $\Gamma$. The full suite (33 test files, ~14k lines) covers the
-v3/v4 DB migrations, leak filter, exam-score/composite weights, grid dispatcher, react budget
+The CI baseline is `test_prompts / test_parser / test_training_cutoff /
+test_llm_no_browsing / test_analysis`, and these five must stay green. They guard the
+renderer $R$, the parser $\Psi$, the admissibility filter $\kappa_M$, the
+provider-native-browsing ban from §2.2 L4, and the aggregation rule $\Gamma$, respectively.
+The full suite spans 33 test files and roughly 13k lines, covering the v3/v4 DB migrations,
+the leak filter, exam-score and composite weights, the grid dispatcher, the react budget
 chain, and behavioural diagnostics.
 
-### 5.4 Run an evaluation
+### 3.4 Run an evaluation
 
 ```bash
 # Smoke: cheapest model, single sample, yes_no only
@@ -211,24 +199,24 @@ python evaluation.py
 # Filter combinations (AND across flags, OR within each flag)
 python evaluation.py --question-type multiple_choice --choice-type multi
 
-# Skip the post-run analysis pass (raw DBs still land in db/)
+# Skip the post-run analysis pass; raw DBs still land in db/
 python evaluation.py --skip-analysis
 ```
 
-Every invocation creates a fresh folder under `RUNS_ROOT` (default `./runs`), named after the
-auto-generated `run_id` `YYYYMMDD-HHMMSS-{4-char hex}`. Resuming with the same `run_id`
-continues into the existing folder (§14).
+Every invocation creates a fresh folder under `RUNS_ROOT` (default `./runs`), named after
+the auto-generated `run_id` of the form `YYYYMMDD-HHMMSS-{4-char hex}`. Resuming with the
+same `run_id` continues into the existing folder; see §8.1.
 
 ---
 
-## 6. Reproducing the paper's main run
+## 4. Reproducing the paper's main run
 
-The example DB and the codebase ship with a *deeper search-budget configuration* than the
-paper's main run. This is intentional — paper main is tight for discrimination
-($R_{\mathrm{tav}}\cdot C = 5\cdot 4 = 20$, "two pages of Google search results"), while
-codebase defaults trade a wider budget for smoother behavioural analysis. The paper's main
-run (paper §4.1.3 inference protocol + §4.1.4 search-tool configuration) is reproduced by
-these `.env` overrides:
+The example DB and the codebase ship with a deeper search-budget configuration than the
+paper's main run. The paper's main run is intentionally tight for discrimination at
+$R_{\mathrm{tav}}\cdot C = 5\cdot 4 = 20$, equivalent to "two pages of Google search
+results", whereas the codebase defaults trade a wider budget for smoother behavioural
+analysis. The paper main configuration, defined by paper §4.1.3 (inference protocol) and
+§4.1.4 (search-tool configuration), is reproduced by the following `.env` overrides:
 
 ```ini
 SOURCE_DB=./forecast_eval_set_example.db
@@ -243,34 +231,34 @@ REACT_BUDGET_AWARENESS_PROTOCOL=true
 REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=true
 REACT_FORCE_FINAL_ANSWER_LOOKAHEAD=2
 REACT_BUDGET_EXCEEDED_DROP_TOOLS=true
-REACT_FINAL_ANSWER_RETRY=false              # v5.1 backstop, off by default (§15)
+REACT_FINAL_ANSWER_RETRY=false              # v5.1 backstop, off by default; see §8.3
 ENABLE_SEARCH_LEAK_FILTER=true              # Stage-2 detector on
 BELIEF_PROTOCOL=false                       # paper strict-letter mode
 ```
 
-Then declare each model's $\kappa_M$ via `MODEL_TRAINING_CUTOFFS` per paper Table 2 (the six
-published cutoffs cover $\kappa_M$ ∈ {2025-09-29, 2026-02-11, 2026-02-25, 2026-02-12,
-2026-01-27, 2026-03-10}), corresponding to **DeepSeek-V3.2-Exp / GLM 5 / Qwen3.5-Flash /
-MiniMax M2.5 / Kimi K2.5 / Doubao Seed 2.0 Lite**.
+Each model's $\kappa_M$ must then be declared via `MODEL_TRAINING_CUTOFFS` per paper Table 2.
+The six published cutoffs cover $\kappa_M \in$ {2025-09-29, 2026-02-11, 2026-02-25,
+2026-02-12, 2026-01-27, 2026-03-10}, corresponding to **DeepSeek-V3.2-Exp / GLM 5 /
+Qwen3.5-Flash / MiniMax M2.5 / Kimi K2.5 / Doubao Seed 2.0 Lite**.
 
-The paper-vs-default knob diff is reproduced and audited in `FRAME.md` §1.3; the rationale
-(why these are the right knobs to vary as a contract, and which knobs are pure engineering
-that do not change comparability) is in `DESIGN.md` §13.
+The paper-vs-default knob diff is reproduced and audited in `FRAME.md` §1.3. The rationale,
+including which knobs are contract knobs that change cross-run comparability and which knobs
+are pure engineering, lives in `DESIGN.md` §12.
 
 ---
 
-## 7. Bring your own dataset
+## 5. Bring your own dataset
 
-The repository ships with `forecast_eval_set_example.db` so that a `git clone` is enough to
-reproduce a non-trivial run. The example DB has **319 questions** spanning 2026-01-15 to
-2026-04-14; the FutureX-Past instantiation reported in the paper is a curated **80-question
-subset** of the same source format, partitioned across yes/no (37) / binary-named (3) /
-multiple-choice (40, of which 8 are multi-answer) — paper §4.1.1, Table 1. To plug in a
-different corpus,
-point `SOURCE_DB` / `SOURCE_TABLE` at any SQLite file/table that follows the same 7-column
-schema (`id / choice_type / question_type / event / options / answer / end_time` — see
-FRAME.md §2.1) plus a `dataset_metadata` row carrying the eight prompt template keys
-(FRAME.md §2.3):
+The repository ships with `forecast_eval_set_example.db` so that a fresh clone is enough to
+reproduce a non-trivial run. The bundled DB is the paper's curated FutureX-Past 80-question
+subset (paper §4.1.1, Table 1): 37 yes/no questions, 3 binary-named, and 40 multiple-choice,
+of which 8 are multi-answer, with event-resolution dates spanning 2026-03-12 to 2026-04-14.
+
+To plug in a different corpus, point `SOURCE_DB` and `SOURCE_TABLE` at any SQLite file or
+table that follows the same seven-column schema
+`id / choice_type / question_type / event / options / answer / end_time` (see `FRAME.md`
+§2.1), with a `dataset_metadata` row carrying the eight prompt template keys (see `FRAME.md`
+§2.3):
 
 ```bash
 SOURCE_DB=./my_questions.db
@@ -280,28 +268,33 @@ SOURCE_TABLE=my_questions
 `SOURCE_TABLE` is whitelist-validated against `^[A-Za-z_][A-Za-z0-9_]*$` at startup
 (config.py:L586–L595), so a typo fails fast instead of leaking into the SQL layer.
 
-Once the schema is satisfied the paper's evaluation is **dataset-agnostic** — drop in
-domain-specific corpora (medical, scientific, engineering forecasting) and the same run unit
-$\mathcal{R}$ guarantees the same audit / replay properties (paper §6 Limitations:
-$\mathcal{D}$ is a replaceable input component of $\mathcal{R}$, so cross-domain extension is
-"a natural unfolding of the framework rather than an internal defect of it").
+Once the schema is satisfied, the paper's evaluation is dataset-agnostic. Domain-specific
+corpora such as medical, scientific, or engineering forecasting can be dropped in directly,
+and the same run unit $\mathcal{R}$ guarantees the same audit and replay properties. Paper §6
+(Limitations) records that $\mathcal{D}$ is a replaceable input component of $\mathcal{R}$,
+so cross-domain extension is "a natural unfolding of the framework rather than an internal
+defect of it".
 
-## 8. Output layout
+---
 
-The output directory **is** the run unit's persisted form. Anyone receiving
+## 6. Outputs
+
+The output directory is the run unit's persisted form. Anyone receiving
 `runs/{run_id}/db/{model_slug}.db` can replay the model's evaluation without any other
 artefact.
+
+### 6.1 Directory layout
 
 ```text
 runs/
   {run_id}/
     manifest.json           # run-level metadata: run_id, schema_version, analysis_schema,
                             #   sampling_n, models, filters, source/metadata/templates hashes,
-                            #   reflection_protocol_hash, belief_protocol_hash, started_at /
-                            #   finished_at — plus a `grid` block when multi-(R, C) is enabled
+                            #   reflection_protocol_hash, belief_protocol_hash, started_at,
+                            #   finished_at; plus a `grid` block when multi-(R, C) is enabled
     db/
       {model_slug}.db       # one SQLite per model; self-contains questions + prompt_templates
-                            #   + run_meta + run_results (see §9). Independently distributable.
+                            #   + run_meta + run_results (see §6.2). Independently distributable.
     analysis/               # generated by forecast_eval.analysis after the run finishes
       per_model_summary.csv         # main scoring table: composite accuracy + v5 discrete
                                     #   family (FSS / Cohen κ / Hamming / Fleiss κ / mean
@@ -312,10 +305,10 @@ runs/
                                     #   columns flagged with `†` and a K disclaimer
       per_model_by_question_type.csv # sliced by yes_no / binary_named / multiple_choice
       per_model_by_choice_type.csv   # sliced by single / multi
-      per_model_composite_by_question_type.csv  # subtype-weighted composite (default 0.15 /
-                                                #   0.15 / 0.70 — see §10)
-      per_model_composite_by_choice_type.csv    # subtype-weighted composite (default 0.40 /
-                                                #   0.60)
+      per_model_composite_by_question_type.csv  # subtype-weighted composite; defaults
+                                                #   0.15 / 0.15 / 0.70 (see §7.1)
+      per_model_composite_by_choice_type.csv    # subtype-weighted composite; defaults
+                                                #   0.40 / 0.60 (see §7.1)
       composite_meta.json             # composite-score audit trail: per (model, metric)
                                       #   buckets_used / weights_used_normalized / value /
                                       #   bucket_values
@@ -355,417 +348,434 @@ runs/
       grid_pareto.csv                 # `dominated_by` empty for Pareto-frontier cells, else
                                       #   the lex-smallest dominator slug
       grid_winrate.csv                # pairwise (R, C)-cell wins + significant-cell tally
-      figs/                           # only after `python scripts/plot_analysis.py`
-                                      #   (matplotlib not in core deps; on-demand)
+      figs/                           # only after `python scripts/plot_analysis.py`;
+                                      #   matplotlib not in core deps, on-demand
     logs/
       {run_id}.log
 ```
 
-Model-slug filesystem safety: `/` → `__`, anything outside `[A-Za-z0-9._-]` → `_`. So
-`openai/gpt-4o-mini` becomes `openai__gpt-4o-mini.db`. Grid virtual slugs add `__r{R}__c{C}`
-suffixes (§13).
+Model-slug filesystem safety maps `/` to `__`, and any character outside `[A-Za-z0-9._-]` to
+`_`. So `openai/gpt-4o-mini` becomes `openai__gpt-4o-mini.db`. Grid virtual slugs add
+`__r{R}__c{C}` suffixes; see §8.2.
 
----
+### 6.2 Per-model database schema
 
-## 9. Database schema (per-model, self-contained)
+Each model DB holds three tables.
 
-Each model DB holds:
-
-* **`questions`** / **`prompt_templates`** — copies of the source data, so every DB is
+* **`questions`** and **`prompt_templates`** are copies of the source data, so every DB is
   independently replayable without the original `SOURCE_DB`.
-* **`run_meta`** — single row: `run_id, model, sampling_n, config_snapshot (redacted),
-  filters_snapshot, source/metadata/templates hashes, training_cutoff,
-  reflection_protocol_text/hash, belief_protocol_text/hash, started_at, finished_at`.
-  The two protocol fingerprints are independent of `prompt_templates_hash` and of each other
-  — see DESIGN.md §5 for why three independent fingerprints (template / reflection / belief)
-  enable three-axis ablation A/B pairing without collisions.
-* **`run_results`** — wide table, **one row per question**. For each $i$ in
-  `0..SAMPLING_N-1` a `s{i}_*` group of columns (v3 = 20 columns; v4 adds 3 belief columns;
-  v5.1 adds 1 retry column):
-  `final_answer_letters / final_answer_raw / correct / parse_ok / tool_calls_count /
-  react_steps / prompt_tokens / completion_tokens / reasoning_tokens / latency_ms /
-  messages_trace / search_calls / error / created_at` (v2 base) +
-  `finish_reason / nudges_used / step_metrics / response_id / system_fingerprint /
-  service_tier` (v3 observability) + `belief_final / belief_trace / belief_parse_ok` (v4
-  belief) + `final_answer_retry_used` (v5.1, see §15). Old DBs are auto-migrated via
-  `ALTER TABLE ADD COLUMN` on first re-open; `Settings.BELIEF_PROTOCOL=false` keeps the v4
-  belief columns NULL and leaves all v3 accuracy metrics byte-identical to pre-v4 runs.
+* **`run_meta`** holds a single row containing `run_id, model, sampling_n, config_snapshot
+  (redacted), filters_snapshot, source/metadata/templates hashes, training_cutoff,
+  reflection_protocol_text/hash, belief_protocol_text/hash, started_at, finished_at`. The
+  two protocol fingerprints are independent of `prompt_templates_hash` and of each other.
+  `DESIGN.md` §7.3 explains why three independent fingerprints, namely template,
+  reflection, and belief, enable three-axis ablation A/B pairing without collisions.
+* **`run_results`** is a wide table with one row per question. For each $i$ in
+  `0..SAMPLING_N-1` there is an `s{i}_*` group of 20 columns at the v3 base, plus 3 belief
+  columns added at v4 and 1 retry column added at v5.1. The full set is `final_answer_letters
+  / final_answer_raw / correct / parse_ok / tool_calls_count / react_steps / prompt_tokens /
+  completion_tokens / reasoning_tokens / latency_ms / messages_trace / search_calls / error /
+  created_at` for the v2 base, `finish_reason / nudges_used / step_metrics / response_id /
+  system_fingerprint / service_tier` for v3 observability, `belief_final / belief_trace /
+  belief_parse_ok` for v4 belief, and `final_answer_retry_used` for v5.1; see §8.3. Old DBs
+  auto-migrate via `ALTER TABLE ADD COLUMN` on first re-open. Setting
+  `Settings.BELIEF_PROTOCOL=false` keeps the v4 belief columns NULL and leaves all v3
+  accuracy metrics byte-identical to pre-v4 runs.
 
-**The DB stores raw observations only.** No aggregates are pre-computed — pass@1, pass_any@N,
-majority vote, FSS, BI, etc. all come from the `analysis/` pass, which runs automatically at
-the end of `evaluation.py` and can also be invoked standalone:
+The DB stores raw observations only. No aggregates are pre-computed; pass@1, pass_any@N,
+majority vote, FSS, BI and the rest all come from the `analysis/` pass, which runs
+automatically at the end of `evaluation.py` and can also be invoked standalone:
 
 ```bash
 python -m forecast_eval.analysis runs/{run_id}
 ```
 
-This separation (raw vs. aggregated) is one of the project's most load-bearing architectural
-decisions — DESIGN.md §6 catalogues it as Principle 5 ("Metric definitions evolve faster than
-DB schemas; deferring all aggregation to the analysis layer means a metric redefinition never
-requires a DB backfill"). Pinned by `tests/test_analysis.py`, which runs the entire analysis
-on a hand-crafted DB fixture without re-touching it.
+This separation between raw observations and aggregated metrics is one of the project's most
+load-bearing architectural decisions. `DESIGN.md` §4.1 lays out the rationale: metric
+definitions evolve faster than DB schemas, so deferring all aggregation to the analysis
+layer means a metric redefinition never requires a DB backfill. The contract is pinned by
+`tests/test_analysis.py`, which runs the entire analysis on a hand-crafted DB fixture
+without re-touching it.
 
 ---
 
-## 10. Composite accuracy and the subtype weighting
+## 7. Scoring
+
+### 7.1 Composite accuracy with exam-style partial credit
 
 `per_model_summary.csv` reports a flat mixed mean (`pass_at_1_avg`) for backwards
-compatibility. For the headline scoring used in the paper (and recommended for cross-model
-comparison), `per_model_composite_*.csv` performs a **weighted composition by sub-question
-type** along two dimensions:
+compatibility. For the headline scoring used in the paper and recommended for cross-model
+comparison, `per_model_composite_*.csv` performs a weighted composition by sub-question type
+along two dimensions:
 
-* `per_model_composite_by_question_type.csv` — buckets = `yes_no` / `binary_named` /
+* `per_model_composite_by_question_type.csv` buckets by `yes_no` / `binary_named` /
   `multiple_choice`;
-* `per_model_composite_by_choice_type.csv` — buckets = `single` / `multi`.
+* `per_model_composite_by_choice_type.csv` buckets by `single` / `multi`.
 
-Per-bucket scoring uses **exam-style partial credit** (paper §4.2.2, Eq. 37
-`eq:exam-score`), implemented at `forecast_eval/analysis/exam_score.py:L62`:
+Per-bucket scoring uses exam-style partial credit (paper §4.2.2, Eq. 37 `eq:exam-score`),
+implemented at `forecast_eval/analysis/exam_score.py:L62`:
 
 $$\text{exam-score}(\hat{S}, G) = \begin{cases} |\hat{S} \cap G| / |G|, & \hat{S} \setminus G = \varnothing,\\ 0, & \hat{S} \setminus G \ne \varnothing.\end{cases}$$
 
-Intuitively, **"any false positive vetoes the score to 0; otherwise score by the proportion
-correctly recovered, $|TP|/|G|$"** — i.e., Recall under a zero-FP hard gate. Single-answer
-questions ($m_q = 1$) degenerate to the strict-equality $\{0, 1\}$ case (paper §4.2.4
-Eq. 40 `eq:strict-equiv`); multi-answer questions retain the asymmetry "rather miss than
-wrongly select". The composite formula (paper §4.2.1, Eq. 35 `eq:composite`,
-`analysis/composite.py`) is
+Intuitively, any false positive vetoes the score to zero; otherwise the score is the
+proportion correctly recovered, $|TP|/|G|$. This is recall under a zero-FP hard gate.
+Single-answer questions where $m_q = 1$ degenerate to the strict-equality $\{0, 1\}$ case
+(paper §4.2.4, Eq. 40 `eq:strict-equiv`), and multi-answer questions retain the asymmetry
+"rather miss than wrongly select". The composite formula (paper §4.2.1, Eq. 35
+`eq:composite`, implemented at `analysis/composite.py`) is
 
 $$\text{composite}_m = \frac{\sum_{b \in B_{\text{valid}}(m)} w_{m,b}\cdot v_{m,b}}{\sum_{b \in B_{\text{valid}}(m)} w_{m,b}}.$$
 
-$B_{\text{valid}}$ is the set of buckets where the measurement is non-None **and** the
-weight is > 0 (paper Eq. 36 `eq:bvalid`); missing buckets are dropped and the remaining
-weights renormalised — they are **not** treated as 0. This contract is pinned by
+$B_{\text{valid}}$ is the set of buckets where the measurement is non-None and the weight is
+positive (paper Eq. 36 `eq:bvalid`). Missing buckets are dropped and the remaining weights
+renormalised; they are not treated as zero. This contract is pinned by
 `tests/test_composite_score.py` and `tests/test_exam_score.py`.
 
-**Default weights** follow the *"harder questions discriminate better"* principle
-(`config.py:L365–L374`):
+Default weights follow the *harder questions discriminate better* principle, defined at
+config.py:L365–L374:
 
-| Dimension       | Bucket            | Default weight | Difficulty rationale                                        |
-| --------------- | ----------------- | -------------- | ----------------------------------------------------------- |
-| `question_type` | `yes_no`          | 0.15           | k=2, blind guess 50%, low cross-model discrimination        |
-| `question_type` | `binary_named`    | 0.15           | k=2, adds entity recognition but still binary               |
-| `question_type` | `multiple_choice` | 0.70           | k=2..N wide range, includes multi-select, highest signal    |
-| `choice_type`   | `single`          | 0.40           | overall easier (includes yes_no / binary_named)             |
-| `choice_type`   | `multi`           | 0.60           | true multi-select; near-zero strict baseline → high signal  |
+| Dimension       | Bucket            | Default weight | Difficulty rationale                                       |
+| --------------- | ----------------- | -------------- | ---------------------------------------------------------- |
+| `question_type` | `yes_no`          | 0.15           | k=2, blind guess 50%, low cross-model discrimination       |
+| `question_type` | `binary_named`    | 0.15           | k=2, adds entity recognition but still binary              |
+| `question_type` | `multiple_choice` | 0.70           | k=2..N wide range, includes multi-select, highest signal   |
+| `choice_type`   | `single`          | 0.40           | overall easier; includes yes_no and binary_named           |
+| `choice_type`   | `multi`           | 0.60           | true multi-select; near-zero strict baseline → high signal |
 
-Override these via `COMPOSITE_WEIGHTS_QTYPE` / `COMPOSITE_WEIGHTS_CTYPE` in `.env`; for
-per-metric overrides use `COMPOSITE_WEIGHT_OVERRIDES_QTYPE` / `..._CTYPE` (see `.env.example`
-comments). When any metric in a (model) row hits an override, its `weights_kind` column is
-flagged `overridden`. `composite_meta.json` records buckets_used / weights_used_normalized /
-bucket_values for each (model, metric) — a one-to-one reproducible audit trail.
+Override these via `COMPOSITE_WEIGHTS_QTYPE` and `COMPOSITE_WEIGHTS_CTYPE` in `.env`. For
+per-metric overrides use `COMPOSITE_WEIGHT_OVERRIDES_QTYPE` and `..._CTYPE` (see
+`.env.example` comments). When any metric in a model row hits an override, its
+`weights_kind` column is flagged `overridden`. `composite_meta.json` records `buckets_used`,
+`weights_used_normalized`, and `bucket_values` for each (model, metric), giving a
+one-to-one reproducible audit trail.
 
 The exam-vs-strict difference matters only on the multi-choice multi-answer bucket (paper
-§4.2.4 Eq. 40): the three single-answer buckets satisfy
+§4.2.4, Eq. 40). The three single-answer buckets satisfy
 $\text{exam}_{\text{avg}}^{(b)} \equiv \text{pass@1}_{\text{avg}}^{(b)}$, so the composite
-formula's value depends on the exam-vs-strict choice **only** through the multi-multi bucket
-— which carries the largest discrimination signal in the paper's main run.
+formula's value depends on the exam-vs-strict choice only through the multi-multi bucket,
+which carries the largest discrimination signal in the paper's main run.
 
-Per-correct cost (paper §4.2.8, Eq. 57 `eq:per-correct`):
+The per-correct cost (paper §4.2.8, Eq. 60 `eq:per-correct`) is
 
 $$C^{\text{per-correct}}_m = \frac{C^{\text{total}}_m}{|\mathcal{D}^{\text{eval}}|\cdot n \cdot \text{Composite\,Accuracy}_m},$$
 
-i.e. the platform's actual invoice divided by the *difficulty-weighted notional correct-sample
-count*; this places "expensive but accurate" and "cheap but reckless" models on the same
-cost-effectiveness scale, avoiding the false-low-cost illusion of "low per-sample unit price
-but high error rate".
+i.e. the platform's actual invoice divided by the difficulty-weighted notional
+correct-sample count. This places expensive-but-accurate and cheap-but-reckless models on the
+same cost-effectiveness scale, avoiding the false-low-cost illusion of a low per-sample unit
+price paired with a high error rate.
 
-## 11. v5 hierarchical scoring suite
+### 7.2 Hierarchical scoring suite
 
-Scoring follows paper §3.4 as a **hierarchical decomposition** validity → item → question →
-model, with the metric definitions developed in §4.2. The headline composite accuracy (§10)
-is one column in `per_model_summary.csv`; the companion suite covers stability, consistency,
-and chance-corrected skill:
+Scoring follows paper §3.4 as a hierarchical decomposition validity → item → question →
+model, with the metric definitions developed in §4.2. The headline composite accuracy from
+§7.1 is one column of `per_model_summary.csv`; the companion suite covers stability,
+consistency, and chance-corrected skill.
 
-| Metric (paper §, Eq.)               | What it measures                                                       | Code                                                      |
-| ----------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------- |
-| $\text{pass@1}_{\text{avg}}$ (§4.2.5, Eq. 42) | Single-trial strict-equality hit rate                       | `analysis/accuracy.py`                                    |
-| $\text{pass}^{\text{any}}@n$ (§4.2.5, Eq. 44) | Best-of-$n$ hit upper bound                                  | `analysis/accuracy.py`                                    |
-| $\text{pass}^{\text{all}}@n$ (§4.2.5, Eq. 45) | All-of-$n$ stability lower bound                             | `analysis/accuracy.py`                                    |
-| Cohen's $\kappa$ (§4.2.6, Eq. 46)   | Chance-corrected strict accuracy vs question-type-conditional baseline | `analysis/accuracy.py::cohen_kappa`                       |
-| Fleiss' $\kappa$ (§4.2.6, Eq. 49)   | Inter-trial agreement across $K^{\mathrm{eff}}_q$ samples              | `analysis/consistency.py`                                 |
-| Tversky $T$ (§4.2.7, Eq. 51)        | Set similarity with FP penalty $\alpha$, FN penalty $\beta$            | `analysis/accuracy.py::tversky_score` (accuracy.py:L286)  |
-| FSS (§4.2.7, Eq. 56)                | Tversky-based, chance-corrected skill score; default $(\alpha, \beta) = (2.0, 0.5)$ → FP 4× FN | `analysis/accuracy.py::fss` (accuracy.py:L386) |
-| MV-Acc / MVG / VCI / Hamming / mean-entropy (§4.2.10) | Discrete-native consistency family            | `analysis/consistency.py`                                 |
+| Metric (paper §, Eq.)                                  | What it measures                                                                                                  | Code                                                      |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| $\text{pass@1}_{\text{avg}}$ (§4.2.5, Eq. 42)          | Single-trial strict-equality hit rate                                                                             | `analysis/accuracy.py`                                    |
+| $\text{pass}^{\text{any}}@n$ (§4.2.5, Eq. 44)          | Best-of-$n$ hit upper bound                                                                                       | `analysis/accuracy.py`                                    |
+| $\text{pass}^{\text{all}}@n$ (§4.2.5, Eq. 45)          | All-of-$n$ stability lower bound                                                                                  | `analysis/accuracy.py`                                    |
+| Cohen's $\kappa$ (§4.2.6, Eq. 46)                      | Chance-corrected strict accuracy against a question-type-conditional baseline                                     | `analysis/accuracy.py::cohen_kappa`                       |
+| Fleiss' $\kappa$ (§4.2.6, Eq. 49)                      | Inter-trial agreement across $K^{\mathrm{eff}}_q$ samples                                                          | `analysis/consistency.py`                                 |
+| Tversky $T$ (§4.2.7, Eq. 54)                           | Set similarity with FP penalty $\alpha$ and FN penalty $\beta$                                                    | `analysis/accuracy.py::tversky_score` (accuracy.py:L286)  |
+| FSS (§4.2.7, Eq. 59)                                   | Tversky-based, chance-corrected skill score; default $(\alpha, \beta) = (2.0, 0.5)$ penalises FP four times more than FN | `analysis/accuracy.py::fss` (accuracy.py:L386)            |
+| MV-Acc / MVG / VCI / Hamming / mean-entropy (§4.2.10)  | Discrete-native consistency family                                                                                | `analysis/consistency.py`                                 |
 
-The **FSS reordering** is paper §4.3.3's headline finding: under strict
+The FSS reordering is the headline empirical finding of paper §4.3.3. Under strict
 $\text{pass@1}_{\text{avg}}$ Kimi K2.5 ranks above Qwen3.5-Flash, but under FSS at
 $(\alpha, \beta) = (2.0, 0.5)$ Qwen overtakes Kimi because Qwen's selection sets in the
-multi-choice multi-answer bucket are more restrained (FP-conservative). This is the single
-empirical justification for the asymmetric Tversky weights — encoding "rather miss than
-wrongly select" directly into the score function flips a real cross-model ranking, which a
-symmetric Jaccard would not have caught.
+multi-choice multi-answer bucket are more restrained, that is, more FP-conservative. This is
+the single empirical justification for the asymmetric Tversky weights: encoding "rather miss
+than wrongly select" directly into the score function flips a real cross-model ranking that
+a symmetric Jaccard would not have caught.
 
-## 12. On-demand plots and FSS sensitivity
+### 7.3 On-demand plots and FSS sensitivity
 
-`matplotlib` is **not** in `environment.yml` because the analysis path stays
-dependency-light. To render the analytics CSV/JSON into PNGs:
+`matplotlib` is not in `environment.yml`, since the analysis path stays dependency-light. To
+render the analytics CSV/JSON into PNGs:
 
 ```bash
 pip install matplotlib
 python scripts/plot_analysis.py runs/{run_id}
 ```
 
-This populates `runs/{run_id}/analysis/figs/` (gitignored) with:
+This populates `runs/{run_id}/analysis/figs/`, which is gitignored, with:
 
-* **v5 main figures** (paper §C): FSS bar with CI, ΔFSS forest, per-model entropy-Acc grid
-  (3 buckets × 3 metrics: Acc / MV Acc / Fleiss κ);
-* **Companion / appendix figures**: BI bar with CI (BLF anchor), ΔBI forest, difficulty-grid
-  heatmap, per-question belief trajectories (5 sample questions), tool-usage PDP per feature.
-  v5 removed reliability-diagram and Murphy-three-decomposition figures because at $K=5$ they
-  are statistically meaningless (only 6 unique probability levels per label).
+* v5 main figures: FSS bar with CI, ΔFSS forest, per-model entropy-Acc grid (3 buckets ×
+  3 metrics: Acc / MV Acc / Fleiss κ);
+* Companion figures: BI bar with CI (BLF anchor), ΔBI forest, difficulty-grid heatmap,
+  per-question belief trajectories on 5 sample questions, tool-usage PDP per feature.
 
-Each plot is best-effort: when the corresponding CSV/JSON is missing, the plot is silently
-skipped instead of failing the pipeline.
+v5 removed the reliability-diagram and Murphy-three-decomposition figures, since at $K=5$
+they are statistically meaningless given only six unique probability levels per label.
+
+Each plot is best-effort: when the corresponding CSV or JSON is missing, the plot is
+silently skipped instead of failing the pipeline.
 
 `per_model_summary.csv` reports a single canonical FSS at $(\alpha, \beta) = (2, 0.5)$.
 Reviewers asking "why not Jaccard $(1, 1)$ or strict $(3, 0.5)$?" run the sensitivity sweep
 on demand:
 
 ```bash
-python scripts/fss_sensitivity.py runs/{run_id}              # 4-tier sweep
+python scripts/fss_sensitivity.py runs/{run_id}                      # 4-tier sweep
 python scripts/fss_sensitivity.py runs/{run_id} --alpha 1 --beta 1   # single point
 ```
 
-| (α, β)    | Semantics                                        |
-| --------- | ------------------------------------------------ |
-| (1, 1)    | Jaccard / symmetric — FP and FN equally penalised |
-| (1, 0.5)  | Mild asymmetry — multi-selection error 2× missed |
-| (2, 0.5)  | **v5 default** — multi-selection error 4× missed |
-| (3, 0.5)  | Strict — multi-selection error 6× missed         |
+| (α, β)    | Semantics                                                  |
+| --------- | ---------------------------------------------------------- |
+| (1, 1)    | Jaccard, symmetric: FP and FN equally penalised            |
+| (1, 0.5)  | Mild asymmetry: multi-selection error 2× missed            |
+| (2, 0.5)  | v5 default: multi-selection error 4× missed                |
+| (3, 0.5)  | Strict: multi-selection error 6× missed                    |
 
-The script is **not** invoked by `run_analysis`; the sensitivity CSV carries a provenance
-comment on top so a reviewer reading the bare file won't mistake it for the main metric
-(pinned by `tests/test_fss_sensitivity.py`).
+The script is not invoked by `run_analysis`. The sensitivity CSV carries a provenance
+comment on top so a reviewer reading the bare file will not mistake it for the main metric,
+with the contract pinned by `tests/test_fss_sensitivity.py`.
 
 ---
 
-## 13. Grid search via virtual model slug
+## 8. Operational features
 
-`TAVILY_MAX_RESULTS` ($R_{\mathrm{tav}}$) and `REACT_MAX_SEARCH_CALLS` ($C$) accept
-comma-separated lists of positive integers. Setting both to multi-value lists produces
-$\lvert\text{MODELS}\rvert \cdot \lvert R\rvert \cdot \lvert C\rvert$ independent **virtual
-model slugs** of the form `{real_model}::r{R}::c{C}` (`db.compose_virtual_slug` /
-`parse_virtual_slug`, db.py:L477/L500). Each cell lives in its own DB file
-(`runs/<id>/db/<real>__r{R}__c{C}.db`) and re-uses every existing analysis stage; an extra
+### 8.1 Resume semantics
+
+Each `(question_id, sample_idx)` slot is judged independently:
+
+* `s{i}_created_at IS NOT NULL` and `s{i}_error IS NULL` means finished and not retried.
+* `s{i}_error = 'skipped_training_cutoff'` was actively excluded by the
+  $\kappa_M \le \chi_i$ check, and is not retried, since it was never a model failure.
+* Any other `s{i}_error` value such as `network`, `server_5xx`, `bad_request`, or
+  `content_policy` is retried on the next run, which reuses the existing DB. Error
+  classification lives in `forecast_eval/errors.py:classify` (errors.py:L86); the bucket
+  list per paper §4.1.6 is `network / rate_limit / server_5xx / bad_request /
+  content_policy`, plus the synthetic `skipped_training_cutoff`.
+
+Set `RUN_ID=<existing-run-id>` in `.env`, or as a CLI env var, to resume into the same
+folder. Leaving it blank mints a fresh `YYYYMMDD-HHMMSS-xxxx` id.
+`tests/test_runner_resume.py` pins the behaviour: completed rows are never re-emitted,
+`skipped_training_cutoff` rows are never re-run, and every other error class is retried
+under the original retry policy.
+
+### 8.2 Grid search via virtual model slug
+
+`TAVILY_MAX_RESULTS` (which is $R_{\mathrm{tav}}$) and `REACT_MAX_SEARCH_CALLS` (which is
+$C$) accept comma-separated lists of positive integers. Setting both to multi-value lists
+produces $\lvert\text{MODELS}\rvert \cdot \lvert R\rvert \cdot \lvert C\rvert$ independent
+virtual model slugs of the form `{real_model}::r{R}::c{C}` (`db.compose_virtual_slug` and
+`db.parse_virtual_slug`, db.py:L477/L500). Each cell lives in its own DB file at
+`runs/<id>/db/<real>__r{R}__c{C}.db` and re-uses every existing analysis stage. An extra
 grid pass writes 5 `grid_*.csv` long tables plus a paper figure family under
 `analysis/figs/`.
 
-The trick: the runner / DB schema / analysis main pipeline are **byte-unchanged** —
+The runner, the DB schema, and the analysis main pipeline are byte-unchanged.
 `forecast_eval/analysis/grid.py` decodes the triple from the slug, re-aggregates, and emits
-paper long tables. See `DESIGN.md` §10.1 for the design archive (Decisions D1–D10) and
-`tests/test_grid_dispatcher.py` / `test_grid_analysis.py` for the contract pinning.
+the paper long tables. See `DESIGN.md` §11.1 for the design archive of decisions D1–D10,
+together with `tests/test_grid_dispatcher.py` and `tests/test_grid_analysis.py` for the
+contract pinning.
 
 ```bash
 MODELS=openai/gpt-5,anthropic/claude-sonnet-4.5
 TAVILY_MAX_RESULTS=5,10
 REACT_MAX_SEARCH_CALLS=1,3,5,8
 GRID_DEFAULT_R=5    # main figure anchor; must be in TAVILY_MAX_RESULTS
-GRID_DEFAULT_C=5    # symmetric, in REACT_MAX_SEARCH_CALLS
+GRID_DEFAULT_C=5    # symmetric, must be in REACT_MAX_SEARCH_CALLS
 
 python evaluation.py
 python scripts/plot_analysis.py runs/<run_id>
 ```
 
-A single-value `.env` (e.g. `TAVILY_MAX_RESULTS=5`) is parsed as a length-1 list, so existing
-setups stay byte-equivalent except for the new `__r{R}__c{C}` suffix on DB filenames; legacy
-v4 runs without a `manifest.grid` block exit the grid path early. `MODELS` entries cannot
-contain `::` (config.py:L610–L614) so virtual-slug round-tripping never collides with a real
-model name.
+A single-value `.env` such as `TAVILY_MAX_RESULTS=5` is parsed as a length-1 list, so
+existing setups stay byte-equivalent except for the new `__r{R}__c{C}` suffix on DB
+filenames. Legacy v4 runs without a `manifest.grid` block exit the grid path early.
+`MODELS` entries cannot contain `::` (config.py:L610–L614), so virtual-slug round-tripping
+never collides with a real model name.
 
----
+### 8.3 Harness resilience switches (v5.1)
 
-## 14. Resume semantics
+Two opt-in resilience levers, with `REACT_FINAL_ANSWER_RETRY` defaulting OFF and
+`REACT_BUDGET_EXCEEDED_DROP_TOOLS` defaulting ON; see
+`openspec/changes/harness-resilience-v1/`.
 
-Each `(question_id, sample_idx)` slot is judged independently:
-
-* `s{i}_created_at IS NOT NULL` and `s{i}_error IS NULL` → finished, not retried.
-* `s{i}_error = 'skipped_training_cutoff'` → actively excluded by $\kappa_M \le \chi_i$
-  check; not retried (it was never a model failure).
-* Any other `s{i}_error` value (`network`, `server_5xx`, `bad_request`, `content_policy`, …)
-  → next run reuses the DB and retries that slot. Error classification lives in
-  `forecast_eval/errors.py:classify` (errors.py:L86); the bucket list (paper §4.1.6) is
-  `network / rate_limit / server_5xx / bad_request / content_policy` plus the synthetic
-  `skipped_training_cutoff`.
-
-Set `RUN_ID=<existing-run-id>` in `.env` (or CLI env) to resume into the same folder; leaving
-it blank mints a fresh `YYYYMMDD-HHMMSS-xxxx` id. `tests/test_runner_resume.py` pins the
-behaviour: "completed" rows are never re-emitted, "skipped_training_cutoff" rows are never
-re-run, every other error class is retried under the original retry policy.
-
-## 15. Harness resilience switches (v5.1)
-
-Two opt-in resilience levers (default OFF for `REACT_FINAL_ANSWER_RETRY`, default ON for
-`REACT_BUDGET_EXCEEDED_DROP_TOOLS`); see
-`openspec/changes/harness-resilience-v1/`:
-
-* **`REACT_FINAL_ANSWER_RETRY`** — default **`false`** (config.py:L301). When the ReAct loop
-  exits cleanly with empty `final_raw` (model spent all steps on tool_calls and never
-  produced content), make one extra `llm_chat` call with `tools=[]` and a fixed "commit your
-  `\boxed{...}` answer" user nudge. **Superseded by the in-loop force-final-answer-near-limit
-  switch chain below; kept as an optional out-of-loop emergency backstop.** When enabled, the
-  retry counts as one step in `react_steps` / `step_metrics` but NOT in `nudges_used`. The
-  per-sample column `final_answer_retry_used` (0/1) records the outcome and rolls up to
-  `final_answer_retry_rate` in `per_model_summary.csv`. The motivation: cross-model
+* **`REACT_FINAL_ANSWER_RETRY`** defaults to `false` (config.py:L301). When the ReAct loop
+  exits cleanly with empty `final_raw`, meaning the model spent all steps on `tool_calls`
+  and never produced content, the harness makes one extra `llm_chat` call with `tools=[]`
+  and a fixed "commit your `\boxed{...}` answer" user nudge. This switch is superseded by
+  the in-loop force-final-answer-near-limit chain below and is kept as an optional
+  out-of-loop emergency backstop. When enabled, the retry counts as one step in
+  `react_steps` and `step_metrics` but not in `nudges_used`. The per-sample column
+  `final_answer_retry_used` (0/1) records the outcome and rolls up to
+  `final_answer_retry_rate` in `per_model_summary.csv`. The motivation is that cross-model
   comparisons require `parse_failure_rate` to reflect only the model's own format failure,
   not upstream tool-budget exhaustion bookkept by the harness.
-* **`REACT_BUDGET_EXCEEDED_DROP_TOOLS`** — default **`true`** (config.py:L302). Once
+* **`REACT_BUDGET_EXCEEDED_DROP_TOOLS`** defaults to `true` (config.py:L302). Once
   cumulative `web_search` calls reach `REACT_MAX_SEARCH_CALLS`, every subsequent LLM call
-  drops the tool schema (`tools=[]`). The model can no longer request more searches; it must
-  finalise its answer or the bail-out retry above mops up.
+  drops the tool schema by setting `tools=[]`. The model can no longer request more
+  searches; it must finalise its answer or the bail-out retry above mops up.
 
-The **in-loop priority chain** introduced by `force-final-answer-near-limit-v1` (config.py:L313–L315)
-is what really drives termination at the budget edge, and is the reason the post-hoc
-`REACT_FINAL_ANSWER_RETRY` is now off by default. At the top of every iteration of
-`react.run_react` (react.py:L248) the harness picks **at most one** of four injections, in
-this priority order (react.py:L266 priority comment, L272–L334 logic):
+The in-loop priority chain introduced by `force-final-answer-near-limit-v1`
+(config.py:L313–L315) is what really drives termination at the budget edge, and it is the
+reason the post-hoc `REACT_FINAL_ANSWER_RETRY` is now off by default. At the top of every
+iteration of `react.run_react` (react.py:L162) the harness picks at most one of four
+injections, in this priority order (react.py:L266 priority comment, L272–L334 logic):
 
-1. **Last-step hard cutoff** (`REACT_MAX_STEPS - step == 1` and
-   `REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=true`): inject force-finalise text + `tools=[]`,
-   the model can ONLY emit content.
-2. **Penultimate soft warning** (`remaining ∈ [2, REACT_FORCE_FINAL_ANSWER_LOOKAHEAD]`):
-   reminder text, tools still allowed unless the search budget is already gone.
-3. **Budget-exhausted commit notice** (cumulative searches `>= REACT_MAX_SEARCH_CALLS` and
-   `REACT_BUDGET_EXCEEDED_DROP_TOOLS=true`, fired ONCE per run): tells the model the search
-   tool is now gone, please finalise.
-4. **Continuation reminder** (previous turn was content without `\boxed{...}` and nothing
-   else needs to fire): "your last reply had no `\boxed{...}`, here is the live status".
+1. The **last-step hard cutoff** fires when `REACT_MAX_STEPS - step == 1` and
+   `REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=true`. It injects force-finalise text and
+   `tools=[]`, so the model can ONLY emit content.
+2. The **penultimate soft warning** fires when
+   `remaining ∈ [2, REACT_FORCE_FINAL_ANSWER_LOOKAHEAD]`. It injects reminder text, with
+   tools still allowed unless the search budget is already gone.
+3. The **budget-exhausted commit notice** fires when cumulative searches
+   `>= REACT_MAX_SEARCH_CALLS` and `REACT_BUDGET_EXCEEDED_DROP_TOOLS=true`, only once per
+   run. It tells the model that the search tool is now gone and asks it to finalise.
+4. The **continuation reminder** fires when the previous turn was content without
+   `\boxed{...}` and nothing else needs to fire. It says "your last reply had no
+   `\boxed{...}`, here is the live status".
 
-Defaults: `REACT_BUDGET_AWARENESS_PROTOCOL=true`, `REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=true`,
-`REACT_FORCE_FINAL_ANSWER_LOOKAHEAD=2` (config.py:L313–L315). Pinned by the
-``tests/test_react.py`` priority-chain section. To run the v5.0 baseline (no in-loop
-intervention) flip all three to `false` and the harness reverts to the legacy
-"single-shot per turn until budget" behaviour.
+Defaults are `REACT_BUDGET_AWARENESS_PROTOCOL=true`,
+`REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=true`, and `REACT_FORCE_FINAL_ANSWER_LOOKAHEAD=2`
+(config.py:L313–L315), pinned by the priority-chain section of `tests/test_react.py`. To
+run the v5.0 baseline with no in-loop intervention, flip all three to `false` and the
+harness reverts to the legacy "single-shot per turn until budget" behaviour.
 
-Error classification (`forecast_eval/errors.py`) was widened in v5.1: HTTP 400 bodies
-containing any of `data_inspection_failed`, `inappropriate content`, or `sensitive` (in
+Error classification in `forecast_eval/errors.py` was widened in v5.1: HTTP 400 bodies
+containing any of `data_inspection_failed`, `inappropriate content`, or `sensitive`, in
 addition to the legacy `content_policy` / `content_filter` / `safety` /
-`content_policy_violation` needles, see `errors.CONTENT_POLICY_NEEDLES` at errors.py:L39–L48)
-classify as `content_policy`, not `bad_request`. The transient-network family
-(errors.py:L97–L111) now also covers `httpx.RemoteProtocolError`, `WriteError`,
-`WriteTimeout`, `PoolTimeout` — both the LLM client and the Tavily search client retry these
-instead of treating them as fatal.
+`content_policy_violation` needles (see `errors.CONTENT_POLICY_NEEDLES` at
+errors.py:L39–L48), classify as `content_policy` rather than `bad_request`. The
+transient-network family at errors.py:L97–L111 now also covers `httpx.RemoteProtocolError`,
+`WriteError`, `WriteTimeout`, and `PoolTimeout`. Both the LLM client and the Tavily search
+client retry these instead of treating them as fatal.
 
-## 16. Search leak filter (v5.2)
+### 8.4 Search leak filter (v5.2)
 
-Tavily filters by *crawl/index* date, not by content time. A page indexed before $\chi_i$
-may still describe events that happened after it (wiki updates, aggregator pages, "looking
-ahead" sections). To plug that hole the framework adds the Stage-2 LLM-based audit
-described in paper §3.5 ("controlled information channels") and §4.1.5 ("Semantic Layer"):
-every Tavily result is sent through an independent
-`detector` LLM (input fields whitelisted to title / URL / published_date / content /
-raw_content / cutoff_date — the question text, options, and ground truth are deliberately
-withheld so the detector is a leakage classifier, not an answer auditor) that returns
-`keep` / `drop` per item. Items the detector flags `drop` are removed before the main LLM
-sees the search payload.
+Tavily filters by crawl or index date, not by content time. A page indexed before $\chi_i$
+may still describe events that happened after it, such as wiki updates, aggregator pages,
+or "looking ahead" sections. To plug that hole the framework adds the Stage-2 LLM-based
+audit described in paper §3.5 ("controlled information channels") and §4.1.5 ("Semantic
+Layer"). Every Tavily result is sent through an independent `detector` LLM that returns
+`keep` or `drop` per item. Items the detector flags `drop` are removed before the main LLM
+sees the search payload. Input fields are whitelisted to title, URL, published_date,
+content, raw_content, and cutoff_date; the question text, options, and ground truth are
+deliberately withheld so the detector is a leakage classifier rather than an answer
+auditor.
 
 Defaults (see `.env.example` for the full annotated block):
 
-* `ENABLE_SEARCH_LEAK_FILTER=true` (config.py:L337) — required to enable the filter; pair
-  with `LEAK_DETECTOR_API_KEY` + `LEAK_DETECTOR_MODEL`. Mutually requires
-  `ENABLE_WEB_SEARCH=true` (otherwise the detector path is dead code; startup fails fast at
-  config.py:L752–L757).
-* `LEAK_DETECTOR_BASE_URL` — optional; empty falls back to `LLM_BASE_URL`. The detector
-  client is independent of the main LLM client even when the endpoints coincide
-  (`leak_filter.get_detector_client`, leak_filter.py:L112) — separate quota / timeout /
-  backoff bookkeeping.
-* `LEAK_DETECTOR_FAIL_ACTION=drop` (config.py:L351) — fail-closed by default (paper §3.5
-  recommendation). Detector errors (HTTP / timeout / invalid-JSON, after
-  `LEAK_DETECTOR_RETRY_MAX` retries with `LEAK_DETECTOR_BACKOFF_S`) drop the item. Set to
-  `keep` only as an A/B escape hatch when comparing against the unfiltered baseline.
-* `LEAK_DETECTOR_RETRY_MAX` / `LEAK_DETECTOR_BACKOFF_S` — independent from the main LLM's
+* `ENABLE_SEARCH_LEAK_FILTER=true` (config.py:L337) is required to enable the filter. Pair
+  it with `LEAK_DETECTOR_API_KEY` and `LEAK_DETECTOR_MODEL`. It mutually requires
+  `ENABLE_WEB_SEARCH=true`, otherwise the detector path is dead code and startup fails fast
+  at config.py:L752–L757.
+* `LEAK_DETECTOR_BASE_URL` is optional; an empty value falls back to `LLM_BASE_URL`. The
+  detector client is independent of the main LLM client even when the endpoints coincide
+  (`leak_filter.get_detector_client`, leak_filter.py:L112), so it has separate quota,
+  timeout, and backoff bookkeeping.
+* `LEAK_DETECTOR_FAIL_ACTION=drop` (config.py:L351) is the fail-closed default per paper
+  §3.5. Detector errors over HTTP, on timeout, or on invalid JSON, after
+  `LEAK_DETECTOR_RETRY_MAX` retries with `LEAK_DETECTOR_BACKOFF_S`, drop the item. Set this
+  to `keep` only as an A/B escape hatch when comparing against the unfiltered baseline.
+* `LEAK_DETECTOR_RETRY_MAX` and `LEAK_DETECTOR_BACKOFF_S` are independent of the main LLM's
   retry settings, so detector hiccups never push back on the main LLM's quota window.
 
-Audit fields persisted per `web_search` call (`run_results.search_calls` JSON entry):
+Audit fields are persisted per `web_search` call inside the `run_results.search_calls` JSON
+entry:
 
 ```text
 { "query": ..., "end_date": ..., "n_results": <kept>,
   "published_dates": [<raw-order, length == n_results_raw>],
   "n_results_raw": <int>, "n_results_kept": <int>,
-  "detector_verdicts": ["keep","drop","failed:network", ...],
+  "detector_verdicts": ["keep", "drop", "failed:network", ...],
   "detector_latency_ms": <int>, "detector_error_kind": str | null }
 ```
 
 `run_meta.config_snapshot` additionally records the detector fingerprint triplet
-`leak_detector_enabled` / `leak_detector_model` / `leak_detector_prompt_hash` (sha256 of the
-prompt template at `leak_filter.py:L55–L92`, first 16 hex), so the leakage barrier itself is
-byte-reproducible. Pinned by `tests/test_leak_filter.py` and the on-the-wire smoke
-`scripts/smoke_leak_filter.py` / `scripts/verify_leak_filter_e2e.py`.
+`leak_detector_enabled`, `leak_detector_model`, and `leak_detector_prompt_hash`, which is a
+sha256 of the prompt template at `leak_filter.py:L55–L92` truncated to the first 16 hex.
+The leakage barrier is therefore byte-reproducible. It is pinned by
+`tests/test_leak_filter.py` and the on-the-wire smoke `scripts/smoke_leak_filter.py` and
+`scripts/verify_leak_filter_e2e.py`.
 
 Disable path: set `ENABLE_SEARCH_LEAK_FILTER=false` and the detector layer is bypassed
-entirely; behaviour is byte-identical to v5.1. The four upstream barriers (web_search schema
-/ `end_date` injection / Tavily `end_date` filter / `MODEL_TRAINING_CUTOFFS` / `:online`
-ban) remain unaffected.
+entirely; behaviour is byte-identical to v5.1. All upstream barriers remain unaffected:
+the web_search schema, the `end_date` injection, the Tavily `end_date` filter, the
+`MODEL_TRAINING_CUTOFFS` admissibility check, and the `:online` ban.
 
-The paper's $N=270$ audit (paper §4.3.4, Table 8) measured this filter at recall **98.7%**
-and per-audit-item residual rate **1.1%** (Wilson 95% upper bound **3.2%**) — comparable to
-the lower end of the Tavily-only baseline (3%–16%) and approaching the manual-curation floor
-at two orders of magnitude lower marginal cost.
+The 270-item audit at paper §4.3.4, Table 8, measured this filter at recall 98.7% and a
+per-audit-item residual rate of 1.1%, with a Wilson 95% upper bound of 3.2%. This is
+comparable to the lower end of the Tavily-only baseline of 3%–16%, and approaches the
+manual-curation floor at two orders of magnitude lower marginal cost.
 
 ---
 
-## 17. Where to find what (cross-document matrix)
+## 9. Documentation
 
-This repository's documentation is layered. Each layer answers a different question; pick
+### 9.1 Layered documents
+
+The repository's documentation is layered. Each layer answers a different question; pick
 the layer that matches your question and skip the others.
 
-| You want to know…                               | Read…                                   |
-| ----------------------------------------------- | --------------------------------------- |
-| What this project is, how to run it             | This README                             |
-| The paper's formal framework + experimental results | `paper/main.tex` (1115 lines)        |
-| *Why* every constraint exists, what was rejected | `DESIGN.md` (1695 lines, 17 sections, 27 rejected-alternative entries) |
-| Field-level / interface-level specification (every symbol → module → DB column → test) | `FRAME.md` (2168 lines) |
-| The exact rationale for each schema-change proposal | `openspec/changes/<change-id>/`       |
-| The exact rationale for each archived schema-change proposal | `openspec/changes/archive/`   |
-| Reproducing the paper's main run                | This README §6 + `FRAME.md` §1.3        |
-| Contract knobs vs engineering knobs (which `.env` changes invalidate cross-run comparability) | `DESIGN.md` §13 |
-| Three independent fingerprints + manifest layout | `FRAME.md` §5; `evaluation.py:_compute_*_protocol` |
-| The paper-vs-default knob diff                  | `FRAME.md` §1.3 (this README §6 quotes the override block) |
+| You want to know…                                                                            | Read…                                |
+| -------------------------------------------------------------------------------------------- | ------------------------------------ |
+| What this project is and how to run it                                                       | this README                          |
+| The paper's formal framework and experimental results                                        | `paper/main.tex`                     |
+| Why every constraint exists, and what was rejected                                           | `DESIGN.md`                          |
+| Field-level and interface-level specification mapping each symbol to a module, a DB column, and a test | `FRAME.md`                  |
+| The exact rationale for each schema-change proposal                                          | `openspec/changes/<change-id>/`      |
+| The exact rationale for each archived schema-change proposal                                 | `openspec/changes/archive/`          |
+| Reproducing the paper's main run                                                             | this README §4 plus `FRAME.md` §1.3  |
+| Contract knobs vs engineering knobs (which `.env` changes invalidate cross-run comparability)| `DESIGN.md` §12                      |
+| Three independent fingerprints and the manifest layout                                       | `FRAME.md` §6.3; `evaluation.py::_compute_*_protocol` |
+| The paper-vs-default knob diff                                                               | `FRAME.md` §1.3 (this README §4 quotes the override block) |
 
-The four document layers form a **bidirectional contract**: the paper's symbol →
-DESIGN's rationale → FRAME's spec → code's implementation, each with its own pinning test.
-Each layer can be read in isolation but a contradiction between any pair indicates a bug —
-the test suite exists to catch such contradictions early.
+The four document layers form a bidirectional contract: paper symbol → DESIGN's rationale →
+FRAME's specification → code's implementation, each with its own pinning test. Each layer
+can be read in isolation, but a contradiction between any pair indicates a bug. The test
+suite exists to catch such contradictions early.
 
-## 18. Reading roadmap
+### 9.2 Reading order for newcomers
 
-If you are new to the project we suggest reading in this order:
+If you are new to the project, we suggest reading in this order:
 
-1. **`README.md` (this file)** — figure out in 10 minutes what OracleProto is and how to run it.
-2. **`paper/main.tex` §§1–3** — the formal framework, the FutureX-Past instantiation, and
+1. **`README.md`** (this file) for what OracleProto is and how to run it.
+2. **`paper/main.tex` §§1–3** for the formal framework, the FutureX-Past instantiation, and
    the leakage audit numbers. The §3.3 visible-info, §3.4 evaluation-system, and §3.5
-   run-unit + controlled-channels definitions are load-bearing for everything else.
-3. **`DESIGN.md`** — the rationale: *why* every constraint exists, the threat model, the
-   trade-offs between strict matching and partial credit, why the DB stores raw observations
-   only, etc. §0 (foreword) and §1 (framework ↔ code map) give the fastest entry; §13 sorts
+   run-unit and controlled-channels definitions are load-bearing for everything else.
+3. **`DESIGN.md`** for the rationale: why every constraint exists, the threat model, the
+   trade-offs between strict matching and partial credit, and why the DB stores raw
+   observations only. §1 (framework and code map) gives the fastest entry; §12 sorts
    contract knobs from engineering knobs.
-4. **`FRAME.md`** — the technical specification at field, interface, and pseudocode level.
-   §1.1 (grand map) is the cross-reference scaffold; §2–6 walk top-down from data to
-   pipeline.
-5. **`forecast_eval/prompts.py` + `forecast_eval/parser.py`** — the renderer $R$ and the
-   parser $\Psi$; the heart of the project's information boundary.
-6. **`forecast_eval/runner.py` + `forecast_eval/react.py`** — orchestration (admissibility
-   filter at runner.py:L132) and the ReAct loop (react.py:L248 main loop, L266 priority
-   chain).
-7. **`tests/`** — read tests to reverse-engineer the contracts; the 33 test files cover the
-   v3/v4/v5 schemas, leak filter, exam-score, grid dispatcher, and behavioural diagnostics.
-8. **`paper/main.tex` §4–6** — the experimental setup (§4.1), the metric definitions (§4.2),
-   the six-model results (§4.3), and the leakage audit (§4.3.4).
-9. **`openspec/changes/archive/`** — to find out *why* things became what they are today.
+4. **`FRAME.md`** for the technical specification at field, interface, and pseudocode
+   level. §1.1 (the grand map) is the cross-reference scaffold; §2–6 walk top-down from
+   data to pipeline.
+5. **`forecast_eval/prompts.py` and `forecast_eval/parser.py`** for the renderer $R$ and
+   the parser $\Psi$, which are the heart of the project's information boundary.
+6. **`forecast_eval/runner.py` and `forecast_eval/react.py`** for orchestration. The
+   admissibility filter sits at runner.py:L132 and the ReAct loop at react.py:L162, with
+   the priority chain at react.py:L266.
+7. **`tests/`** to reverse-engineer the contracts. The 33 test files cover the v3/v4/v5
+   schemas, the leak filter, exam-score, the grid dispatcher, and behavioural diagnostics.
+8. **`paper/main.tex` §4–6** for the experimental setup (§4.1), the metric definitions
+   (§4.2), the six-model results (§4.3), and the leakage audit (§4.3.4).
+9. **`openspec/changes/archive/`** to find out why things became what they are today.
 
-## 19. Version history (high-level)
+---
 
-| Version | Headline change                                           | Default behaviour                              |
-| ------- | --------------------------------------------------------- | ---------------------------------------------- |
-| v3      | Wide-table schema, per-sample observability columns       | strict-letter scoring, no belief, no detector  |
-| v4      | Belief protocol (companion JSON block), probabilistic suite (BI / NLL / MBS / ABI) | `BELIEF_PROTOCOL=false`; v3 byte-equivalent until enabled |
-| v5      | Discrete-native pivot: FSS / Cohen κ / Fleiss κ / Hamming as primary; dropped reliability/Murphy at $K=5$ | exam-style + composite weights are the headline |
-| v5.1    | Harness resilience: in-loop force-final + budget-drop tools + retry backstop; widened error needles | force-final on, retry-backstop **off** by default |
-| v5.2    | Stage-2 LLM detector for retrieval-content leakage        | `ENABLE_SEARCH_LEAK_FILTER=true` (default-strict, fail-closed) |
+## 10. Version history
+
+| Version | Headline change                                                                                    | Default behaviour                                                  |
+| ------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| v3      | Wide-table schema, per-sample observability columns                                                | strict-letter scoring, no belief, no detector                      |
+| v4      | Belief protocol via companion JSON block; probabilistic suite (BI / NLL / MBS / ABI)                | `BELIEF_PROTOCOL=false`; v3 byte-equivalent until enabled          |
+| v5      | Discrete-native pivot: FSS / Cohen κ / Fleiss κ / Hamming as primary; dropped reliability and Murphy figures at $K=5$ | exam-style and composite weights are the headline   |
+| v5.1    | Harness resilience: in-loop force-final, budget-drop tools, retry backstop; widened error needles  | force-final on, retry-backstop off by default                      |
+| v5.2    | Stage-2 LLM detector for retrieval-content leakage                                                 | `ENABLE_SEARCH_LEAK_FILTER=true` (default-strict, fail-closed)     |
 
 Migrations are forward-only: every old DB auto-migrates via `ALTER TABLE ADD COLUMN` on
-first re-open. Pinned by `tests/test_db_v4_migration.py` and `tests/test_db_v5_migration.py`.
+first re-open. Pinned by `tests/test_db_v4_migration.py` and
+`tests/test_db_v5_migration.py`.
 
-## 20. Citation
+---
+
+## 11. Citation
 
 If you use OracleProto in your research, please cite:
 
@@ -783,5 +793,5 @@ If you use OracleProto in your research, please cite:
 ---
 
 > **One sentence.** OracleProto turns LLM forecasting evaluation from a one-off live
-> competition into a dataset-level, auditable, reusable, and trainable capability — by making
-> the information boundary part of the data, not part of the prompt.
+> competition into a dataset-level, auditable, reusable, and trainable capability, by making
+> the information boundary part of the data rather than part of the prompt.
