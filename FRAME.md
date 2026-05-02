@@ -1530,10 +1530,10 @@ $(\alpha, \beta)$ sweep.
 ### 9.6 Composite Accuracy (paper §4.2.3, Eq. 35, the headline)
 
 Composite Accuracy is the model-level summary metric. Substituting
-$\examavg^{(b)}$ as the per-bucket value:
+$\text{exam}_{avg}^{(b)}$ as the per-bucket value:
 
 $$
-\text{Composite Accuracy}_m = \frac{\sum_{b\in B_{\mathrm{valid}}(m)} w_b \cdot \examavg^{(b),m}}{\sum_{b\in B_{\mathrm{valid}}(m)} w_b}
+\text{Composite Accuracy}_m = \frac{\sum_{b\in B_{\mathrm{valid}}(m)} w_b \cdot \text{exam}_{avg}^{(b),m}}{\sum_{b\in B_{\mathrm{valid}}(m)} w_b}
 $$
 
 where $B_{\mathrm{valid}}(m) = \{b\in B : v_{m,b}\ne\text{None} \wedge w_b > 0\}$
@@ -2182,7 +2182,7 @@ def is_correct(pred: frozenset[str] | None, gt: frozenset[str]) -> bool | None:
 | $\hat{p}_{q,j}$            | Belief vector for question $q$, trial $j$            | §1.1, §5.3                              |
 | $G_q$, $\hat{S}_{q,j}$     | Gold and prediction letter sets                     | §9.2                                   |
 | $k_q$, $m_q$               | Option count and gold-answer count for $q$           | §9.2, §9.5                              |
-| $\examavg^{(b)}$           | Bucket-$b$ exam-score mean                          | §9.6                                   |
+| $\text{exam}_{avg}^{(b)}$           | Bucket-$b$ exam-score mean                          | §9.6                                   |
 
 ---
 
