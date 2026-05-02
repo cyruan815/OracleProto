@@ -90,7 +90,7 @@ The information visible to model $M$ on question $q_i$ is
 
 $$\mathcal{I}_{i,M}^{\mathrm{vis}} = \mathcal{K}^{M}_{\le\kappa_M} \cup \mathcal{T}_{\le\chi_i},$$
 
-where $\mathcal{K}^{M}_{\le\kappa_M}$ is the parametric knowledge available before the
+where $`\mathcal{K}^{M}_{\le \kappa_M}`$ is the parametric knowledge available before the
 model's cutoff and $\mathcal{T}_{\le\chi_i}$ is the temporally masked external information.
 The forecasting system $F_M$ produces $\widehat{Y}_{i,M} = F_M(q_i^{\mathrm{in}}; \mathcal{I}_{i,M}^{\mathrm{vis}})$
 with $\widehat{Y}_{i,M}\subseteq\mathcal{A}_i$. The time-masked discrete forecasting loop is
