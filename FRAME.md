@@ -1,13 +1,12 @@
 # OracleProto Technical Framework
 
 > This document is the engineering specification of the OracleProto reference
-> implementation. It bridges the paper's formal run unit
-> $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$
-> and the Python codebase by tracing every formal symbol to a module, function,
-> environment variable, SQLite column, and the unit test that pins the
-> invariant. Read it alongside `paper/main.tex` for the formal statement and
-> `DESIGN.md` for the rationale behind each trade-off; the two-page newcomer
-> orientation lives in `README.md`.
+> implementation. It traces every symbol of the run unit
+> $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$,
+> together with the auxiliary detector $H_{\mathrm{aux}}$, to a module,
+> function, environment variable, SQLite column, and the unit test that pins
+> the invariant. Read it alongside `DESIGN.md` for the rationale behind each
+> trade-off; the two-page newcomer orientation lives in `README.md`.
 
 ## How to read this document
 
@@ -17,22 +16,15 @@ sections 9–12 cover the analytical and operational machinery that turns those
 measurements into reportable numbers. Each section is independently navigable,
 but later sections assume the symbol map of §1.
 
-Three citation forms appear throughout:
+Two citation forms appear throughout:
 
-* `paper §X.Y` and `paper Eq. N` reference the LaTeX source in `paper/`. The
-  equation counter follows the rendered numbering, which differs from the order
-  of `\label{eq:...}` declarations because the paper contains many unlabelled
-  display equations that participate in the counter. Section labels were
-  verified against `paper/main.tex`'s `\label{sec:...}` declarations.
 * `module.py:Lnnn` references current head-of-tree line numbers. When a range
   is given, the cited symbol or contract spans those lines.
 * `test_<name>.py` references the file under `tests/`. The repository ships 33
   test files containing roughly 560 individual cases, all offline.
 
 The notation $X \to Y$ in textual prose means "X resolves to / produces Y";
-$X = Y$ retains its mathematical meaning. Where a code symbol matches a paper
-symbol, the paper symbol takes precedence in the prose, and the code symbol
-follows in the citation.
+$X = Y$ retains its mathematical meaning.
 
 ---
 
@@ -40,9 +32,7 @@ follows in the citation.
 
 This codebase is the reference implementation of **OracleProto**, a
 reproducible framework for benchmarking the *native forecasting capability* of
-LLMs through knowledge cutoffs and temporal masking. The framework is
-instantiated in the paper on a curated FutureX-Past subset and evaluated on six
-contemporary LLMs.
+LLMs through knowledge cutoffs and temporal masking.
 
 The implementation has two responsibilities: it materialises the run unit
 $\mathcal{R}$ so that the same configuration produces byte-equivalent
@@ -55,7 +45,7 @@ contract?
 
 ### 1.1 Symbol-to-implementation map
 
-The paper's tuple $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R,
+The run unit $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R,
 \Psi, \phi, \Gamma)$, together with the auxiliary detector
 $H_{\mathrm{aux}}$ logged as run metadata, maps to the codebase as follows.
 Each symbol resolves to one configuration knob, one code path, one DB column
@@ -83,9 +73,9 @@ encoded into the virtual slug `{real_model}::r{R}::c{C}` (§10).
 
 ### 1.2 Invariants
 
-These eight statements are paper-level guarantees that the implementation must
-hold. Each is enforced by code and pinned by at least one test, so a failing
-test invalidates the run unit.
+These eight statements are framework-level invariants that the implementation
+must hold. Each is enforced by code and pinned by at least one test, so a
+failing test invalidates the run unit.
 
 1. **The LLM never sees $\chi_i$.** The `web_search` tool schema exposed to the
    LLM declares only a `query` parameter (tools.py:L7–L24); $\chi_i = \tau_i +
@@ -123,35 +113,6 @@ test invalidates the run unit.
    per-metric overrides are validated against an allowlist of known metric
    names and fail fast on typos (config.py:L515–L535,
    composite.py:L77–L127). Pinned by `test_composite_score.py`.
-
-### 1.3 Defaults: codebase versus paper main run
-
-The example dataset and the configuration ship with a deeper search budget
-than the paper's main run uses. This is intentional. The paper's product
-$R_{\mathrm{tav}} \cdot C = 5 \cdot 4 = 20$ matches "two pages of Google search
-results" as a deliberately tight budget for discrimination, while the codebase
-defaults trade a wider budget for smoother behavioural analysis.
-
-| Knob                          | Paper main run | Codebase default                                  | Notes                                                                   |
-| ----------------------------- | -------------- | ------------------------------------------------- | ----------------------------------------------------------------------- |
-| Dataset $|\mathcal{D}|$       | 80 (curated)   | 319 (`forecast_eval_set_example.db`)              | The example DB is broader and reproducible.                              |
-| Date range                    | 2026-03-11 to 2026-04-14 | 2026-01-15 to 2026-04-14                | Example DB spans a full quarter.                                         |
-| $T$ (max ReAct steps)         | 12             | 12 (`REACT_MAX_STEPS`)                            | Identical.                                                                |
-| $C$ (max search calls)        | 4              | 8 (`REACT_MAX_SEARCH_CALLS=[8]`)                  | The codebase default doubles the paper main; both are list-valued.       |
-| $R_{\mathrm{tav}}$            | 5              | 5 (`TAVILY_MAX_RESULTS=[5]`)                      | Identical.                                                                |
-| $\delta$                      | 1 day          | `-1` (`TAVILY_END_DATE_OFFSET_DAYS`)              | Identical sign convention; default strict.                              |
-| $n$ (samples per question)    | 3              | 5 (`SAMPLING_N`)                                  | Tighten to 3 to mirror the paper.                                        |
-| Belief protocol               | off            | off (`BELIEF_PROTOCOL=False`)                     | Identical.                                                                |
-| Reflection protocol           | on             | on (`REACT_REFLECTION_PROTOCOL=True`)             | Identical.                                                                |
-| Stage-2 detector              | on             | on (`ENABLE_SEARCH_LEAK_FILTER=True`)             | Identical.                                                                |
-| Force-final near limit        | on             | on (`REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=True`)   | Identical, with `LOOKAHEAD=2`.                                            |
-| Budget-aware drop tools       | on             | on (`REACT_BUDGET_EXCEEDED_DROP_TOOLS=True`)      | Identical.                                                                |
-| Final-answer retry            | off            | off (`REACT_FINAL_ANSWER_RETRY=False`)            | Optional v5.1 backstop, off by default for byte-equivalence with v5.    |
-| Min-search nudge              | off            | off (`REACT_MIN_SEARCH_CALLS=0`)                  | Soft floor, opt-in fallback.                                              |
-
-The exact override block that reproduces the paper's main run on the example
-DB lives in §12.1. The six per-model cutoffs $\kappa_M$ that the paper used are
-listed in paper Table 2.
 
 ---
 
@@ -192,23 +153,22 @@ that do not enter the hash (§4.7).
 
 ### 2.2 The example dataset
 
-`forecast_eval_set_example.db` contains 319 questions spanning 2026-01-15 to
+`forecast_eval_set_example.db` contains 80 questions spanning 2026-03-12 to
 2026-04-14:
 
 | question_type / choice_type | single | multi | total |
 | --------------------------- | -----: | ----: | ----: |
-| `yes_no`                    |     93 |     0 |    93 |
-| `binary_named`              |     11 |     0 |    11 |
-| `multiple_choice`           |    181 |    34 |   215 |
-| **total**                   |  **285** | **34** | **319** |
+| `yes_no`                    |     37 |     0 |    37 |
+| `binary_named`              |      3 |     0 |     3 |
+| `multiple_choice`           |     32 |     8 |    40 |
+| **total**                   |   **72** |  **8** |    **80** |
 
-`multiple_choice` option counts range from 3 to 35; when the count exceeds 26
-the letter encoding enters the ASCII-continuation regime described in §4.8.
+`multiple_choice` option counts in this example range from 3 to 14, but the
+parser supports the full ASCII-continuation regime described in §4.8 so that
+custom datasets with up to 35 options remain valid without code changes.
 
-The paper's main experimental run uses a curated 80-question subset of
-FutureX-Past with the same schema, chosen to keep the leakage-audit cost
-bounded. The framework itself is dataset-agnostic once the seven-column
-contract and `dataset_metadata` shape are met.
+The framework itself is dataset-agnostic once the seven-column contract and
+`dataset_metadata` shape are met.
 
 ### 2.3 The `prompt_reconstruction` contract
 
@@ -453,10 +413,10 @@ Pinned by `test_runner_resume.py`.
 
 ## 4. The information boundary
 
-The paper organises leakage control around three controlled information
-channels and one documented residual surface (paper §3.5). The codebase
-implements each channel at one specific layer of the pipeline; this section
-walks through them in the order in which a sample encounters them.
+The framework organises leakage control around three controlled information
+channels and one documented residual surface. The codebase implements each
+channel at one specific layer of the pipeline; this section walks through
+them in the order in which a sample encounters them.
 
 ### 4.1 Channels and residual
 
@@ -473,9 +433,9 @@ walks through them in the order in which a sample encounters them.
 
 A question whose resolution time precedes the model's training cutoff is
 likely already in the training corpus; the model "remembers" the answer
-rather than forecasting it (paper §3.1, Eq. 4). Such samples cannot reflect
-native forecasting capability and are removed from the model's evaluable
-subset $\mathcal{D}^{\mathrm{pred}}_M$.
+rather than forecasting it. Such samples cannot reflect native forecasting
+capability and are removed from the model's evaluable subset
+$\mathcal{D}^{\mathrm{pred}}_M$.
 
 Per-model $\kappa_M$ is declared in `.env` via `MODEL_TRAINING_CUTOFFS`, a CSV
 of `<slug>=YYYY-MM-DD` pairs parsed by `config._parse_cutoffs`
@@ -493,8 +453,8 @@ if cutoff is not None and q.end_time <= cutoff:
 Filtered `(question, model, sample_idx)` rows still land in `run_results` with
 `error="skipped_training_cutoff"`, `parse_ok=0`, `correct=NULL`, and all
 numeric fields zero. This makes "how many questions were filtered per model"
-auditable directly from the DB and feeds paper Table 2's "Excluded by Cutoff"
-column. Resume never reattempts these rows.
+auditable directly from the DB and feeds the per-model exclusion-count column
+in reports. Resume never reattempts these rows.
 
 `test_training_cutoff.py` pins the contract in three parts: every slot for a
 question with `q.end_time <= cutoff` writes `skipped_training_cutoff`; models
@@ -625,25 +585,6 @@ leak_detector_prompt_version  — human-readable label, default "v1"
 When `ENABLE_SEARCH_LEAK_FILTER=False` the detector path is byte-level rolled
 back and behaviour matches v5.1 without the detector.
 
-The audit results from the paper (paper §4.3.4, $N = 270$ items drawn as 30
-questions × 3 models × 3 trials) are:
-
-| Metric                                     | Value      |
-| ------------------------------------------ | ---------- |
-| TP (real leak, detector dropped)            | 235 (87.0%)|
-| TN (no leak, detector kept)                 | 31 (11.5%) |
-| FP (no leak, detector dropped)              | 1 (0.4%)   |
-| FN (real leak, detector kept)               | 3 (1.1%)   |
-| Recall (TP / (TP+FN))                       | **98.7%**  |
-| Specificity (TN / (TN+FP))                  | 96.9%      |
-| Per-audit-item residual leakage (FN/N)      | **1.1%**   |
-| Wilson 95% upper bound on residual          | **3.2%**   |
-| Leak-conditional pass-through (FN/(TP+FN))  | 1.3%       |
-
-For comparison, the no-detector baseline yields roughly 100% leak-conditional
-pass-through and the Tavily-only baseline 3% to 16%, so the detector reduces
-residual leakage by an order of magnitude relative to Tavily alone.
-
 `test_leak_filter.py` (550 LOC) pins five contracts: the detector input
 whitelist, fail-closed on retry exhaustion, AUTH-immediate-fail-closed without
 propagation, presence of every audit field on `search_calls`, and
@@ -671,8 +612,7 @@ framework cannot defend against capabilities the API does not expose.
 
 Of the six leakage sources the framework recognises, four are controllable via
 the channels above. The remaining two are inherent to the data and to
-post-training knowledge backflow, and the paper acknowledges them explicitly
-as evaluation bias (paper §3.5):
+post-training knowledge backflow, and are accepted as evaluation bias:
 
 | Leakage source                               | Controllable? | Mitigation                                                                     |
 | -------------------------------------------- | ------------- | ------------------------------------------------------------------------------ |
@@ -747,19 +687,18 @@ A=0, B=1, ..., Z=25
 [ =26, \ =27, ] =28, ^ =29, _ =30, ` =31, a =32, b =33, c =34, ...
 ```
 
-> ⚠️ **Compatibility warning.** The example DB has 4 `multiple_choice`
-> questions with more than 26 options, and 3 of them have ground-truth letters
-> landing on non-letter symbols such as `[`, `\`, `]`, `^`, `_`, `` ` ``, `a`,
-> `b`, `c`. These ASCII-continuation labels are unfriendly to LLMs because
-> backticks and underscores get swallowed by markdown and code blocks, and
-> lowercase `a` and uppercase `A` are easily confused in inline rendering. The
-> scheme is retained because it preserves a one-to-one mapping with the
-> source-data letter encoding for letter-set scoring. Three mandatory defences
-> apply: `prompts.render_user_prompt` quotes and escapes labels when generating
-> the `outcomes_block` for >26 options; `parser.parse_answer` has a round-trip
-> unit test (label → letter → label) for `multiple_choice` with >26 options;
-> and logs and reports record letters and corresponding labels in parallel for
-> manual review.
+> ⚠️ **Compatibility warning.** When a question carries more than 26 options,
+> the encoding lands on non-letter symbols such as `[`, `\`, `]`, `^`, `_`,
+> `` ` ``, `a`, `b`, `c`. These ASCII-continuation labels are unfriendly to
+> LLMs because backticks and underscores get swallowed by markdown and code
+> blocks, and lowercase `a` and uppercase `A` are easily confused in inline
+> rendering. The scheme is retained because it preserves a one-to-one mapping
+> with the source-data letter encoding for letter-set scoring. Three mandatory
+> defences apply: `prompts.render_user_prompt` quotes and escapes labels when
+> generating the `outcomes_block` for >26 options; `parser.parse_answer` has a
+> round-trip unit test (label → letter → label) for `multiple_choice` with >26
+> options; and logs and reports record letters and corresponding labels in
+> parallel for manual review.
 
 The ground-truth reverse lookup, used for display or logging, is:
 
@@ -872,9 +811,8 @@ All four share the status-header builder `_build_status_header`
 (prompts.py:L128–L164), which prepends a uniform line of the form
 `[Harness status] step k/N (R remaining) · web_search s/C used (M left).`
 
-The seven knobs that govern this chain are summarised below; each defaults
-match the paper main run (§1.3). The `LOOKAHEAD` parameter is clamped to
-$[1, T]$ at startup (config.py:L696–L707).
+The seven knobs that govern this chain are summarised below. The `LOOKAHEAD`
+parameter is clamped to $[1, T]$ at startup (config.py:L696–L707).
 
 | Knob                                  | Default | Scope                  | Effect                                                                                       |
 | ------------------------------------- | ------- | ---------------------- | -------------------------------------------------------------------------------------------- |
@@ -900,7 +838,7 @@ three persisted fields:
 * `belief_parse_ok` is `1` iff the last-step belief parsed; it is independent
   of `parse_ok`.
 
-The belief JSON schema is strict (paper Appendix C; prompts.py:L66–L105):
+The belief JSON schema is strict (prompts.py:L66–L105):
 
 ```json
 {
@@ -1074,7 +1012,7 @@ PRAGMA busy_timeout = 5000;
 | `s{i}_final_answer_letters`       | The `frozenset[str]` from `parser.parse_answer(final_raw, q)`, written as `json.dumps(sorted(...))`.                                                              |
 | `s{i}_final_answer_raw`           | The full `content` text of the LLM's last assistant message.                                                                                                      |
 | `s{i}_correct`                    | `frozenset == frozenset` cast to `int`; NULL when parse fails or the sample is not in $\mathcal{S}$.                                                              |
-| `s{i}_parse_ok`                   | `final_answer_letters is not None`, equivalent to $v_{i,M}$ from paper §3.1.                                                                                       |
+| `s{i}_parse_ok`                   | `final_answer_letters is not None`, equivalent to the validity flag $v_{i,M}$.                                                                                       |
 | `user_prompt`                     | Return of `prompts.render_user_prompt(q, templates, …)`, rendered once per question and retained via COALESCE.                                                      |
 | `s{i}_messages_trace`             | The full `messages` list as JSON, or NULL when `WRITE_MESSAGES_TRACE=False`.                                                                                       |
 | `s{i}_search_calls`               | Per-call metadata: `query`, `end_date`, `n_results`, `published_dates`. With the leak filter on, also `n_results_raw / n_results_kept / detector_verdicts / detector_latency_ms / detector_error_kind`. |
@@ -1095,7 +1033,7 @@ PRAGMA busy_timeout = 5000;
 
 Three independent SHA-256 prefixes describe what the LLM actually saw in this
 run, and they decouple ablation axes that would otherwise collide on a single
-hash (paper §3.5; design rationale in DESIGN.md §5.6).
+hash (design rationale in DESIGN.md §5.6).
 
 * `prompt_templates_hash` covers the renderer $R$, hashed over the eight
   template keys of §2.3.
@@ -1179,7 +1117,7 @@ ENABLE_WEB_SEARCH=true
 # -------- Tavily Search --------
 TAVILY_API_KEY=tvly-REPLACE_ME           # single value or CSV (multi-key pool)
 TAVILY_KEY_COOLDOWN_S=60                 # 429 cooldown for a single key
-TAVILY_MAX_RESULTS=5                     # R axis (paper main R_tav = 5; multi-value → grid)
+TAVILY_MAX_RESULTS=5                     # R_tav axis; multi-value triggers grid
 TAVILY_SEARCH_DEPTH=basic                # basic (1 credit) | advanced (2 credits)
 TAVILY_INCLUDE_RAW_CONTENT=markdown      # false | markdown (default) | text
 TAVILY_RAW_CONTENT_MAX_CHARS=8000        # per-result raw_content truncation
@@ -1190,8 +1128,8 @@ SEARCH_RETRY_MAX=3
 SEARCH_BACKOFF_S=2,5,15
 
 # -------- ReAct Loop --------
-REACT_MAX_STEPS=12                       # T (paper main: 12)
-REACT_MAX_SEARCH_CALLS=8                 # C axis (paper main: C = 4; multi-value → grid)
+REACT_MAX_STEPS=12                       # T (max ReAct steps per sample)
+REACT_MAX_SEARCH_CALLS=8                 # C axis; multi-value triggers grid
 REACT_REFLECTION_PROTOCOL=true
 REACT_BUDGET_AWARENESS_PROTOCOL=true
 REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=true
@@ -1217,7 +1155,7 @@ LEAK_DETECTOR_FAIL_ACTION=drop           # drop (fail-closed, default) | keep (A
 LEAK_DETECTOR_CONCURRENCY=5
 LEAK_DETECTOR_PROMPT_VERSION=v1
 
-# -------- Composite score weights (paper Eq. 35) --------
+# -------- Composite score weights --------
 COMPOSITE_WEIGHTS_QTYPE=yes_no=0.15,binary_named=0.15,multiple_choice=0.70
 COMPOSITE_WEIGHTS_CTYPE=single=0.40,multi=0.60
 COMPOSITE_WEIGHT_OVERRIDES_QTYPE=
@@ -1339,7 +1277,7 @@ must be lowercase ASCII.
 ### 8.2 Error and parsing coupling rules
 
 This matrix is the contract between `react.py`'s output and the analysis
-denominators (paper §4.2.5).
+denominators.
 
 | State                                       | `parse_ok` | `correct` | Counted in $\mathcal{S}$? | Counted in $\mathcal{D}^{\mathrm{eval}}$? |
 | ------------------------------------------- | ---------- | --------- | ------------------------- | ----------------------------------------- |
@@ -1389,8 +1327,8 @@ resume tasks. On error the line shifts to `ERROR` level and reads
 
 Metrics are computed entirely by `forecast_eval.analysis` after the run
 finishes and are never stored in the DB. Artefacts land in
-`runs/{run_id}/analysis/`. The definitions below match both the source
-implementation and the paper's notation (paper §4.2).
+`runs/{run_id}/analysis/`. Each definition below ties one mathematical object
+to the function that computes it.
 
 ### 9.0 Reading guide
 
@@ -1406,13 +1344,12 @@ first; the §X.Y references point to subsections of this section.
 | "How often does a model commit a parseable answer at all?"               | §9.1 Validity              | §9.7 Per-correct cost               |
 | "Did the leakage barrier hold?"                                          | §4.4 Detector audit        | §4.6 residual surface               |
 | "Where is the model spending its tokens and tool calls?"                  | §9.11 Behavioural diagnostics | §9.12 output artefacts          |
-| "Reproduce a specific number in the paper."                              | §12.1 Reproducibility recipe | §1.3 defaults table             |
 
 ### 9.1 Validity ($\mathcal{E}^{\mathrm{valid}}$)
 
 The validity flag $v_{i,M} = \mathbb{1}[\Psi_i(o_{i,M}) \ne \bot]$ records
-whether the model's raw output yields a parseable letter set (paper §3.1).
-The DB columns derived from it are:
+whether the model's raw output yields a parseable letter set. The DB columns
+derived from it are:
 
 | Metric                          | Definition                                                                              | DB column source              |
 | ------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------ |
@@ -1429,12 +1366,10 @@ A `(question_id, model)` has $n$ samples where $n$ is `SAMPLING_N`. The tally
 excludes rows with `s{i}_error="skipped_training_cutoff"`, since those are
 excluded questions rather than the model getting them wrong.
 
-**Strict equality** (paper Eq. 40, `eq:strict-equiv`):
-$r_{i,M} = \mathbb{1}[\widehat{G}_{i,M} = G_i]$ corresponds to `s{i}_correct`
-in the DB.
+**Strict equality**: $r_{i,M} = \mathbb{1}[\widehat{G}_{i,M} = G_i]$
+corresponds to `s{i}_correct` in the DB.
 
-**Exam-style partial credit** (paper Eq. 37, `eq:exam-score`) is the project's
-headline per-sample score:
+**Exam-style partial credit** is the project's headline per-sample score:
 
 $$
 \text{exam-score}(\hat S, G) = \begin{cases}
@@ -1455,7 +1390,7 @@ FP > 0              → 0.0   (any false positive vetoes)
 otherwise           → |TP| / |G|
 ```
 
-**Tversky similarity** (paper Eq. 51, `eq:tversky`), used for FSS:
+**Tversky similarity**, used for FSS:
 
 $$
 T(\hat S, G) = \frac{|\hat S \cap G|}{|\hat S \cap G| + \alpha\,|\hat S \setminus G| + \beta\,|G \setminus \hat S|}
@@ -1477,25 +1412,25 @@ Single-choice degenerates to $0/1$.
 
 | Metric                          | Definition                                                                                            | Implementation                              |
 | ------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `pass_at_1_avg` ($\text{pass@1}$) | Per-question intra-mean of strict hits, then equal-weight cross-question (paper Eq. 42)              | `accuracy._aggregate` (accuracy.py:L124)     |
-| `pass_any_at_n` ($\text{pass-any@n}$) | $\mathbb{1}[\exists s: c_{q,s}=1]$ averaged across questions; this is the standard `pass@k` (paper Eq. 44) | `accuracy._aggregate` (L134)                 |
-| `at_least_all_at_n` ($\text{pass-all@n}$) | $\prod_s c_{q,s}$ averaged; a repeated-consistency lower bound (paper Eq. 45)                  | `accuracy._aggregate` (L141)                 |
+| `pass_at_1_avg` ($\text{pass@1}$) | Per-question intra-mean of strict hits, then equal-weight cross-question                              | `accuracy._aggregate` (accuracy.py:L124)     |
+| `pass_any_at_n` ($\text{pass-any@n}$) | $\mathbb{1}[\exists s: c_{q,s}=1]$ averaged across questions; this is the standard `pass@k`        | `accuracy._aggregate` (L134)                 |
+| `at_least_all_at_n` ($\text{pass-all@n}$) | $\prod_s c_{q,s}$ averaged; a repeated-consistency lower bound                                | `accuracy._aggregate` (L141)                 |
 | `at_least_majority_at_n`        | $\mathbb{1}[\sum_s c_{q,s} \ge \lceil n/2 \rceil]$ averaged                                            | `accuracy._aggregate`                        |
 | `majority_vote_accuracy`        | Counter-based letter-set vote, single winner, then strict equality vs $G_q$                            | `accuracy._aggregate` (L150–L164)             |
 | `exam_score_at_n_avg`           | Two-step (intra-question mean → inter-question mean) over the scored index $\mathcal{J}_q^{\mathrm{cnt}}$ | `exam_score.exam_score_at_n_avg` (L94–L129) |
-| `cohen_kappa`                   | $(\text{acc} - p_e)/(1 - p_e)$ with $p_e = 1/k_q$ for single or $0.5$ per-label for multi (paper Eq. 46) | `accuracy.cohen_kappa` (L493–L532)           |
+| `cohen_kappa`                   | $(\text{acc} - p_e)/(1 - p_e)$ with $p_e = 1/k_q$ for single or $0.5$ per-label for multi              | `accuracy.cohen_kappa` (L493–L532)           |
 | `hamming_score`                 | Cross-question mean of per-question Hamming (multi only)                                                | `accuracy.hamming_score_per_question` (L535–L574) |
 
-### 9.4 Multi-trial consistency ($n \ge 2$, paper §4.2.6)
+### 9.4 Multi-trial consistency ($n \ge 2$)
 
 | Metric          | Definition                                                                                                              | Implementation                              |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `fleiss_kappa`  | $(\bar{P} - \bar{P}_e)/(1 - \bar{P}_e)$ on the $K_q^{\mathrm{eff}}$-trial vote matrix; stratified by $k_q$ for single, per-label for multi (paper Eq. 49–50) | `consistency.fleiss_kappa` (L257–L297)       |
+| `fleiss_kappa`  | $(\bar{P} - \bar{P}_e)/(1 - \bar{P}_e)$ on the $K_q^{\mathrm{eff}}$-trial vote matrix; stratified by $k_q$ for single, per-label for multi  | `consistency.fleiss_kappa` (L257–L297)       |
 | `mean_entropy`  | Per-question mean Shannon entropy of the vote distribution; per-label binary mean for multi                              | `consistency.prediction_entropy_*` (L305–L399) |
-| `vci`           | $\text{VCI}_q = \max_\ell n_{q,\ell}/K_q^{\mathrm{eff}}$, cross-question mean (paper §4.2.6)                              | `consistency.mean_vci` (L401–L425)            |
+| `vci`           | $\text{VCI}_q = \max_\ell n_{q,\ell}/K_q^{\mathrm{eff}}$, cross-question mean                                            | `consistency.mean_vci` (L401–L425)            |
 | `mvg`           | $\text{MV-Acc} - \text{pass@1}$; positive values indicate self-consistency gain                                          | `consistency.mvg` (L427–L450)                 |
 
-### 9.5 Format Skill Score (FSS, paper §4.2.7)
+### 9.5 Format Skill Score (FSS)
 
 The headline chance-corrected skill metric. For the $j$-th trial of question
 $q$:
@@ -1506,7 +1441,7 @@ $$
 \text{fss}_q = \frac{\bar{T}_q - T_q^{\mathrm{chance}}}{1 - T_q^{\mathrm{chance}}}
 $$
 
-The chance-baseline closed form (paper Eq. 53, `eq:tversky-chance`) is
+The chance-baseline closed form is
 
 $$
 T_q^{\mathrm{chance}} = \begin{cases}
@@ -1517,8 +1452,7 @@ $$
 
 The dataset-level value is
 $\text{fss} = \frac{1}{|\mathcal{D}^{\mathrm{ok}}|}\sum_q \text{fss}_q$ where
-$\mathcal{D}^{\mathrm{ok}} = \{q : \bar{T}_q \ne \text{None}\}$ (paper Eq. 56,
-`eq:fss`).
+$\mathcal{D}^{\mathrm{ok}} = \{q : \bar{T}_q \ne \text{None}\}$.
 
 The implementation is `accuracy.fss` (accuracy.py:L386–L479), with the
 closed-form chance via `accuracy.tversky_baseline` (L316–L350). It returns
@@ -1527,7 +1461,7 @@ decompose by question. Pinned by `test_fss.py` (528 LOC) for correctness
 against analytical baselines, and by `test_fss_sensitivity.py` for the
 $(\alpha, \beta)$ sweep.
 
-### 9.6 Composite Accuracy (paper §4.2.3, Eq. 35, the headline)
+### 9.6 Composite Accuracy (the headline)
 
 Composite Accuracy is the model-level summary metric. Substituting
 $\text{exam}_{avg}^{(b)}$ as the per-bucket value:
@@ -1536,12 +1470,11 @@ $$
 \text{Composite Accuracy}_m = \frac{\sum_{b\in B_{\mathrm{valid}}(m)} w_b \cdot \text{exam}_{avg}^{(b),m}}{\sum_{b\in B_{\mathrm{valid}}(m)} w_b}
 $$
 
-where $B_{\mathrm{valid}}(m) = \{b\in B : v_{m,b}\ne\text{None} \wedge w_b > 0\}$
-(paper Eq. 36, `eq:bvalid`). Missing buckets are dropped and the remaining
-weights are renormalised. If $B_{\mathrm{valid}}(m) = \varnothing$ the
-composite is `None`.
+where $B_{\mathrm{valid}}(m) = \{b\in B : v_{m,b}\ne\text{None} \wedge w_b > 0\}$.
+Missing buckets are dropped and the remaining weights are renormalised. If
+$B_{\mathrm{valid}}(m) = \varnothing$ the composite is `None`.
 
-The default weights (config.py:L365–L368, paper §4.2.1) are:
+The default weights (config.py:L365–L368) are:
 
 ```text
 yes_no          = 0.15
@@ -1563,7 +1496,7 @@ runtime via the known-metrics allowlist (composite.py:L77–L127). The
 implementation is `composite.compute_composite` (composite.py:L18) plus
 `composite.slice_v5_metrics_by_bucket` (L151–L198).
 
-### 9.7 Per-correct cost (paper §4.2.8, Eq. 57)
+### 9.7 Per-correct cost
 
 The cost-effectiveness scalar amortises the OpenRouter invoice across the
 difficulty-weighted notional correct count:
@@ -1626,7 +1559,7 @@ For probability vectors across $K$ samples per question:
 | Strategy             | Formula                                                                                  | Use                                            |
 | -------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------- |
 | Arithmetic mean      | $\hat p_l = (1/K)\sum_k p_{k,l}$                                                          | Phase 1 default                                |
-| Logit-space mean     | Single: softmax of mean log-prob; multi: per-label sigmoid of mean logit                 | Bayesian model average; paper Appendix C.9     |
+| Logit-space mean     | Single: softmax of mean log-prob; multi: per-label sigmoid of mean logit                 | Bayesian model average                          |
 | LOO shrinkage        | Scan $\alpha \in \{0, 0.1, ..., 1.0\}$; blend toward uniform prior on logit              | Adaptive smoothing (`aggregation.loo_shrinkage`, L145–L199) |
 
 ### 9.10 Statistical inference (`inference.py`)
@@ -1642,8 +1575,8 @@ For probability vectors across $K$ samples per question:
 
 The multi-comparison control is Holm-Bonferroni at the FWER level. The paired
 bootstrap is **same-indexed**: the same bootstrap draws the same question
-into both A and B's arrays, so it controls the question-level variance that
-the paper Appendix G.2 quantifies at 62% of total.
+into both A and B's arrays, which controls the question-level variance that
+typically dominates total variance in this evaluation.
 
 ### 9.11 Behavioural diagnostics (`behavior.py`)
 
@@ -1766,7 +1699,7 @@ advertised.
 | $H_{\mathrm{aux}}$: detector whitelist, fail-closed, AUTH-immediate-drop                    | `test_leak_filter.py`                                                                                                                           |
 | Composite: weights validation, per-metric overrides, allowlist                              | `test_composite_score.py`                                                                                                                       |
 | FSS: closed-form chance baselines, $(\alpha,\beta)$ sensitivity                            | `test_fss.py`, `test_fss_sensitivity.py`                                                                                                        |
-| Exam-score: paper Eq. 37 corner cases (FP-veto, parse-fail = 0, cutoff = None)             | `test_exam_score.py`                                                                                                                            |
+| Exam-score: corner cases (FP-veto, parse-fail = 0, cutoff = None)                           | `test_exam_score.py`                                                                                                                            |
 | Behavioural metrics: belief evolution, reflection A/B, tool PDP, confidence calibration     | `test_behavior.py`                                                                                                                              |
 | Grid: virtual-slug encoding, per-cell settings view, analysis pipeline                     | `test_grid_slug.py`, `test_grid_dispatcher.py`, `test_grid_analysis.py`, `test_grid_settings_view.py`, `test_plot_analysis_grid.py`             |
 | DB schema migration: v2→v5 forward path                                                     | `test_db_v4_migration.py`, `test_db_v5_migration.py`                                                                                            |
@@ -1794,7 +1727,7 @@ longest tests are:
 | `test_fss.py`                  |  528  | FSS Tversky, chance baselines, edge cases                                     |
 | `test_composite_score.py`      |  509  | Composite weights, allowlist, override parsing                                |
 | `test_prompts.py`              |  447  | Renderer rules across all three qtypes plus protocol toggles                   |
-| `test_exam_score.py`           |  426  | exam-score corner cases per paper Eq. 37                                       |
+| `test_exam_score.py`           |  426  | exam-score corner cases (FP-veto, parse-fail, cutoff exclusion)                |
 
 Run all tests with:
 
@@ -1804,36 +1737,9 @@ pytest tests/ -q
 
 ---
 
-## 12. Reproducibility
+## 12. Setup, operation, and reimplementation
 
-### 12.1 Reproducing the paper main run
-
-To exactly reproduce the paper's main run on the example DB, override the
-codebase defaults as follows:
-
-```ini
-SOURCE_DB=./forecast_eval_set_example.db
-SOURCE_TABLE=forecast_eval_set_example
-SAMPLING_N=3
-REACT_MAX_STEPS=12
-REACT_MAX_SEARCH_CALLS=4
-TAVILY_MAX_RESULTS=5
-TAVILY_END_DATE_OFFSET_DAYS=-1
-REACT_REFLECTION_PROTOCOL=true
-REACT_BUDGET_AWARENESS_PROTOCOL=true
-REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=true
-REACT_FORCE_FINAL_ANSWER_LOOKAHEAD=2
-REACT_BUDGET_EXCEEDED_DROP_TOOLS=true
-REACT_FINAL_ANSWER_RETRY=false
-ENABLE_SEARCH_LEAK_FILTER=true
-BELIEF_PROTOCOL=false
-```
-
-Then declare each model's $\kappa_M$ via `MODEL_TRAINING_CUTOFFS` per paper
-Table 2; the six published cutoffs are
-$\kappa_M \in \{2025\text{-}09\text{-}29, 2026\text{-}02\text{-}11, 2026\text{-}02\text{-}25, 2026\text{-}02\text{-}12, 2026\text{-}01\text{-}27, 2026\text{-}03\text{-}10\}$.
-
-### 12.2 From-scratch implementation order
+### 12.1 From-scratch implementation order
 
 For a from-scratch reimplementation, this order keeps each step locally
 verifiable and lists the test that should pass before moving on:
@@ -1860,7 +1766,7 @@ Get a smoke pass first with `--question-type yes_no`, `MODELS=openai/gpt-4o-mini
 and `SAMPLING_N=1`; verify the renderer output and parser normalisation, and
 only then open up to a full evaluation.
 
-### 12.3 Conda environment
+### 12.2 Conda environment
 
 ```yaml
 name: forecast
@@ -1897,7 +1803,7 @@ python evaluation.py --question-type yes_no
 analysis pipeline stays dependency-light. Install it locally only to render
 the on-demand plot family in `scripts/plot_analysis.py`.
 
-### 12.4 CLI
+### 12.3 CLI
 
 The main entry point is `evaluation.py`. Three flags control input:
 
@@ -1972,7 +1878,6 @@ Forecast/
 ├── README.md                      # user-facing entry
 ├── DESIGN.md                      # rationale (this implements design)
 ├── FRAME.md                       # this document
-├── paper/                         # paper source (LaTeX + bib + style)
 ├── evaluation.py                  # main entry: CLI → runner.run → analysis.run_analysis
 ├── forecast_eval_set_example.db   # source data (read-only, checked into Git)
 ├── runs/                          # all evaluation outputs (gitignored)
@@ -2000,8 +1905,8 @@ Forecast/
 │   └── analysis/                  # post-hoc statistics (Γ); read DB → CSV / MD / JSON
 │       ├── __init__.py            # run_analysis(run_dir) orchestrator
 │       ├── accuracy.py            # strict-equality + pass@k family + FSS / Cohen κ / Hamming
-│       ├── exam_score.py          # exam-style partial credit (paper Eq. 37)
-│       ├── composite.py           # subtype-weighted composite accuracy (paper Eq. 35)
+│       ├── exam_score.py          # exam-style partial credit
+│       ├── composite.py           # subtype-weighted composite accuracy
 │       ├── consistency.py         # Fleiss κ, mean entropy, VCI, MVG (K-trial)
 │       ├── proper_score.py        # BI / NLL / MBS / ABI (probabilistic companion)
 │       ├── aggregation.py         # arithmetic / logit-space mean / LOO shrinkage
@@ -2186,10 +2091,10 @@ def is_correct(pred: frozenset[str] | None, gt: frozenset[str]) -> bool | None:
 
 ---
 
-> **One sentence.** This codebase is the contract that turns the paper's run
-> unit $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi,
-> \Gamma)$, together with the auxiliary detector $H_{\mathrm{aux}}$, into a
-> Python module per symbol, a SQLite column per observation, a CSV column per
-> metric, and a unit test per invariant; every number that ever appears in the
-> report can be traced back to a row in a wide table, a hash in `run_meta`,
-> an audit verdict in `search_calls`, or a green test in `tests/`.
+> **One sentence.** This codebase realises the run unit
+> $\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)$,
+> together with the auxiliary detector $H_{\mathrm{aux}}$, as a Python module
+> per symbol, a SQLite column per observation, a CSV column per metric, and a
+> unit test per invariant; every number that ever appears in a report can be
+> traced back to a row in a wide table, a hash in `run_meta`, an audit verdict
+> in `search_calls`, or a green test in `tests/`.
