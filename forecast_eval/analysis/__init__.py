@@ -12,23 +12,6 @@ Entry points:
     * `python -m forecast_eval.analysis RUNS_ROOT/{run_id}` — CLI to re-run
       analysis against existing DBs.
 
-v5 changes from v4:
-
-* `calibration.py` deprecated and removed: at K=5 the empirical probability
-  has only 6 discrete levels per label, making Reliability Diagram /
-  Murphy decomposition / Platt scaling statistically meaningless. The 5
-  associated outputs (`reliability_data*.json` / `brier_decomposition.csv`
-  / `calibration_params.json` / `per_model_summary_calibrated.csv`) are no
-  longer written.
-* `consistency.py` is new: K-trial-only metrics — Fleiss' κ, predictive
-  entropy, entropy-accuracy joint analysis (per-model tertile bucketing),
-  VCI, MVG.
-* `inference.py` extended with `metric_paired_bootstrap` for FSS / Acc /
-  MV_Acc / Fleiss κ / EBI; the v4 BS-paired bootstrap is preserved
-  (grid analysis depends on it).
-* `accuracy.py` new functions: `tversky_score`, `fss`, `cohen_kappa`,
-  `hamming_score`. FSS is the v5 main metric.
-
 Module layout:
 
 * `flatten.py`     — `_flatten_db` pivot + `SampleRow` (incl. v4 `probabilities`).
@@ -305,8 +288,8 @@ def run_analysis(
     models: list[str] = manifest["models"]
     model_files: dict[str, str] = manifest["model_files"]
     sampling_n_top: int = manifest.get("sampling_n", 1)
-    # `analysis_schema` was added in v4 manifests. v3 runs replayed under v4/v5
-    # code don't carry the field; treat that as "v3 fallback semantics".
+    # `analysis_schema` is missing on legacy manifests; treat that as
+    # "v3 fallback semantics".
     analysis_schema: str | None = manifest.get("analysis_schema")
 
     # composite-score-by-subtype: resolve weight parameters. None -> default.
@@ -420,8 +403,8 @@ def run_analysis(
     # (FSS / Cohen κ / Hamming / Consistency) on each bucket sliced by
     # question_type / choice_type. These values are then:
     #   * fed into ``per_model_by_question_type.csv`` /
-    #     ``per_model_by_choice_type.csv`` (so they now carry v5 columns
-    #     instead of NULL placeholders);
+    #     ``per_model_by_choice_type.csv`` (which carry v5 columns rather
+    #     than NULL placeholders);
     #   * fed into :func:`compute_composite` for weighted aggregation.
     # ------------------------------------------------------------------ #
     v5_slice_by_qtype: dict[str, dict[str, V5SliceResult]] = {}
@@ -470,7 +453,7 @@ def run_analysis(
         )
 
     written: list[Path] = []
-    # v5: per_model_summary.csv now carries v3 + FSS + Consistency + v4
+    # v5: per_model_summary.csv carries v3 + FSS + Consistency + v4
     # probabilistic columns; markdown synthesises them with the K=5
     # disclaimer footnote.
     if summary_payload:

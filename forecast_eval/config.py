@@ -292,7 +292,7 @@ class Settings(BaseSettings):
     REACT_MIN_SEARCH_CALLS: int = 0
     # Max number of nudges to inject, preventing infinite nudge loops between LLM and system. REACT_MAX_STEPS is still the hard ceiling.
     REACT_MAX_NUDGES: int = 2
-    # v5.1 harness-resilience switches. See openspec/changes/harness-resilience-v1.
+    # v5.1 harness-resilience switches.
     # REACT_FINAL_ANSWER_RETRY=True: when the loop ends normally but final_raw=="", call LLM once more with tools=[].
     #   Default False - superseded by force-final-answer-near-limit-v1 (last-step hard switch to tools=[] within the loop),
     #   kept as an optional out-of-loop emergency backstop. Enabling costs one extra LLM step (react_steps + 1).
@@ -612,7 +612,7 @@ class Settings(BaseSettings):
                     f"MODELS entry {slug!r} must not contain '::' — that delimiter is "
                     "reserved for grid-search virtual slugs (compose_virtual_slug)"
                 )
-        # LLM_API_KEY is a plain string; TAVILY_API_KEY is now upgraded to list[str]
+        # LLM_API_KEY is a plain string; TAVILY_API_KEY is a list[str]
         # (CSV multi-key support), so each placeholder must be validated individually.
         if not self.LLM_API_KEY:
             raise ValueError("LLM_API_KEY must not be empty")

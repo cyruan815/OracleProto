@@ -319,12 +319,9 @@ async def run_react(
             budget_exhausted_notified = True
         elif pending_continuation:
             # Lowest priority: previous turn was content w/o `\boxed{...}` and
-            # nothing else needs to fire. This replaces the historical inline
-            # "Harness: step N complete — no \boxed detected" injection that
-            # used to land immediately after the assistant turn (which could
-            # then double-inject with penultimate / last-step on the next
-            # iteration). Deferring to the TOP of the next iteration removes
-            # that double-injection.
+            # nothing else needs to fire. Inject at the TOP of the next
+            # iteration so it cannot collide with penultimate / last-step
+            # injections fired in the same round.
             injection = build_continuation_after_unboxed_content(
                 current_step=steps_executed,
                 max_steps=settings.REACT_MAX_STEPS,

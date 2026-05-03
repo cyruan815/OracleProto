@@ -39,8 +39,7 @@ class _QuestionProbabilityRow:
     def is_fallback(self) -> bool:
         # Phase 1 convention: a question is "fallback" iff every contributing
         # sample was a fallback. If even one sample produced a parsed belief,
-        # we trust the average over all of them (a future Phase 2 logit-space
-        # aggregator may revisit this; for now arithmetic mean is fine).
+        # we trust the arithmetic mean across them.
         return self.n_samples > 0 and self.n_fallback == self.n_samples
 
 

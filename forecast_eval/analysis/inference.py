@@ -1,6 +1,7 @@
-"""Statistical inference for model comparisons (v4 + v5).
+"""Statistical inference for model comparisons.
 
-V4 (BS-paired bootstrap, kept for `grid.py` and the v4 probabilistic family):
+BS-paired bootstrap on per-question Brier (consumed by `grid.py` and the
+probabilistic family):
 
 * `paired_bootstrap` — $B = 5000$ paired resamples on per-question Brier
   scores; returns 95% CI and two-sided p-value.
@@ -12,7 +13,7 @@ V4 (BS-paired bootstrap, kept for `grid.py` and the v4 probabilistic family):
 * `posterior_normal_fit` — closed-form normal approximation.
 * `pairwise_paired_bootstrap` — every model pair × Holm correction.
 
-V5 (multi-metric paired bootstrap, parameterised over `MetricFn`):
+Multi-metric paired bootstrap (parameterised over `MetricFn`):
 
 * `metric_paired_bootstrap(metric_fn, samples_a_by_q, samples_b_by_q, gt_map, ...)`
   — for any metric (FSS / Acc / MV_Acc / Fleiss κ / EBI). Returns ΔMean,
@@ -718,8 +719,8 @@ def _metric_fn_ebi(
     samples_by_q: dict[str, list[SampleRow]],
     gt_map: dict[str, frozenset[str]],
 ) -> float | None:
-    """v4 BI on label-wise Brier — kept for v3-style fixtures with no
-    `probabilities` field, falls through to None automatically."""
+    """BI on label-wise Brier — falls through to None on legacy fixtures
+    that lack the `probabilities` field."""
     from .probabilistic import _aggregate_question_probs
     from .proper_score import brier_index, brier_score_lab
 

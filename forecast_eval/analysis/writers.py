@@ -1,10 +1,9 @@
 """CSV / Markdown / JSON serialisation for the analysis layer.
 
-Phase 1 appends probabilistic columns at the end of `_SUMMARY_FIELDS`,
-keeping the existing accuracy columns byte-identical to v3 (so
-`per_model_summary.csv` regresses cleanly when an old run is re-analyzed
-under v4 code). `error_breakdown.csv` / `finish_reason_breakdown.csv` are
-not touched at all.
+Probabilistic columns append at the end of `_SUMMARY_FIELDS`; accuracy
+columns stay byte-identical so a legacy `per_model_summary.csv` replays
+cleanly under newer code. `error_breakdown.csv` /
+`finish_reason_breakdown.csv` are not touched at all.
 """
 from __future__ import annotations
 

@@ -301,8 +301,8 @@ def build_belief_evolution_rows(
                             last_step_counter = counter
                             break
                         # last parsed step has no counterevidence key (older
-                        # trace schema before Phase 3) — keep walking; this
-                        # is rare since react.py ALWAYS writes the key now.
+                        # trace schema) — keep walking; this is rare since
+                        # react.py ALWAYS writes the key now.
                 if last_step_counter is not None:
                     final_choice = s.parsed_letters or frozenset()
                     counter_engagement = counterevidence_engagement(
@@ -791,8 +791,7 @@ def fit_logistic_irls(
         delta = _solve_linear_system(H, grad)
         if delta is None:
             return None
-        # Step clipping (Phase 2 calibration learned this lesson on saturated
-        # sigmoids — divergence shows up as |delta|→∞).
+        # Step clipping: saturated sigmoids cause divergence (|delta|→∞).
         norm = math.sqrt(sum(d * d for d in delta))
         if norm > 5.0:
             scale = 5.0 / norm

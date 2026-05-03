@@ -1,10 +1,10 @@
-"""K-trial aggregators for the v4 probabilistic family (Phase 2).
+"""K-trial aggregators for the v4 probabilistic family.
 
 Three aggregators take the per-question $K$-sample probability vectors and
 return a single aggregated probability vector. From `ANALYSIS_DESIGN_v4.md
 §3.2` / `specs/probabilistic-analysis/spec.md`:
 
-* `arithmetic_mean` — Phase 1 default; per-element average.
+* `arithmetic_mean` — default; per-element average.
 * `logit_space_mean` — paper §C.9 default. For `single` choice_type:
   $\\hat{p}_l = \\mathrm{softmax}(\\overline{\\log p}_l)$ (geometric mean
   normalised onto the simplex). For `multi`: per-label
@@ -14,9 +14,9 @@ return a single aggregated probability vector. From `ANALYSIS_DESIGN_v4.md
   curve. Used as a diagnostic ("does this dataset benefit from shrinking
   toward prior?"), not as the default aggregator.
 
-`majority_vote_v4_letter` upgrades the v3 letter-set vote to a logit-space
-mean argmax: $K$ floating-point logits almost never tie, so the v3
-~10% "tie-unresolved" loss is recovered.
+`majority_vote_v4_letter` returns a logit-space mean argmax: $K$ floating-
+point logits almost never tie, so letter-set ties are essentially
+impossible.
 
 All math is in pure Python — same convention as `proper_score.py`. The clip
 floor `NLL_EPS = 10^-3` is reused so log/logit operations stay finite even
@@ -244,7 +244,7 @@ def majority_vote_v4_letter(
 
     `single`: argmax → single letter. Ties only happen at exact equality,
     which is essentially impossible after a logit-space K-trial mean across
-    floating-point predictions — that's the whole point of v4's upgrade.
+    floating-point predictions.
 
     `multi`: per-label thresholding $p_l \\ge \\tau$ → letter set.
     """
@@ -279,8 +279,7 @@ def majority_vote_accuracy_v4(
     3. Compare to ground truth (set equality).
 
     Returns `(n_correct, n_resolvable)`. Skips questions with no predictions
-    (which become "unresolvable" — but that's a much rarer state than v3's
-    letter-set tie).
+    (which become "unresolvable").
     """
     if not (
         len(predictions_per_q) == len(gt_per_q) == len(choice_type_per_q)

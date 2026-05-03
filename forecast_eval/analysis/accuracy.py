@@ -1,13 +1,10 @@
-"""Accuracy-side metrics: pass@1 / pass_any@N / majority_vote / breakdowns.
+"""Accuracy-side metrics: pass@1 / pass_any@N / majority_vote / breakdowns,
+plus the discrete-native family (Tversky per-sample score, FSS three-step
+aggregate, Cohen's κ, Hamming partial-credit). The probabilistic family
+lives in `proper_score.py`.
 
-These metrics are byte-identical to v3 — the v4 refactor only relocated them
-from the monolithic `analysis.py`. The probabilistic family lives next door
-in `proper_score.py`.
-
-v5 appends the discrete-native family: Tversky per-sample score, FSS three-step
-aggregate, Cohen's κ, and Hamming partial-credit. These do NOT modify the v3
-`Aggregate` dataclass — they're separate functions consumed by the v5 writer
-columns. Existing v3/v4 behavior is unchanged.
+The discrete-native functions are kept separate from the `Aggregate`
+dataclass so callers that only need pass@1 / breakdowns are unaffected.
 """
 from __future__ import annotations
 

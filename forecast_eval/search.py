@@ -142,8 +142,8 @@ def _build_request_payload(
     set to "false" (Tavily's default is already false).
 
     `api_key` is supplied by the caller from TavilyKeyPool (rather than read
-    from settings.TAVILY_API_KEY, which has been upgraded to list[str]); this
-    lets each request swap keys to enable rotation + circuit breaking.
+    from settings.TAVILY_API_KEY, which is a list[str]); this lets each
+    request swap keys to enable rotation + circuit breaking.
     """
     raw_setting = settings.TAVILY_INCLUDE_RAW_CONTENT
     # Tavily's include_raw_content accepts bool | "markdown" | "text"
@@ -247,9 +247,8 @@ async def tavily_search(
                 httpx.ConnectTimeout,
                 # v5.1 (harness-resilience): transient-network family aligned
                 # with errors.classify. RemoteProtocolError (server disconnect
-                # mid-response) was previously bubbling out of tavily_search
-                # and getting classified as UNKNOWN by the runner, which never
-                # retries — see search-tool spec.
+                # mid-response) is caught here so the runner does not see
+                # UNKNOWN, which it never retries — see search-tool spec.
                 httpx.WriteTimeout,
                 httpx.WriteError,
                 httpx.PoolTimeout,
