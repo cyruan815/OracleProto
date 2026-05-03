@@ -64,7 +64,7 @@ where applicable, and one test that pins the contract.
 | $`\phi`$             | Answer normalisation map        | (letter encoding rule, see §4.8)                | `parser.parse_gt`, `parser.is_correct` (parser.py:L102)                         | `s{i}_correct`                                     | `test_parser.py`                  |
 | $`\Gamma`$           | Aggregation rule                | `COMPOSITE_WEIGHTS_*`, `SAMPLING_N`, etc.       | `forecast_eval/analysis/*` (auto-invoked from `evaluation.py`)                  | CSV / MD / JSON in `runs/{run_id}/analysis/`        | `test_analysis.py`                |
 | $`H_{\mathrm{aux}}`$ | Leakage detector (Stage 2)      | `ENABLE_SEARCH_LEAK_FILTER`, `LEAK_DETECTOR_*`  | `leak_filter.filter_search_result` (leak_filter.py:L348)                        | `s{i}_search_calls[*].audit.detector_*`             | `test_leak_filter.py`             |
-| $`\hat{p}_{q,j}`$    | Belief vector (v4 companion)    | `BELIEF_PROTOCOL` (default `False`)             | `parser.parse_belief` (parser.py:L117); `react.run_react` finalisation          | `s{i}_belief_final`, `s{i}_belief_trace`, `s{i}_belief_parse_ok` | `test_parser_belief.py`, `test_react_reflection.py` |
+| $`\hat{p}_{q,j}`$    | Belief vector (probabilistic companion) | `BELIEF_PROTOCOL` (default `False`)         | `parser.parse_belief` (parser.py:L117); `react.run_react` finalisation          | `s{i}_belief_final`, `s{i}_belief_trace`, `s{i}_belief_parse_ok` | `test_parser_belief.py`, `test_react_reflection.py` |
 
 The auxiliary axis $`R_{\mathrm{tav}}`$ denotes Tavily results-per-call and is
 distinct from the renderer symbol $`R`$. It corresponds to `TAVILY_MAX_RESULTS`,
@@ -302,7 +302,7 @@ control flow.
                       │              query, χ_i)   │
                       │       ũ_t = AuxLeakFilter( │
                       │              u_t, χ_i)     │
-                      │   v5.1 final-answer-retry  │
+                      │   final-answer-retry       │
                       │   parser.parse_answer      │
                       └──────────┬─────────────────┘
                                  │
@@ -581,13 +581,13 @@ leak_detector_prompt_hash     — sha256[:16] of LEAK_DETECTOR_PROMPT_TEMPLATE
 leak_detector_prompt_version  — human-readable label, default "v1"
 ```
 
-When `ENABLE_SEARCH_LEAK_FILTER=False` the detector path is byte-level rolled
-back and behaviour matches v5.1 without the detector.
+When `ENABLE_SEARCH_LEAK_FILTER=False` the detector path is byte-level disabled
+and behaviour matches the no-detector path.
 
 `test_leak_filter.py` (550 LOC) pins five contracts: the detector input
 whitelist, fail-closed on retry exhaustion, AUTH-immediate-fail-closed without
 propagation, presence of every audit field on `search_calls`, and
-byte-equivalence of the disabled path to v5.1.
+byte-equivalence of the disabled path to the no-detector path.
 
 ### 4.5 Channel 4: provider-side residual
 
@@ -718,7 +718,7 @@ approaches its limits.
 
 ### 5.1 Loop skeleton
 
-The skeleton below preserves all v5.1 wiring while staying short enough to
+The skeleton below preserves all harness wiring while staying short enough to
 read in one screen. Inline comments mark the four contracts the loop must
 honour. Numbered references in the comments point to the full Python at
 `react.py`.
@@ -773,7 +773,7 @@ async def run_react(q: Question, model: str, sample_idx: int, settings: Settings
             search_calls.append(result.to_search_call_record())
             messages.append(prompts.tool_result_message(tc, result.to_llm_payload()))
 
-    # v5.1 D1 backstop: mop up an empty final_raw with a tools=[] retry.
+    # D1 backstop: mop up an empty final_raw with a tools=[] retry.
     if final_raw == "" and settings.REACT_FINAL_ANSWER_RETRY:
         messages.append({"role": "user",
                          "content": "Time to commit. Output your final \\boxed{...} now."})
@@ -890,7 +890,7 @@ under `runs/{run_id}/db/<model_slug>.db`. Every file self-contains a copy of
 touching the source. Aggregations and statistics are not persisted; the
 `forecast_eval.analysis` package writes them post-hoc into `analysis/`.
 
-### 6.1 Schema (current = v5)
+### 6.1 Schema
 
 ```sql
 -- ⓪ schema version table
@@ -930,10 +930,10 @@ CREATE TABLE run_meta (
     source_db_hash            TEXT NOT NULL,
     metadata_hash             TEXT NOT NULL,
     prompt_templates_hash     TEXT NOT NULL,
-    reflection_protocol_text  TEXT,            -- v3+
-    reflection_protocol_hash  TEXT,            -- v3+
-    belief_protocol_text      TEXT,            -- v4+
-    belief_protocol_hash      TEXT,            -- v4+
+    reflection_protocol_text  TEXT,            -- nullable
+    reflection_protocol_hash  TEXT,            -- nullable
+    belief_protocol_text      TEXT,            -- nullable
+    belief_protocol_hash      TEXT,            -- nullable
     training_cutoff           TEXT,            -- κ_M (YYYY-MM-DD)
     started_at                TEXT NOT NULL,
     finished_at               TEXT
@@ -945,7 +945,7 @@ CREATE TABLE run_results (
     question_id TEXT PRIMARY KEY,
     user_prompt TEXT,                          -- COALESCE; first sample wins
 
-    -- v2 base (14 columns)
+    -- core (14 columns)
     s0_final_answer_letters TEXT,
     s0_final_answer_raw     TEXT,
     s0_correct              INTEGER,
@@ -960,18 +960,18 @@ CREATE TABLE run_results (
     s0_search_calls         TEXT,
     s0_error                TEXT,
     s0_created_at           TEXT,
-    -- v3 observability (6 columns)
+    -- observability (6 columns)
     s0_finish_reason        TEXT,
     s0_nudges_used          INTEGER,
     s0_step_metrics         TEXT,
     s0_response_id          TEXT,
     s0_system_fingerprint   TEXT,
     s0_service_tier         TEXT,
-    -- v4 belief (3 columns)
+    -- belief (3 columns)
     s0_belief_final         TEXT,
     s0_belief_trace         TEXT,
     s0_belief_parse_ok      INTEGER,
-    -- v5 harness-resilience (1 column)
+    -- harness-resilience (1 column)
     s0_final_answer_retry_used INTEGER,
 
     -- ...same s1_* / s2_* / ... groups...
@@ -1016,10 +1016,10 @@ PRAGMA busy_timeout = 5000;
 | `s{i}_response_id`                | Last round's `ChatCompletion.id`.                                                                                                                                  |
 | `s{i}_system_fingerprint`         | Last round's `ChatCompletion.system_fingerprint` when the provider supplies it; useful for detecting provider-side model-routing changes.                            |
 | `s{i}_service_tier`               | Last round's `ChatCompletion.service_tier`.                                                                                                                         |
-| `s{i}_belief_final`               | v4. The JSON-serialised `Belief.probabilities` from the final step; NULL when parsing fails or `BELIEF_PROTOCOL=False`.                                              |
-| `s{i}_belief_trace`               | v4. JSON array of belief summaries for every loop step.                                                                                                              |
-| `s{i}_belief_parse_ok`            | v4. Whether the last-step belief parsed legally (0 or 1); independent of `parse_ok`.                                                                                  |
-| `s{i}_final_answer_retry_used`    | v5. 0 or 1, set when `REACT_FINAL_ANSWER_RETRY` mopped up an empty `final_raw` (§5.1).                                                                                |
+| `s{i}_belief_final`               | The JSON-serialised `Belief.probabilities` from the final step; NULL when parsing fails or `BELIEF_PROTOCOL=False`.                                                  |
+| `s{i}_belief_trace`               | JSON array of belief summaries for every loop step.                                                                                                                  |
+| `s{i}_belief_parse_ok`            | Whether the last-step belief parsed legally (0 or 1); independent of `parse_ok`.                                                                                      |
+| `s{i}_final_answer_retry_used`    | 0 or 1, set when `REACT_FINAL_ANSWER_RETRY` mopped up an empty `final_raw` (§5.1).                                                                                    |
 
 ### 6.3 Three independent protocol fingerprints
 
@@ -1129,7 +1129,7 @@ REACT_FORCE_FINAL_ANSWER_LOOKAHEAD=2
 REACT_MIN_SEARCH_CALLS=0                 # soft floor; opt-in
 REACT_MAX_NUDGES=2
 
-# v5.1 harness-resilience
+# Harness-resilience
 REACT_FINAL_ANSWER_RETRY=false           # mop up empty final_raw with a tools=[] retry
 REACT_BUDGET_EXCEEDED_DROP_TOOLS=true    # drop tool schema once C is hit
 
@@ -1171,7 +1171,7 @@ WRITE_MESSAGES_TRACE=true
 LOG_LEVEL=INFO
 LOG_DIR=./logs
 
-# -------- Belief protocol (v4 probabilistic family, off by default) --------
+# -------- Belief protocol (probabilistic family, off by default) --------
 BELIEF_PROTOCOL=false
 
 # -------- Grid search anchors (optional; only when R / C are multi-valued) --------
@@ -1346,7 +1346,7 @@ derived from it are:
 | Metric                          | Definition                                                                              | DB column source              |
 | ------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------ |
 | `parse_failure_rate`            | $`1 - \mathbb{E}[v_{i,M}]`$ over the scorable set $`\mathcal{S}`$                            | `s{i}_parse_ok = 0`            |
-| `final_answer_retry_rate`       | Share of samples where the v5.1 backstop mopped up an empty `final_raw`                  | `s{i}_final_answer_retry_used = 1` |
+| `final_answer_retry_rate`       | Share of samples where the harness backstop mopped up an empty `final_raw`               | `s{i}_final_answer_retry_used = 1` |
 | `error_rate`                    | Share of samples with non-cutoff `s{i}_error`                                            | `s{i}_error NOT IN (NULL, 'skipped_training_cutoff')` |
 | `cutoff_skip_rate` per model    | `count(error='skipped_training_cutoff') / count(*)` per model                            | `s{i}_error = 'skipped_training_cutoff'` |
 | `error_breakdown` (CSV)         | `Counter[error]` across all samples, including cutoff                                    | `s{i}_error`                   |
@@ -1510,7 +1510,7 @@ which avoids divergences from "published unit price × token usage" calculations
 caused by reasoning-token billing, prompt-cache discounts, tool-call billing,
 and provider routing.
 
-### 9.8 Probabilistic family (v4 companion, demoted under K=5)
+### 9.8 Probabilistic family (demoted under K=5)
 
 `forecast_eval/analysis/proper_score.py` and `probabilistic.py` are active
 only when `BELIEF_PROTOCOL=True`.
@@ -1527,13 +1527,14 @@ only when `BELIEF_PROTOCOL=True`.
 > **K=5 disclaimer.** When `SAMPLING_N` is small, the empirical probability
 > $`\hat p = n/K`$ takes only six discrete values, which makes Reliability
 > Diagram, Murphy three-decomposition, and Platt LOO calibration statistically
-> meaningless. v5 deletes `calibration.py` and its five artefacts; the
-> probabilistic columns retain a `†` footnote in `per_model_summary.md`.
-> Reintroducing calibration requires raising $`K`$ to at least 30.
+> meaningless. `calibration.py` is absent from the analysis stack and its five
+> artefacts are not produced; the probabilistic columns retain a `†` footnote
+> in `per_model_summary.md`. Reintroducing calibration requires raising $`K`$
+> to at least 30.
 
 #### 9.8.1 Belief fallback when `belief_final IS NULL` but `parse_ok = 1`
 
-Legacy v3 runs and v4 belief-parse-failures still benefit from a degenerate
+Runs without belief data and belief-parse-failures still benefit from a degenerate
 probability vector for proper scoring:
 
 $$
@@ -1587,7 +1588,7 @@ A run's `analysis/` directory contains:
 
 | File                                            | Schema                                          | Contents                                |
 | ----------------------------------------------- | ----------------------------------------------- | --------------------------------------- |
-| `per_model_summary.csv` and `.md`               | 24 v3 + 4 FSS + 4 consistency + 7 prob = 39 cols | One row per model                        |
+| `per_model_summary.csv` and `.md`               | 24 base + 4 FSS + 4 consistency + 7 prob = 39 cols | One row per model                      |
 | `per_model_by_question_type.csv`                | sliced summary                                   | Bucketed by `question_type`             |
 | `per_model_by_choice_type.csv`                  | sliced summary                                   | Bucketed by `choice_type`               |
 | `per_model_composite_by_question_type.csv`      | composite weights + per-bucket metrics           | Composite Accuracy with subtype weights  |
@@ -1596,7 +1597,7 @@ A run's `analysis/` directory contains:
 | `finish_reason_breakdown.csv`                   | `Counter[finish_reason]`                         | Eligible samples only                    |
 | `paired_delta_bi.csv`                           | `ModelPairResult`                                | Paired-bootstrap deltas (BI units)      |
 | `paired_delta_bi_by_difficulty.csv`             | per-tertile result                               | Difficulty-stratified pair tests        |
-| `metric_pairwise_bootstrap.csv`                 | per-metric × per-pair result                     | v5 multi-metric pairwise                 |
+| `metric_pairwise_bootstrap.csv`                 | per-metric × per-pair result                     | multi-metric pairwise                    |
 | `belief_evolution.csv`                          | `BeliefEvolutionRow`                             | Volatility, variance, convergence        |
 | `reflection_ab.csv`                             | `ReflectionABRow`                                | Reflection A/B paired CIs                |
 | `tool_usage_pdp.csv`                            | `PDPRow`                                         | Feature importance                      |
@@ -1627,7 +1628,7 @@ length greater than 1, the run becomes a Cartesian grid over $`R \times C
 
 The composition is `db.compose_virtual_slug(real_model, R, C)`
 (db.py:L477–L516); parsing is `db.parse_virtual_slug(slug)`, which returns
-`(real_model, R, C)` or `None` for legacy single-cell runs. The `::`
+`(real_model, R, C)` or `None` for non-grid runs. The `::`
 delimiter is chosen to avoid collision with provider slugs, which is further
 enforced by config validation that rejects `::` inside `MODELS`.
 
@@ -1684,7 +1685,7 @@ advertised.
 | $`M`$: per-model DBs, virtual slugs, resume per model                                        | `test_runner_grid_model.py`, `test_runner_resume.py`                                                                                            |
 | $`\kappa_M`$: admissibility filter, cutoff-row write contract                                | `test_training_cutoff.py`                                                                                                                       |
 | $`\delta`$: tool-layer injection, LLM never sees `end_date`                                  | `test_search.py`, `test_react.py`                                                                                                               |
-| $`T`$, $`C`$: ReAct loop bounded, budget gates, harness priority chain, v5.1 switches          | `test_react.py` (1432 LOC), `test_react_reflection.py`                                                                                          |
+| $`T`$, $`C`$: ReAct loop bounded, budget gates, harness priority chain, harness-resilience switches | `test_react.py` (1432 LOC), `test_react_reflection.py`                                                                                       |
 | $`R`$: renderer correct for all three qtypes; protocol additions outside `prompt_templates_hash` | `test_prompts.py`                                                                                                                              |
 | $`\Psi`$ and $`\phi`$: parser correctness, strict equality, >26-option round-trip              | `test_parser.py`, `test_parser_belief.py`                                                                                                       |
 | $`\Gamma`$: aggregation correctness end-to-end                                               | `test_analysis.py` (670 LOC), `test_aggregation.py`, `test_consistency.py`, `test_inference.py`, `test_proper_score.py`                          |
@@ -1707,7 +1708,7 @@ longest tests are:
 
 | File                           | LOC   | What it covers                                                               |
 | ------------------------------ | ----- | ---------------------------------------------------------------------------- |
-| `test_react.py`                | 1432  | Full ReAct loop: every harness branch, priority chain, finalisation, v5.1     |
+| `test_react.py`                | 1432  | Full ReAct loop: every harness branch, priority chain, finalisation, all switches |
 | `test_search.py`               |  830  | Tavily wrapper, key rotation, raw-content truncation, audit metadata          |
 | `test_behavior.py`             |  762  | Belief evolution, reflection A/B, tool PDP, confidence calibration            |
 | `test_analysis.py`             |  670  | Phase 0–6 of the analysis orchestrator                                        |
