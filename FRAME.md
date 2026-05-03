@@ -415,8 +415,7 @@ Pinned by `test_runner_resume.py`.
 
 The framework organises leakage control around three controlled information
 channels and one documented residual surface. The codebase implements each
-channel at one specific layer of the pipeline; this section walks through
-them in the order in which a sample encounters them.
+channel at one specific layer of the pipeline.
 
 ### 4.1 Channels and residual
 
@@ -818,7 +817,7 @@ parameter is clamped to $`[1, T]`$ at startup (config.py:L696–L707).
 | ------------------------------------- | ------- | ---------------------- | -------------------------------------------------------------------------------------------- |
 | `REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT` | True    | In-loop graded transition | Soft warning in the penultimate window, hard `tools=[]` cutoff on the last step.              |
 | `REACT_FORCE_FINAL_ANSWER_LOOKAHEAD`  | 2       | Soft window              | Steps before the limit at which intervention begins.                                          |
-| `REACT_BUDGET_AWARENESS_PROTOCOL`     | True    | Prompt layer             | Appends `T` and `C` to the user prompt so the model can plan holistically.                    |
+| `REACT_BUDGET_AWARENESS_PROTOCOL`     | True    | Prompt layer             | Appends `T` and `C` to the user prompt so the model can plan over the full budget.                    |
 | `REACT_BUDGET_EXCEEDED_DROP_TOOLS`    | True    | In-loop budget gate      | Once cumulative `web_search >= C`, drops tools for all subsequent rounds.                     |
 | `REACT_FINAL_ANSWER_RETRY`            | False   | Post-loop backstop       | When loop ends with empty `final_raw`, calls LLM once more with `tools=[]` to force `\boxed`. |
 | `REACT_MIN_SEARCH_CALLS`              | 0       | Soft floor               | If the model tries to commit before reaching `MIN`, injects a nudge.                          |
@@ -1340,7 +1339,7 @@ first; the §X.Y references point to subsections of this section.
 | ------------------------------------------------------------------------ | ------------------------- | ----------------------------------- |
 | "Which model is most accurate overall?"                                   | §9.6 Composite Accuracy   | §9.5 FSS, §9.10 paired bootstrap    |
 | "Which model is most cost-effective?"                                    | §9.7 Per-correct cost      | §9.6 Composite Accuracy             |
-| "How robust is the ranking under repeated sampling?"                     | §9.4 Multi-trial consistency | §9.10 paired bootstrap, §9.3 pass@k |
+| "How stable is the ranking under repeated sampling?"                     | §9.4 Multi-trial consistency | §9.10 paired bootstrap, §9.3 pass@k |
 | "How often does a model commit a parseable answer at all?"               | §9.1 Validity              | §9.7 Per-correct cost               |
 | "Did the leakage barrier hold?"                                          | §4.4 Detector audit        | §4.6 residual surface               |
 | "Where is the model spending its tokens and tool calls?"                  | §9.11 Behavioural diagnostics | §9.12 output artefacts          |
