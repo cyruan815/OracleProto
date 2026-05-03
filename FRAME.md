@@ -982,14 +982,7 @@ CREATE INDEX idx_run_results_question ON run_results(question_id);
 ```
 
 Schema migrations (db.py:L222–L345) are performed via `ALTER TABLE … ADD
-COLUMN`, which SQLite executes as metadata-only and therefore O(1):
-
-| Version | Change                                                              | Migration function          |
-| ------- | ------------------------------------------------------------------- | --------------------------- |
-| v2      | Base 14 per-sample columns; bare `run_meta`                          | `_init_v2_schema`            |
-| v2 → v3 | Adds 6 per-sample observability fields and 2 reflection columns      | `_migrate_v2_to_v3` (L222)   |
-| v3 → v4 | Adds 3 per-sample belief columns and 2 belief columns in `run_meta`   | `_migrate_v3_to_v4` (L269)   |
-| v4 → v5 | Adds 1 per-sample column `final_answer_retry_used`                    | `_migrate_v4_to_v5` (L312)   |
+COLUMN`, which SQLite executes as metadata-only and therefore O(1).
 
 When `Settings.BELIEF_PROTOCOL=False`, all belief columns write NULL and the
 analysis pipeline early-exits the probabilistic family. The first time an old

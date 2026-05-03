@@ -935,14 +935,7 @@ CREATE INDEX idx_run_results_question ON run_results(question_id);
 ```
 
 模式迁移（db.py:L222–L345）通过 `ALTER TABLE … ADD COLUMN` 完成，
-SQLite 将其执行为元数据级操作，因此为 O(1)：
-
-| 版本    | 变更                                                                | 迁移函数                     |
-| ------- | ------------------------------------------------------------------- | --------------------------- |
-| v2      | 基础 14 列每样本字段；`run_meta` 精简                                | `_init_v2_schema`            |
-| v2 → v3 | 增加 6 列每样本可观测性字段及 2 列反思字段                            | `_migrate_v2_to_v3`（L222）  |
-| v3 → v4 | 增加 3 列每样本信念字段及 `run_meta` 中的 2 列信念字段                | `_migrate_v3_to_v4`（L269）  |
-| v4 → v5 | 增加 1 列每样本字段 `final_answer_retry_used`                         | `_migrate_v4_to_v5`（L312）  |
+SQLite 将其执行为元数据级操作，因此为 O(1)。
 
 当 `Settings.BELIEF_PROTOCOL=False` 时，所有信念列写 NULL，且分析
 流水线提前退出概率族。续跑路径首次打开旧 DB 时会自动迁移。
