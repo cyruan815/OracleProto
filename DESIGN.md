@@ -422,7 +422,7 @@ We do not use Jaccard, F1, or partial credit at the strict level for three reaso
 First, *explanation cost is too high*: `pass@1=0.62` is far more intuitive than `mean
 Jaccard=0.74`, and one number is enough for a report. Second, *avoid half-credit masking
 the real problem*: a model that misses one or two selections every time can still average
-70+ on a soft scorer while fundamentally not having mastered the question; strict
+70+ on a soft scorer while not having mastered the question; strict
 matching scores this behaviour as 0 and forces the report to be honest. Third, *unify
 the scoring interface across three question types*: all three reduce to frozenset
 equality at the scoring stage, so the code is written once and works for everything.
@@ -605,8 +605,8 @@ Defaults at `config.py:L365`. The principle is one sentence: **let buckets that
 discriminate model capability contribute more.** Switching to "I care more about easy
 questions" requires only flipping the numbers via `COMPOSITE_WEIGHTS_QTYPE` or
 `COMPOSITE_WEIGHTS_CTYPE` in `.env`. This is an opinionated default rather than a
-neutral one; we believe the orientation above is more reasonable for the vast majority
-of evaluation scenarios, and users who disagree solve it by overriding one line of
+neutral one; the orientation above is defensible for the vast majority
+of evaluation scenarios, and users who disagree override one line of
 `.env`.
 
 Two alternatives are tempting but wrong. *Equal weights across buckets* sounds neutral
@@ -686,7 +686,7 @@ easy to hash and diff**, since the entire prompt content is written directly int
 glance.
 
 The alternative of splitting system / user loses cross-provider consistency; the same
-$`R`$ becomes effectively two different renderers depending on provider.
+$`R`$ becomes two different renderers depending on provider.
 
 ### 5.2 Hard ceilings on the loop
 
@@ -715,7 +715,7 @@ override.
 ### 5.3 Reflection protocol pulls the model off "one-shot direct answer"
 
 Some models give a final answer after only ~1.6 searches on average; this confident
-one-shot behaviour drastically lowers `pass@1` on long-tail events. The project responds
+one-shot behaviour lowers `pass@1` on long-tail events. The project responds
 with a three-part protocol family.
 
 The **reflection protocol** (`REACT_REFLECTION_PROTOCOL=true`, default on,
@@ -724,7 +724,7 @@ message: decompose the question, list ≥3 different retrieval angles, reflect a
 search, cross-validate, check the opposite direction, and state confidence. The
 **budget-awareness protocol** (`REACT_BUDGET_AWARENESS_PROTOCOL=true`, default on,
 config.py:L313) front-loads "total step count + total search count" in the prompt so the
-model can plan holistically and reserve the final step for emitting `\boxed{...}`. The
+model can plan over the full budget and reserve the final step for emitting `\boxed{...}`. The
 **forced finalisation near the limit** (`REACT_FORCE_FINAL_ANSWER_NEAR_LIMIT=true` with
 `LOOKAHEAD=2`, default on, config.py:L314 and L315) actively injects user messages as
 the loop approaches its limit: a soft reminder at the second-to-last step where tool
@@ -826,7 +826,7 @@ Within the ReAct loop, several tool-related errors do not interrupt the whole sa
 
 The principle is to **let the LLM see its own failures from the system's perspective
 rather than papering over them**. The capability numbers this produces are closer to
-reality, since a model that cannot handle tool failures should naturally score lower.
+reality, since a model that cannot handle tool failures should score lower.
 
 ### 5.6 Reasoning-model parameter exclusions
 
@@ -854,7 +854,7 @@ runs/{run_id}/
 The early "single `results.db`" was replaced. With a single DB the boundary between runs
 depended entirely on the `run_id` column, making independent distribution hard and
 making it easy to mix data from other runs into analysis. `run_id` defaults to
-`YYYYMMDD-HHMMSS-xxxx`, so `ls` naturally sorts by time and the directory name tells you
+`YYYYMMDD-HHMMSS-xxxx`, so `ls` sorts by time and the directory name tells you
 "when it ran" at a glance. An empty `RUN_ID` starts a new run; the same value resumes
 the existing one, so one variable handles both modes without an extra `--resume` CLI
 flag.
@@ -896,7 +896,7 @@ adds 3 belief columns; v5 adds 1 final-answer-retry column. Compared with a "lon
 plus (question_id, sample_idx) composite primary key", the wide table has three
 advantages.
 
-*Resume queries are naturally simple.* `SELECT question_id WHERE s{i}_created_at IS NOT
+*Resume queries are simple.* `SELECT question_id WHERE s{i}_created_at IS NOT
 NULL` simply scans one column, no group-by needed. *Atomic single-row read.* The
 analysis script reads one row and has every sample, with no join or aggregation needed.
 *Schema fixes $`N`$.* `SAMPLING_N` is pinned at table-creation time, so whenever the DB is
@@ -912,7 +912,7 @@ evaluation artefacts.
 
 ### 6.4 `step_metrics` is a JSON column rather than a separate long table
 
-ReAct's per-round step metrics are naturally 1-to-N (one sample yields multiple steps),
+ReAct's per-round step metrics are 1-to-N by structure (one sample yields multiple steps),
 and at first glance you would want to factor them into a long table. The project
 ultimately compresses them into `s{i}_step_metrics TEXT` (a JSON array) for three
 reasons.
@@ -1317,7 +1317,7 @@ touching the runner core loop. The method: at the evaluation entrypoint, encode 
 $`(\text{real\_model}, R, C)`$ triple as a **virtual model slug** `{real}::r{R}::c{C}`
 (`db.compose_virtual_slug` at db.py:L477; reverse via `parse_virtual_slug` at
 db.py:L500); the runner, DB, and analysis main pipeline treat it as an opaque string.
-Existing artefacts naturally expand into multiple rows by virtual slug, while the new
+Existing artefacts expand into multiple rows by virtual slug, while the new
 module `forecast_eval/analysis/grid.py` decodes the triple, re-aggregates, and emits
 the long-form grid tables and per-cell figure family. Full decision archive in
 `openspec/changes/react-tavily-grid-search/design.md`; the 10 key decisions:
