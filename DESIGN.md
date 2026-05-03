@@ -285,7 +285,7 @@ to $`\mathcal{D}^{\mathrm{pred}}_{\bigcap_m M}`$, the intersection over all mode
 discard 10–20% of the corpus on a heterogeneous panel. Per-model admissibility keeps each
 comparison fair without burning the shared corpus.
 
-### 2.6 Stage-2 LLM content audit (v5.2)
+### 2.6 Stage-2 LLM content audit
 
 The defences in §2.2 through §2.5 are protocol-layer (schema, `end_date` injection,
 `:online` ban, cutoff skipping). The class of leakage they cannot cover is **the body of
@@ -315,7 +315,7 @@ never through any LLM-visible payload.
 | Parameters         | temperature `0.0`, max_tokens `512`, timeout `60s`, concurrency `5` (config.py:L345)                                    |
 | Failure mode       | FAIL-RETRY → CLOSED: $`K`$ retries still failing → drop; AUTH errors are caught locally and immediately drop, with no propagation and no aborting the whole run |
 | Observability      | `search_calls.detector_*` five fields plus `run_meta.config_snapshot` detector three-key fingerprint                    |
-| Master switch      | `ENABLE_SEARCH_LEAK_FILTER` (config.py:L337), default True; when off, byte-level rollback to v5.1                       |
+| Master switch      | `ENABLE_SEARCH_LEAK_FILTER` (config.py:L337), default True; when off, the detector path is byte-level disabled and behaviour matches the no-detector path |
 
 Three design choices deserve emphasis.
 
@@ -390,7 +390,7 @@ since the judge may have its own training data overlap; strict letter-set scorin
 the scoring path deterministic, audit-replayable, and judge-independent. Numerical
 probability outputs scored by Brier or NLL alone would fail under the K=5 sampling
 regime, where the empirical $`\hat p`$ takes only six discrete values and calibration
-parameters become statistically meaningless; the v4 belief protocol does collect
+parameters become statistically meaningless; the optional belief protocol does collect
 probabilities, but as a companion to letter-set output rather than a substitute (§6.6).
 
 ### 3.2 Letter encoding as the canonical answer
@@ -538,9 +538,9 @@ This is the operational embodiment of the framework's metric-agnostic design. Pi
 
 ### 4.2 Recalibrating the `pass@k` naming
 
-In the wider community `pass@k` generally means "at least one correct in $`k`$". The
-project historically used `pass@3 = sum(correct) ≥ 3` (a threshold semantic), which
-caused ambiguity. The naming is now made explicit:
+In the wider community `pass@k` generally means "at least one correct in $`k`$". To
+avoid ambiguity with the threshold semantic `pass@3 = sum(correct) ≥ 3`, the project
+uses an explicit naming scheme:
 
 * `pass_any@N` is the standard `pass@k`: at least one correct in $`N`$.
 * `at_least_k_correct@N`: at least $`k`$ correct in $`N`$ (threshold analysis).
@@ -692,8 +692,8 @@ $`R`$ becomes two different renderers depending on provider.
 
 Each sample has two gates. `REACT_MAX_STEPS = 12` (config.py:L279) is the maximum number
 of LLM-system interaction rounds per sample; enabling the reflection protocol or nudges
-adds 2–4 rounds beyond a single-step direct answer, so the default is slightly higher
-than the historical value. `REACT_MAX_SEARCH_CALLS = [8]` (config.py:L283) is the
+adds 2–4 rounds beyond a single-step direct answer, so the default leaves room for both.
+`REACT_MAX_SEARCH_CALLS = [8]` (config.py:L283) is the
 cumulative `web_search` budget per sample; once spent, the tool returns `search budget
 exceeded` directly to the LLM.
 
@@ -747,7 +747,7 @@ guidance; the nudge is restriction. We first try better guidance to make the mod
 a few more steps spontaneously, and only impose a soft floor when the model still
 insists, in order to avoid mixing "the capability under evaluation" with "the system's
 enforcement". All switches have clear defaults, and turning them off degrades to the
-historical behaviour, so the same code can run "protocol on vs off" controlled
+bare-loop behaviour, so the same code can run "protocol on vs off" controlled
 experiments. The protocol text and nudges both appear in `messages_trace`, and the
 on/off state is anchored by `config_snapshot`, so this is *not* implicit behaviour.
 
@@ -756,17 +756,17 @@ capability ("does the model search enough?") with enforcement ("we made it searc
 which is why the default 0 keeps the floor opt-in and the reflection protocol drives
 natural search depth.
 
-### 5.4 v5.1 four-knob priority chain
+### 5.4 The four-knob priority chain
 
 For cross-model comparisons, **`parse_failure_rate` must reflect only the model's own
-format failure, not upstream resource exhaustion in the harness.** In v5.0, after
-`REACT_MAX_SEARCH_CALLS` was exhausted the `web_search` schema was still exposed to the
-LLM; the model kept asking for the tool and hit the `REACT_MAX_STEPS` ceiling, with
-`final_raw=""` becoming `parse_ok=0` directly. That disguised "tool starvation" as
-"format failure".
+format failure, not upstream resource exhaustion in the harness.** Without intervention,
+once `REACT_MAX_SEARCH_CALLS` is exhausted the `web_search` schema would still be
+exposed to the LLM; the model would keep asking for the tool until it hit the
+`REACT_MAX_STEPS` ceiling, with `final_raw=""` becoming `parse_ok=0` directly. That
+would disguise "tool starvation" as "format failure".
 
-v5.1 added four orthogonal switches at `react.run_react`, with the priority decision
-logic at react.py:L266, each defending a different failure mode.
+Four orthogonal switches at `react.run_react`, with the priority decision logic at
+react.py:L266, each defend a different failure mode.
 
 | # | Switch                                    | Default | What it does                                                                |
 | - | ----------------------------------------- | ------- | --------------------------------------------------------------------------- |
@@ -789,15 +789,15 @@ react.py:L266 as `Priority is (1) > (2) > (3) > (4)`.
    After this fires, every subsequent round gets `tools=[]` regardless of which other
    branch fires.
 4. **Continuation reminder.** Lowest priority; previous turn was content without
-   `\boxed{...}` and nothing else needs to fire (react.py:L320). Replaces the historical
-   inline "Harness: step N complete" injection that could double-inject with later
-   branches.
+   `\boxed{...}` and nothing else needs to fire (react.py:L320). The single inline
+   "Harness: step N complete" injection per step is gated by the priority chain, which
+   prevents double-injection across branches.
 
-The new analysis column `final_answer_retry_rate` lands in `per_model_summary.csv`,
+The analysis column `final_answer_retry_rate` lands in `per_model_summary.csv`,
 letting analysts see how much the fallback caught separately and decide, when necessary,
-whether to deduct it from the `pass_at_1` denominator. Schema upgraded to v5: each
-sample slot in `run_results` adds `s{i}_final_answer_retry_used INTEGER`; old v4 DBs
-auto-ALTER ADD via `init_schema` (NULL-compatible).
+whether to deduct it from the `pass_at_1` denominator. Each sample slot in `run_results`
+carries `s{i}_final_answer_retry_used INTEGER`; databases lacking the column receive an
+auto-ALTER ADD via `init_schema` on open (NULL-compatible).
 
 The default for `REACT_FINAL_ANSWER_RETRY` is **False**, superseded by switch #1
 (force-final-answer-near-limit, in-loop) and kept as an optional out-of-loop emergency
@@ -851,8 +851,8 @@ runs/{run_id}/
   logs/{run_id}.log
 ```
 
-The early "single `results.db`" was replaced. With a single DB the boundary between runs
-depended entirely on the `run_id` column, making independent distribution hard and
+A single shared `results.db` is rejected. With a single DB the boundary between runs
+would depend entirely on the `run_id` column, making independent distribution hard and
 making it easy to mix data from other runs into analysis. `run_id` defaults to
 `YYYYMMDD-HHMMSS-xxxx`, so `ls` sorts by time and the directory name tells you
 "when it ran" at a glance. An empty `RUN_ID` starts a new run; the same value resumes
@@ -890,11 +890,10 @@ self-contained property; once the path moves, the DB becomes unreplayable.
 
 ### 6.3 Wide table with N pinned at table-creation time
 
-One row per question, with an `s{i}_*` group of columns per sample. As of v3 the schema
-holds 20 fields per sample (the original 14 plus 6 newly added observation columns); v4
-adds 3 belief columns; v5 adds 1 final-answer-retry column. Compared with a "long table
-plus (question_id, sample_idx) composite primary key", the wide table has three
-advantages.
+One row per question, with an `s{i}_*` group of columns per sample. The schema holds
+24 fields per sample, grouped as 14 core fields, 6 observability fields, 3 belief
+fields, and 1 final-answer-retry field. Compared with a "long table plus (question_id,
+sample_idx) composite primary key", the wide table has three advantages.
 
 *Resume queries are simple.* `SELECT question_id WHERE s{i}_created_at IS NOT
 NULL` simply scans one column, no group-by needed. *Atomic single-row read.* The
@@ -926,8 +925,8 @@ would require a second table, a second foreign key, and a second INSERT path; th
 boundary would jump from "one-row upsert" to "multi-row transaction", which conflicts
 with §6.5's "eliminate races via orchestration" principle. *JSON size is controllable.*
 The step count per sample is bounded by `REACT_MAX_STEPS` (default 12); a single JSON is
-typically < 1 KB; on v3 schema with `SAMPLING_N=3` and ~100 questions, the DB delta is
-on the order of KB and WAL handles it easily.
+typically < 1 KB; on the wide schema with `SAMPLING_N=3` and ~100 questions, the DB
+delta is on the order of KB and WAL handles it easily.
 
 The cost is that step-level aggregation that a long table could do has to be done by
 reload + parse in Python. Since the analysis script is a one-shot tool
@@ -958,7 +957,7 @@ DB:        raw observations only
 ├── tool_calls_count
 ├── react_steps
 ├── tokens / latency
-├── belief_final / belief_trace / belief_parse_ok  (v4, when BELIEF_PROTOCOL=true)
+├── belief_final / belief_trace / belief_parse_ok  (when BELIEF_PROTOCOL=true)
 ├── search_calls (with detector verdicts when leak filter is on)
 └── error / created_at
 
@@ -973,28 +972,26 @@ analysis/: aggregations
 This is one of the project's most important architectural decisions and is the
 operational embodiment of the framework's metric-agnostic design.
 
-### 6.7 v5 demotion of probabilistic metrics under K=5
+### 6.7 Demotion of probabilistic metrics under K=5
 
 At $`K = 5`$ parallel samples, the empirical probability $`\hat{p} = n / K`$ for each
 (question, label) takes only six discrete values $`\{0, 0.2, 0.4, 0.6, 0.8, 1.0\}`$. This
-pushes v4's Reliability Diagram, Murphy three-decomposition, and Platt-scaling LOO into
-the "mathematically correct, statistically meaningless" position. v5 redirects the
-analysis stack to the **discrete-native** metric family suited for $`K=5`$: BS / NLL /
-MBS / BI / ABI are demoted to auxiliary columns with a `†` footnote and a $`K`$-disclaimer
-in `per_model_summary.md`.
+makes Reliability Diagram, Murphy three-decomposition, and Platt-scaling LOO
+mathematically correct but statistically meaningless. The analysis stack therefore
+uses the **discrete-native** metric family suited for $`K=5`$: BS / NLL / MBS / BI /
+ABI live as auxiliary columns with a `†` footnote and a $`K`$-disclaimer in
+`per_model_summary.md`.
 
-Concretely, `calibration.py` is deleted in v5, and its 5 artefacts
+`calibration.py` is absent from the analysis stack, and the corresponding 5 artefacts
 (`calibration_params.json`, `per_model_summary_calibrated.csv`, `reliability_data*.json`,
-`brier_decomposition.csv`) are discontinued. The discrete family (FSS, Cohen $`\kappa`$,
-Hamming, Fleiss $`\kappa`$, mean entropy, VCI, MVG) becomes the v5 main line, with
-`entropy_accuracy_bins.csv` and `inter_trial_consistency.csv` as new v5 artefacts. If
-$`K`$ is increased to $`\ge 30`$ in the future, calibration can be reintroduced in a new
-change.
+`brier_decomposition.csv`) are not produced. The discrete family (FSS, Cohen $`\kappa`$,
+Hamming, Fleiss $`\kappa`$, mean entropy, VCI, MVG) is the headline line, accompanied
+by `entropy_accuracy_bins.csv` and `inter_trial_consistency.csv`. Raising $`K`$ to
+$`\ge 30`$ reintroduces the calibration family.
 
-This decision is **not** a framework-level constraint; it is a v5 *engineering* choice
-motivated by sample-size statistics. Reverting to $`K = 30`$ would re-enable the
-probabilistic line; the demotion is by analyst convention rather than by hard-coded
-gate.
+This decision is **not** a framework-level constraint; it is an *engineering* choice
+motivated by sample-size statistics. Setting $`K = 30`$ re-enables the probabilistic
+line; the demotion is by analyst convention rather than by hard-coded gate.
 
 ---
 
@@ -1153,32 +1150,31 @@ enum: `network`, `server_5xx`, `bad_request`, `content_policy`, `skipped_trainin
 failure behaviour must be categorisable and aggregatable in the report**: an
 `error="something went wrong"` is useless.
 
-### 8.4 v5.1 classification expansion
+### 8.4 Cross-provider classification coverage
 
-Two common misclassifications surfaced during cross-provider evaluation, each driving a
-specific v5.1 expansion.
+Two cross-provider failure patterns require explicit handling beyond the
+English-language needles a naive implementation would catch.
 
-*Aliyun content moderation (`data_inspection_failed`) was mis-bucketed as `bad_request`.*
-v5.0's `_body_matches` only recognised English needles like `content_policy /
-content_filter / safety`; the `code=data_inspection_failed` returned by DashScope
-(`https://dashscope.aliyuncs.com`) fell through to the catch-all `bad_request`. v5.1
-unified the needle list under `errors.CONTENT_POLICY_NEEDLES`, adding
-`data_inspection_failed`, `inappropriate content`, and `sensitive`; on match, the error
-is classified as `content_policy`, which preserves the "MUST NOT retry" semantics.
+*Aliyun content moderation (`data_inspection_failed`) must not fall into `bad_request`.*
+A needle list of only `content_policy / content_filter / safety` would route the
+`code=data_inspection_failed` returned by DashScope (`https://dashscope.aliyuncs.com`)
+into the catch-all `bad_request`. `errors.CONTENT_POLICY_NEEDLES` unifies the needle
+list with `data_inspection_failed`, `inappropriate content`, and `sensitive`; on match,
+the error is classified as `content_policy`, which preserves the "MUST NOT retry"
+semantics.
 
-*Remote disconnect `RemoteProtocolError` was mis-bucketed as `unknown`.* v5.0's network
-exception tuple only listed `ConnectError`, `ReadTimeout`, `ConnectTimeout`, and
-`WriteTimeout`; `httpx.RemoteProtocolError` ("Server disconnected without sending a
-response.") fell into `UNKNOWN`, and the entire sample failed without retry. v5.1
-expanded the network exception family to align with httpx's existing `NetworkError`
-subset by adding `RemoteProtocolError`, `WriteError`, and `PoolTimeout`, with parallel
-expansion on the LLM side (`errors.classify`) and the Tavily side
-(`search._single_request`).
+*Remote disconnect `RemoteProtocolError` must not fall into `unknown`.* A network
+exception tuple of only `ConnectError`, `ReadTimeout`, `ConnectTimeout`, and
+`WriteTimeout` would route `httpx.RemoteProtocolError` ("Server disconnected without
+sending a response.") into `UNKNOWN`, failing the entire sample without retry. The
+network exception family aligns with httpx's `NetworkError` subset by including
+`RemoteProtocolError`, `WriteError`, and `PoolTimeout`, with parallel coverage on the
+LLM side (`errors.classify`) and the Tavily side (`search._single_request`).
 
 The principle is that **a misclassified error is silently miscounted in the report**.
-The v5.1 expansion was driven by cross-provider observations where these two patterns
-surfaced once each per ~2K samples, which is small numerically but fatal to honest
-reporting, because they would otherwise tip the `bad_request` vs `content_policy` ratio.
+Both patterns surface once per ~2K samples in cross-provider runs, which is small
+numerically but fatal to honest reporting, because they would otherwise tip the
+`bad_request` vs `content_policy` ratio.
 
 ---
 
@@ -1294,20 +1290,19 @@ cannot reconcile what you read here with what a test asserts, the test wins.
 
 ---
 
-## 11. Evolution: the openspec change archive
+## 11. The openspec change archive
 
-The repo root contains `openspec/changes/`, where changes are recorded in spec form.
-`bootstrap-forecast-eval` is the initial bootstrap record. The subsequent landmark
-changes are `react-tavily-grid-search`, `harness-resilience-v1`,
-`search-leak-filter-v1`, `add-exam-score-metric`, `composite-score-by-subtype`, and
-`discrete-native-analysis-v5`. Each ships with a `proposal.md` (motivation), a
-`design.md` (decision archive), a `specs/.../spec.md` (capability deltas), and a
-`tasks.md` (implementation checklist).
+The repo root contains `openspec/changes/`, where every spec-driven change lives. Each
+change directory carries a `proposal.md` (motivation), a `design.md` (decision archive),
+a `specs/.../spec.md` (capability deltas), and a `tasks.md` (implementation checklist).
+The framework's named changes include `bootstrap-forecast-eval`,
+`react-tavily-grid-search`, `harness-resilience-v1`, `search-leak-filter-v1`,
+`add-exam-score-metric`, `composite-score-by-subtype`, and
+`discrete-native-analysis-v5`.
 
-Two principles drive this. **Write the spec before the code**, in order to avoid
-discovering the design is wrong only after the code is merged. **Change archive and code
-diff coexist**, so that when reviewing the architectural evolution later, you can see
-*why* we changed it, not just *what* was changed.
+Two principles drive this layout. **The spec leads the code**, so a wrong design is
+caught before merge. **The change archive and the code diff coexist**, so any later
+audit can recover *why* a decision holds, not just *what* code implements it.
 
 ### 11.1 Grid search via virtual slug
 
@@ -1324,12 +1319,12 @@ the long-form grid tables and per-cell figure family. Full decision archive in
 
 | ID  | Decision                                                                                     |
 | --- | -------------------------------------------------------------------------------------------- |
-| D1  | Pick option C (virtual slug + per-task settings view); reject A (single run, multi-(R, C) DB schema v5 rewrite) and B (one run_dir per cell, with `runs/` bloat and complex cross-run aggregation) |
+| D1  | Pick option C (virtual slug + per-task settings view); reject A (single run, multi-(R, C) DB schema rewrite) and B (one run_dir per cell, with `runs/` bloat and complex cross-run aggregation) |
 | D2  | Virtual slug uses the `::r{R}::c{C}` suffix; `db.model_slug_safe` replaces `::` with `_` to land an fs-safe filename `openai__gpt-5__r5__c3.db`; the regex `^(?P<real>.+?)::r(?P<R>\d+)::c(?P<C>\d+)$` non-greedy captures real_model |
 | D3  | `runner.Task` carries a cell-local `settings: Settings`; the dispatcher derives an immutable sub-view via `model_copy(update={...})`; `react.py` and `search.py` are byte-unchanged |
 | D4  | Only raise when `REACT_MIN_SEARCH_CALLS > min(C_list)`; for a cell with `C < MIN`, silent clamp `effective_min = min(MIN, C)` and record it under `run_meta.config_snapshot.grid_origin` for audit |
 | D5  | `run_meta.config_snapshot` writes **single-valued** R/C; add a `grid_origin = {real_model, R, C, effective_min_search_calls}` sub-key; manifest top-level adds a `grid` block (`r_list / c_list / default_r / default_c / real_models / n_cells`) so the analysis layer does not have to decode the triple per .db |
-| D6  | `manifest.models` and `manifest.model_files` field semantics remain "list of virtual slugs"; the new `grid.real_models` is a deduped real-slug convenience field, so v4 analysis main path's contract of "read `manifest.models` as the db file list" is preserved |
+| D6  | `manifest.models` and `manifest.model_files` field semantics remain "list of virtual slugs"; `grid.real_models` is a deduped real-slug convenience field, so the analysis main path's contract of "read `manifest.models` as the db file list" is preserved |
 | D7  | `analysis/__init__.py::run_analysis` main path is **zero-intrusive**; append a `grid.run_grid_analysis(...)` at the end wrapped in `try/except` (same best-effort pattern as reflection A/B); failures do not interrupt the existing pipeline |
 | D8  | Grid CIs all go through `inference.paired_bootstrap` (5000 resamples, seed=42); BI-domain CIs are obtained via "BS-domain paired bootstrap + monotone transform $`\mathrm{BI}=100(1-\sqrt{\mathrm{BS}})`$"; **no** new statistical code introduced |
 | D9  | Pareto frontier's cost dimension defaults to `mean_search_calls` (actual mean search count, more honest than the C ceiling), with `mean_latency_ms / C` fallback allowed; y-axis defaults to `bi_mean`, with `nll_mean` (minimisation direction) as an option |
@@ -1340,8 +1335,8 @@ The three PRs Phase 0 / 1 / 2 ship sequentially; each phase passes `pytest -q` a
 equivalent to the previous phase's completed state (the rollback strategy). Single-value
 `.env` parses under the new code as a length-1 list, so a Cartesian product produces a
 single virtual slug, with the only visible difference being the `__r{R}__c{C}` suffix on
-the .db filename. For legacy v4 runs (manifest without a `grid` block), grid analysis
-and the grid figure family early-exit altogether, with zero intrusion.
+the .db filename. For runs whose manifest lacks a `grid` block, grid analysis and the
+grid figure family early-exit altogether, with zero intrusion.
 
 ### 11.2 Phase-gated rollouts
 
@@ -1496,8 +1491,8 @@ detail.
 
 If you are new to the project, we suggest reading in this order. The order is
 engineered: each step gives you the language for the next. Steps 1–3 build the
-conceptual model; steps 4–7 ground it in code; steps 8–9 give you the change history
-and the test contract.
+conceptual model; steps 4–7 ground it in code; steps 8–9 cover the test contract and
+the spec archive.
 
 1. `README.md`: figure out in 10 minutes what OracleProto is and how to run it.
 2. This document (`DESIGN.md`): understand the motivation behind each trade-off.
@@ -1518,10 +1513,10 @@ and the test contract.
    aggregation; then `consistency.py` for Fleiss $`\kappa`$, VCI, and MVG.
 8. `tests/`: read tests to reverse-engineer the contracts. The five CI red lines
    (§10.2) are the highest-priority entry points.
-9. `openspec/changes/archive/`: to find out *why* things became what they are today,
-   come here. Each change has a `proposal.md` (motivation), a `design.md` (decision
-   archive), a `specs/.../spec.md` (capability deltas), and a `tasks.md`
-   (implementation checklist).
+9. `openspec/changes/archive/`: to find out *why* a given decision holds, come here.
+   Each change has a `proposal.md` (motivation), a `design.md` (decision archive), a
+   `specs/.../spec.md` (capability deltas), and a `tasks.md` (implementation
+   checklist).
 
 ---
 
