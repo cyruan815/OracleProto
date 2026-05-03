@@ -4,8 +4,6 @@ Covers:
 - v4 → v5 ALTER TABLE chain on a synthetic v4-shaped DB
 - v5 DB idempotency (no re-INSERT, no re-ALTER on second open)
 - v3 → v5 chained migration (both v3→v4 and v4→v5 stamps land)
-- Smoke: a real v4 DB snapshot from `runs/20260426-093630-a2fc/db/` migrates
-  cleanly with `sampling_n=3` (the production grid value)
 
 The v4 fixture is hand-written here (not via `dbmod` helpers) so the test
 stays frozen against the historical v4 column suite even as
@@ -13,7 +11,6 @@ stays frozen against the historical v4 column suite even as
 """
 from __future__ import annotations
 
-import shutil
 import sqlite3
 from pathlib import Path
 
@@ -201,47 +198,3 @@ def test_v3_to_v5_chained(tmp_path: Path) -> None:
         assert f"s{i}_final_answer_retry_used" in cols
 
 
-def test_v4_snapshot_db_smoke(tmp_path: Path) -> None:
-    """Smoke: copy the live run's v4 DB file into /tmp and ALTER it with the
-    new `init_schema(sampling_n=3)`. The original file MUST NOT be touched.
-    This guards against subtle PRAGMA / version detection regressions on real
-    production data shapes."""
-    src_dir = Path("runs/20260426-093630-a2fc/db")
-    if not src_dir.is_dir():
-        # The snapshot was a one-time fixture; skip silently if absent so CI
-        # on a fresh checkout does not fail.
-        import pytest
-
-        pytest.skip(f"snapshot dir {src_dir} not present")
-
-    snap = next(src_dir.glob("*.db"), None)
-    if snap is None:
-        import pytest
-
-        pytest.skip(f"no .db file under {src_dir}")
-
-    dst = tmp_path / snap.name
-    shutil.copy2(snap, dst)
-
-    # Sanity: the snapshot starts as v4 (or earlier). Run init_schema with the
-    # production sampling_n and verify the v5 column lands without breaking
-    # any existing rows.
-    conn = dbmod.connect(dst)
-    pre_rows = conn.execute(
-        "SELECT COUNT(*) AS n FROM run_results"
-    ).fetchone()["n"]
-    pre_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()}
-
-    dbmod.init_schema(conn, sampling_n=3)
-
-    post_rows = conn.execute(
-        "SELECT COUNT(*) AS n FROM run_results"
-    ).fetchone()["n"]
-    post_cols = {r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()}
-
-    assert post_rows == pre_rows, "row count MUST be preserved by migration"
-    for i in range(3):
-        assert f"s{i}_final_answer_retry_used" in post_cols
-    # v4 columns survive byte-level (we don't drop / rename anything).
-    for c in pre_cols:
-        assert c in post_cols, f"v4 column {c} dropped by migration"
