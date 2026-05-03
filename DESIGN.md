@@ -866,7 +866,7 @@ of importance.
 and they can replay just this one model, with no need to obtain the other models'
 results. *Non-interfering write paths.* One async writer task per model, with
 single-writer-multi-reader WAL mode providing ample concurrency, and one model's stall
-cannot block another's. *Schema-evolution isolation.* If some model needs to store a
+cannot block another's. *Schema-extension isolation.* If some model needs to store a
 special field (e.g. a reasoning trace), its schema can be extended independently without
 affecting others.
 
