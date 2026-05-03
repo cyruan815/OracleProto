@@ -1,4 +1,4 @@
-"""Proper scoring rules for the v4 probabilistic family.
+"""Proper scoring rules for the probabilistic family.
 
 Implements the formulas from `ANALYSIS_DESIGN_v4.md §4.1` / `specs/probabilistic-analysis/spec.md`:
 

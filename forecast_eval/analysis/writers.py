@@ -36,10 +36,10 @@ if TYPE_CHECKING:
     from .grid import GridCell, WinrateRow
 
 
-# v3 accuracy columns — DO NOT reorder. Phase 1 only appends.
-# v5.1 (harness-resilience) appends `final_answer_retry_rate` at the tail of
-# the v3 group: keep it adjacent to the other "what did the harness do?"
-# diagnostics rather than mixed in with FSS / probabilistic columns.
+# v3 accuracy columns — DO NOT reorder; only append at the tail.
+# `final_answer_retry_rate` appends at the tail of the v3 group: keep it
+# adjacent to the other "what did the harness do?" diagnostics rather
+# than mixed in with FSS / probabilistic columns.
 _SUMMARY_FIELDS_V3: tuple[str, ...] = (
     "model",
     "sampling_n",
@@ -68,7 +68,7 @@ _SUMMARY_FIELDS_V3: tuple[str, ...] = (
     "final_answer_retry_rate",
 )
 
-# v5 discrete-native primary columns. Inserted between v3 accuracy and v4
+# Discrete-native primary columns. Inserted between accuracy and
 # probabilistic so the published main metric (FSS) sits next to pass@1 — the
 # two of them together drive the "model X vs Y" comparison.
 _DISCRETE_FSS_FIELDS: tuple[str, ...] = (
@@ -78,7 +78,7 @@ _DISCRETE_FSS_FIELDS: tuple[str, ...] = (
     "hamming_score",
 )
 
-# v5 K-trial consistency family. Appended right after the FSS family — these
+# K-trial consistency family. Appended right after the FSS family — these
 # are the metrics that exist *because* the project does parallel sampling.
 _CONSISTENCY_FIELDS: tuple[str, ...] = (
     "fleiss_kappa",
@@ -87,8 +87,8 @@ _CONSISTENCY_FIELDS: tuple[str, ...] = (
     "mvg",
 )
 
-# v4 probabilistic columns. v5 keeps these as companion columns with a
-# K=5 disclaimer in the markdown caption (Decision 3). `bi_dec` only meaningful
+# Probabilistic columns. Kept as companion columns with a K=5 disclaimer
+# in the markdown caption. `bi_dec` only meaningful
 # for single-choice subsets; on a global sheet it averages BI_dec over single
 # questions only and skips multi rows (same NULL-on-multi convention as MBS).
 _PROB_FIELDS_V4: tuple[str, ...] = (
@@ -164,7 +164,7 @@ def _v5_extras_dict(
     hamming_score_value: float | None,
     consistency: ConsistencyReport | None,
 ) -> dict[str, Any]:
-    """Bundle the 8 v5 columns (FSS family + Consistency family) for one row.
+    """Bundle the 8 discrete-native columns (FSS family + Consistency family) for one row.
 
     Splits stay aligned with `_DISCRETE_FSS_FIELDS + _CONSISTENCY_FIELDS` so
     the CSV writer doesn't need to remember per-field alignment.
@@ -195,10 +195,11 @@ def _write_per_model_summary_csv(
     hamming_per_model: dict[str, float | None] | None = None,
     consistency_per_model: dict[str, ConsistencyReport] | None = None,
 ) -> Path:
-    """Per-model headline CSV with v3 + v5 + v4 columns in that order.
+    """Per-model headline CSV with accuracy + discrete-native + probabilistic
+    columns in that order.
 
-    v5 dict args are keyed by model name. Missing keys land as None
-    (column present, value blank) — keeps CSV width constant across rows.
+    Discrete-native dict args are keyed by model name. Missing keys land as
+    None (column present, value blank) — keeps CSV width constant across rows.
     """
     header = list(_SUMMARY_FIELDS)
     rows: list[list[Any]] = []
@@ -230,14 +231,14 @@ def _write_slice_csv(
 ) -> Path:
     """Per-(model, slice_key) CSV.
 
-    Slice tables now carry the full ``_SUMMARY_FIELDS`` schema: v3 / v5 discrete
-    family / v5 consistency family / v4 probabilistic — every column from
+    Slice tables carry the full ``_SUMMARY_FIELDS`` schema: accuracy /
+    discrete family / consistency family / probabilistic — every column from
     ``per_model_summary.csv`` is present, computed on the slice subset.
 
-    v5 columns require per-bucket recompute via
+    Discrete-native + consistency columns require per-bucket recompute via
     :func:`composite.slice_v5_metrics_by_bucket`; when ``v5_slice=None``
-    (legacy callers, or buckets without v5 data) those columns fall back to
-    ``None`` so the header schema stays uniform.
+    (legacy callers, or buckets without slice data) those columns fall back
+    to ``None`` so the header schema stays uniform.
     """
     header = ["model", slice_header_field, "sampling_n", *[
         f for f in _SUMMARY_FIELDS if f not in ("model", "sampling_n")
@@ -255,8 +256,9 @@ def _write_slice_csv(
                 slice_header_field: key,
                 "sampling_n": sampling_n,
                 **agg.as_ordered_dict(),
-                # v5 columns recomputed on the bucket subset (None when
-                # v5_slice is absent or the bucket carries no parsed trials).
+                # Discrete-native + consistency columns recomputed on the bucket
+                # subset (None when v5_slice is absent or the bucket carries no
+                # parsed trials).
                 **{k: _round(v5_cols.get(k)) for k in _DISCRETE_FSS_FIELDS},
                 **{k: _round(v5_cols.get(k)) for k in _CONSISTENCY_FIELDS},
                 **_prob_dict(prob_agg),
@@ -406,21 +408,21 @@ def _write_per_model_summary_md(
     consistency_per_model: dict[str, ConsistencyReport] | None = None,
     confidence_conflict_models: set[str] | None = None,
 ) -> Path:
-    """Markdown summary: v3 accuracy + v5 discrete-native + v4 companion probabilistic.
+    """Markdown summary: accuracy + discrete-native + companion probabilistic.
 
-    v5 layout:
+    Layout:
     * FSS sits next to pass@1 — the published main comparison metric;
     * Cohen κ / Fleiss κ / mean entropy / VCI / MVG follow as discrete
       diagnostics;
     * BI / NLL / MBS / ABI columns are kept as **companion** metrics with
       a footnote disclaimer about K=5 limiting probability resolution to
-      6 discrete levels (Decision 3).
-    * Phase 3 `conflict*` marker is preserved (linguistic vs numeric
-      confidence divergence — orthogonal to v5).
-    * The `cal*` marker and BI_cal/NLL_cal/ECE_* columns are gone (v5
-      Decision 2: calibration deprecated under K=5 resolution).
+      6 discrete levels.
+    * `conflict*` marker is preserved (linguistic vs numeric confidence
+      divergence).
+    * The `cal*` marker and BI_cal/NLL_cal/ECE_* columns are gone:
+      calibration is deprecated under K=5 resolution.
     """
-    lines = ["# Per-model summary (v5: discrete-native primary, probabilistic as companion)", ""]
+    lines = ["# Per-model summary (discrete-native primary, probabilistic as companion)", ""]
     header = [
         "model", "N",
         "eligible_Q", "eligible_S", "cutoff_S",
@@ -429,8 +431,7 @@ def _write_per_model_summary_md(
         "pass_any@N", "≥majority", "≥all",
         "exam_score_at_n_avg",  # exam-score-metric: hook 2/2 (markdown table column)
         "majority_acc", "parse_fail", "error_rate",
-        # v5.1 (harness-resilience) bail-out retry frequency. NULL on legacy
-        # v4 DBs renders as "—".
+        # Bail-out retry frequency. NULL on legacy DBs renders as "—".
         "retry_rate",
         "BI†", "NLL†", "MBS†", "ABI_crowd†", "ABI_unif†", "fallback%",
         "avg_tool", "avg_steps", "avg_nudges", "avg_latency_ms",
@@ -455,7 +456,7 @@ def _write_per_model_summary_md(
             if prob_dict.get("fallback_share") is not None
             else "—"
         )
-        # `conflict*` marker (Phase 3) survives — orthogonal to v5.
+        # `conflict*` marker survives.
         markers: list[str] = []
         if confidence_conflict_models and model in confidence_conflict_models:
             markers.append("conflict*")
@@ -596,7 +597,7 @@ def _write_shrinkage_alpha_curve_csv(
     path: Path,
     per_model: dict[str, ShrinkageResult],
 ) -> Path:
-    """Phase 2 task 19.5: per-model α grid scan with mean BS and BI."""
+    """Per-model α grid scan with mean BS and BI."""
     header = ["model", "alpha", "mean_bs", "bi", "n_questions", "choice_type"]
     rows: list[list[Any]] = []
     for model, res in per_model.items():
@@ -621,7 +622,7 @@ def _write_paired_delta_bi_csv(
     path: Path,
     pairs: list[ModelPairResult],
 ) -> Path:
-    """Phase 2 task 21.6: pairwise mean ΔBS converted to ΔBI for readability."""
+    """Pairwise mean ΔBS converted to ΔBI for readability."""
     header = [
         "model_a", "model_b", "n_questions",
         "delta_bs", "ci_low_bs", "ci_high_bs",
@@ -654,7 +655,7 @@ def _write_pairwise_significance_csv(
     *,
     alpha: float = 0.05,
 ) -> Path:
-    """Phase 2 task 21.6: significance flags at α=0.05 using Holm-adjusted p-values."""
+    """Significance flags at α=0.05 using Holm-adjusted p-values."""
     header = [
         "model_a", "model_b", "delta_bs", "p_raw", "p_holm",
         "is_significant_raw", "is_significant_holm",
@@ -677,7 +678,7 @@ def _write_posterior_pairwise_csv(
     path: Path,
     pairs: list[ModelPairResult],
 ) -> Path:
-    """Phase 2 task 21.6: $\\Pr(\\mathrm{BI}_A > \\mathrm{BI}_B)$ from paired bootstrap."""
+    """$\\Pr(\\mathrm{BI}_A > \\mathrm{BI}_B)$ from paired bootstrap."""
     header = ["model_a", "model_b", "n_questions", "prob_a_better"]
     rows: list[list[Any]] = []
     for p in pairs:
@@ -692,7 +693,7 @@ def _write_per_model_by_difficulty_csv(
     path: Path,
     per_model_per_tier: dict[str, dict[str, ModelProbabilisticAggregate]],
 ) -> Path:
-    """Phase 2 task 21.6: per-(model, tier) probabilistic aggregates."""
+    """Per-(model, tier) probabilistic aggregates."""
     header = [
         "model", "difficulty_tertile", "n_questions",
         "bi", "nll", "abi_crowd", "abi_uniform", "fallback_share",
@@ -718,7 +719,7 @@ def _write_paired_delta_bi_by_difficulty_csv(
     path: Path,
     by_pair_per_tier: dict[tuple[str, str], dict[str, PairedBootstrapResult]],
 ) -> Path:
-    """Phase 2 task 21.6: pairwise ΔBS within each difficulty tertile."""
+    """Pairwise ΔBS within each difficulty tertile."""
     header = [
         "model_a", "model_b", "difficulty_tertile", "n_questions",
         "delta_bs", "ci_low_bs", "ci_high_bs",
@@ -742,7 +743,7 @@ def _write_paired_delta_bi_by_difficulty_csv(
 
 
 # --------------------------------------------------------------------------- #
-# v5 writers
+# Discrete-native + consistency writers
 # --------------------------------------------------------------------------- #
 
 
@@ -750,7 +751,7 @@ def _write_inter_trial_consistency_csv(
     path: Path,
     per_model: dict[str, ConsistencyReport],
 ) -> Path:
-    """v5: per-model Fleiss κ / mean entropy / VCI / MVG (one row per model)."""
+    """Per-model Fleiss κ / mean entropy / VCI / MVG (one row per model)."""
     header = [
         "model",
         "fleiss_kappa",
@@ -777,11 +778,11 @@ def _write_entropy_accuracy_bins_csv(
     path: Path,
     per_model: dict[str, list[dict[str, Any]]],
 ) -> Path:
-    """v5: per-model × bucket row.
+    """Per-model × bucket row.
 
     Bucket order is fixed `low / mid / high` (with arbitrary "qN" labels for
     `n_buckets != 3`). Per-model bucket boundaries differ — `h_lo` / `h_hi`
-    are model-specific, NOT a shared scale (Decision 5).
+    are model-specific, NOT a shared scale.
     """
     header = [
         "model", "bucket", "n_questions",
@@ -816,7 +817,7 @@ def _write_metric_pairwise_bootstrap_csv(
     *,
     alpha: float = 0.05,
 ) -> Path:
-    """v5: long-table for `pairwise_bootstrap.csv`.
+    """Long-table for `pairwise_bootstrap.csv`.
 
     One row per (metric × ordered model pair). `sig_at_05` flags whether the
     95% CI excludes 0 (equivalently, p < α). Cohen's d gives the effect
@@ -849,7 +850,7 @@ def _write_metric_pairwise_bootstrap_csv(
 
 
 # --------------------------------------------------------------------------- #
-# Phase 3 writers
+# Behavior / confidence writers
 # --------------------------------------------------------------------------- #
 
 
@@ -990,7 +991,7 @@ def _write_numeric_confidence_calibration_csv(
 
 
 # --------------------------------------------------------------------------- #
-# Grid-search writers (Phase 1 of `react-tavily-grid-search`)
+# Grid-search writers
 # --------------------------------------------------------------------------- #
 
 
@@ -1002,8 +1003,8 @@ def _write_grid_summary_csv(
 
     17-column header is locked by the `search-budget-grid` spec; rows are
     sorted by `(real_model, R, C)` so paired diffs across runs stay stable.
-    `ece` is currently None on every row — Phase 1 skips per-cell calibration
-    (Platt / temperature) to keep the dependency surface small. Phase 2 plot
+    `ece` is currently None on every row — per-cell calibration (Platt /
+    temperature) is skipped to keep the dependency surface small. Plot
     code reads `bi_mean` etc. and ignores `ece`; the column is reserved so a
     future calibration pass can fill it without breaking schema.
     """
@@ -1153,7 +1154,7 @@ def _write_grid_winrate_csv(
     """Pairwise win-count matrix in long form (one row per ordered pair).
 
     Columns mirror the `WinrateRow` dataclass field order — keeps the
-    Phase 2 plot reader simple."""
+    plot reader simple."""
     header = [
         "model_a", "model_b",
         "total_cells", "wins_a", "wins_b", "ties",
@@ -1199,7 +1200,7 @@ __all__ = [
     "_write_grid_pareto_csv",
     "_write_grid_winrate_csv",
     "_fmt",
-    # v5 writers
+    # Discrete-native + consistency writers
     "_write_inter_trial_consistency_csv",
     "_write_entropy_accuracy_bins_csv",
     "_write_metric_pairwise_bootstrap_csv",

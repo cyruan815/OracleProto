@@ -1,4 +1,4 @@
-"""On-demand FSS sensitivity sweep across (α, β) settings (v5 Decision 12).
+"""On-demand FSS sensitivity sweep across (α, β) settings.
 
 Run from the repo root:
 
@@ -31,10 +31,10 @@ from forecast_eval.analysis.accuracy import fss  # noqa: E402
 from forecast_eval.analysis.flatten import _answer_gt_for, _flatten_db  # noqa: E402
 
 
-# Default 4-tier sweep matching plan §1.10 / Decision 12:
+# Default 4-tier sweep:
 #   (1, 1)   Jaccard / symmetric
 #   (1, 0.5) mild asymmetry
-#   (2, 0.5) v5 default — published main-table value
+#   (2, 0.5) default — published main-table value
 #   (3, 0.5) strict asymmetry — multi-selection error costs 6× missed
 DEFAULT_TIERS: list[tuple[float, float]] = [
     (1.0, 1.0),
@@ -95,7 +95,7 @@ def run_sensitivity(
     """Compute FSS for each (model, (α, β)) and write the sensitivity CSV.
 
     Returns the written CSV path. The CSV has a comment line on top
-    explaining its provenance (Decision 12: not part of run_analysis).
+    explaining its provenance (not part of run_analysis).
     """
     if tiers is None:
         tiers = list(DEFAULT_TIERS)
@@ -143,7 +143,7 @@ def _fmt(v: float | None, digits: int = 6) -> str:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="FSS sensitivity sweep (v5 Decision 12). "
+        description="FSS sensitivity sweep. "
                     "Writes runs/<id>/analysis/fss_sensitivity.csv."
     )
     p.add_argument(

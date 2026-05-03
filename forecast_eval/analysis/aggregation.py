@@ -1,4 +1,4 @@
-"""K-trial aggregators for the v4 probabilistic family.
+"""K-trial aggregators for the probabilistic family.
 
 Three aggregators take the per-question $K$-sample probability vectors and
 return a single aggregated probability vector. From `ANALYSIS_DESIGN_v4.md

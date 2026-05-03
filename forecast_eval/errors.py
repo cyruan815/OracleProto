@@ -27,7 +27,7 @@ class AuthError(Exception):
     """
 
 
-# v5.1 (harness-resilience): content-policy needles for HTTP 400 bodies.
+# Content-policy needles for HTTP 400 bodies.
 # `_body_matches` runs case-insensitive substring matching on `_error_body`,
 # so needles MUST be lowercase ASCII. Update only here when a new provider's
 # rejection vocabulary appears.

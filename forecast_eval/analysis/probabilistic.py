@@ -1,9 +1,9 @@
 """Glue layer between flattened samples and `proper_score` aggregates.
 
-For Phase 1 we keep the multi-trial story deliberately simple: per (model,
-question) we arithmetic-mean the per-sample probability vectors. Phase 2 will
-introduce logit-space mean and LOO-tuned shrinkage as drop-in replacements
-for `_aggregate_question_probs`.
+The multi-trial story is deliberately simple: per (model, question) we
+arithmetic-mean the per-sample probability vectors. Logit-space mean and
+LOO-tuned shrinkage live in `aggregation.py` as drop-in replacements for
+`_aggregate_question_probs`.
 """
 from __future__ import annotations
 
@@ -37,9 +37,9 @@ class _QuestionProbabilityRow:
 
     @property
     def is_fallback(self) -> bool:
-        # Phase 1 convention: a question is "fallback" iff every contributing
-        # sample was a fallback. If even one sample produced a parsed belief,
-        # we trust the arithmetic mean across them.
+        # A question is "fallback" iff every contributing sample was a
+        # fallback. If even one sample produced a parsed belief, we trust
+        # the arithmetic mean across them.
         return self.n_samples > 0 and self.n_fallback == self.n_samples
 
 

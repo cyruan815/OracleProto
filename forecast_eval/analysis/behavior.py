@@ -1,4 +1,4 @@
-"""Phase 3 behavior analysis.
+"""Behavior analysis.
 
 Five families of indicators built on top of `s{i}_belief_trace` and friends:
 
@@ -16,8 +16,8 @@ Five families of indicators built on top of `s{i}_belief_trace` and friends:
    linguistic and numeric confidence disagree.
 
 The module has zero hard dependency on numpy / scipy / sklearn; everything
-runs on plain Python lists and `math.*`. This keeps Phase 3 inside the same
-"no new core deps" envelope as Phase 0–2.
+runs on plain Python lists and `math.*`, matching the rest of the analysis
+layer's "no new core deps" envelope.
 """
 from __future__ import annotations
 
@@ -471,7 +471,8 @@ def _per_question_metrics_for_db(
     """Aggregate the four per-question signals reflection A/B compares.
 
     Each signal is the mean across the question's K trials (so the paired
-    bootstrap is over questions, not over trials — same protocol as Phase 2).
+    bootstrap is over questions, not over trials — same protocol as the
+    probabilistic family).
     """
     conn = dbmod.connect(db_path)
     try:

@@ -1,9 +1,7 @@
 """Grid-search analysis for `(real_model, R, C)` triplets.
 
-This module is the Phase 1 deliverable of the `react-tavily-grid-search`
-change. It re-aggregates the per-virtual-slug analysis output produced by
-the v4 main flow into a triplet-keyed view that paper figures can consume
-directly.
+Re-aggregates the per-virtual-slug analysis output produced by the main
+flow into a triplet-keyed view that paper figures can consume directly.
 
 Layered design — DESIGN.md decision D7:
 
@@ -22,7 +20,7 @@ Layered design — DESIGN.md decision D7:
   real_model_b in BI plus the subset that's statistically significant.
 * `run_grid_analysis` is the entry point called from
   `analysis/__init__.py::run_analysis`. When `manifest["grid"]` is
-  missing (legacy v4 single-cell run), it returns an empty list — keeps
+  missing (legacy single-cell run), it returns an empty list — keeps
   the legacy regression path byte-identical.
 """
 from __future__ import annotations
@@ -67,7 +65,7 @@ _GRID_SUMMARY_HEADER: tuple[str, ...] = (
 class GridCell:
     """One `(real_model, R, C)` triplet's full metric bundle.
 
-    `accuracy_aggregate` and `probabilistic_aggregate` are the v4-stable
+    `accuracy_aggregate` and `probabilistic_aggregate` are the stable
     aggregates we already compute for every virtual slug — we just keep a
     handle to them so the writer can pick whichever fields it wants. CI
     fields come from `paired_bootstrap_per_cell` (BI) and a parallel
@@ -181,7 +179,7 @@ def _parse_ok_rate(samples: list[SampleRow]) -> float | None:
 
 def _belief_parse_ok_rate(samples: list[SampleRow]) -> float | None:
     """Eligible-sample belief_parse_ok rate. Mirrors `_parse_ok_rate` but
-    on the v4 belief column."""
+    on the belief column."""
     eligible = [s for s in samples if s.is_eligible]
     if not eligible:
         return None
@@ -246,7 +244,7 @@ def build_grid_summary(
         agg_acc = _aggregate(samples, sampling_n, gt_map=gt_subset)
 
         # Probabilistic aggregate — reconstruct from rows_by_model so the
-        # Phase 1 path is self-contained. We don't have crowd γ here (the
+        # path is self-contained. We don't have crowd γ here (the
         # crowd would need to span virtual slugs, which doesn't make
         # sense), so abi_crowd / abi_uniform are computed inside
         # `proper_score.aggregate_probabilistic` from per-question scores
@@ -490,10 +488,10 @@ def run_grid_analysis(
     rows_by_model: dict[str, list[_QuestionProbabilityRow]],
     analysis_dir: Path,
 ) -> list[Path]:
-    """Phase 1 entry point. Returns the list of CSV paths written.
+    """Grid-analysis entry point. Returns the list of CSV paths written.
 
     Returns an empty list when `manifest["grid"]` is missing — that's the
-    legacy v4 single-cell run path, where existing analysis output is
+    legacy single-cell run path, where existing analysis output is
     already byte-equivalent to pre-change behavior. The caller
     (`run_analysis`) still appends our return value to its `written`
     list, so the empty-list path is the no-op needed by D7.

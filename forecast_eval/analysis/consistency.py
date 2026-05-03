@@ -1,4 +1,4 @@
-"""Inter-trial consistency metrics for K-trial parallel sampling (v5 Phase B).
+"""Inter-trial consistency metrics for K-trial parallel sampling.
 
 These metrics are only meaningful when $K \\ge 2$ — they extract structure
 from the *agreement* across the K parallel trials. K=1 runs degrade
@@ -495,7 +495,7 @@ def entropy_accuracy_bins(
 
     Per-model boundaries make this diagnostic for the model only — boundaries
     differ across models, so cross-model comparison of bucket cells is
-    intentionally unavailable (Decision 5).
+    intentionally unavailable.
     """
     # Step 1: compute H_q per question.
     h_per_q: list[tuple[str, float]] = []
@@ -591,7 +591,7 @@ def build_consistency_report(
 
     Groups samples by question, dispatches each metric, returns the bundle.
     K=1 runs (every question has only one trial) get all-None aggregates and
-    an empty bucket list — graceful degradation per Decision 13.
+    an empty bucket list as graceful degradation.
     """
     by_q: dict[str, list[SampleRow]] = {}
     for s in samples:

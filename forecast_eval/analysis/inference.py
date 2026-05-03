@@ -20,7 +20,7 @@ Multi-metric paired bootstrap (parameterised over `MetricFn`):
   95% CI, two-sided p, Cohen's d.
 * `pairwise_metric_bootstrap(samples_by_model_by_q, gt_map, metric_fns)`
   — orchestrate over (metric × model pair) cartesian product.
-* `DEFAULT_METRIC_FNS` — the 5 metric wrappers v5 publishes.
+* `DEFAULT_METRIC_FNS` — the 5 default metric wrappers.
 * `cohens_d_from_bootstrap` — effect size from the resampled delta dist.
 
 Bootstrap iteration uses unique resample-keys (`f"{qid}__bs{j}"`) so a
@@ -390,7 +390,7 @@ def pairwise_paired_bootstrap(
 
 
 # --------------------------------------------------------------------------- #
-# v5 multi-metric paired bootstrap
+# Multi-metric paired bootstrap
 # --------------------------------------------------------------------------- #
 
 
@@ -462,7 +462,7 @@ def _bootstrap_subset(
     so the metric function sees as many "questions" as draws.
 
     Sample objects are NOT copied — we share references. This is safe
-    because v5 metric functions never mutate samples. SampleRow's
+    because metric functions never mutate samples. SampleRow's
     `question_id` field is overwritten via `dataclasses.replace` only inside
     metric wrappers that need it (e.g. `_metric_fn_acc` calls `_aggregate`
     which groups by `sample.question_id`).
@@ -609,7 +609,7 @@ def pairwise_metric_bootstrap(
 
 
 # --------------------------------------------------------------------------- #
-# Default metric wrappers (v5)
+# Default metric wrappers
 # --------------------------------------------------------------------------- #
 
 
@@ -640,7 +640,7 @@ def _metric_fn_fss(
     samples_by_q: dict[str, list[SampleRow]],
     gt_map: dict[str, frozenset[str]],
 ) -> float | None:
-    """v5 main metric. `accuracy.fss` already accepts dicts directly."""
+    """Main metric. `accuracy.fss` already accepts dicts directly."""
     from .accuracy import fss
 
     if not samples_by_q:
@@ -663,7 +663,7 @@ def _metric_fn_acc(
     samples_by_q: dict[str, list[SampleRow]],
     gt_map: dict[str, frozenset[str]],
 ) -> float | None:
-    """Per-sample pass@1 (the v3 `Aggregate.pass_at_1_avg`)."""
+    """Per-sample pass@1 (`Aggregate.pass_at_1_avg`)."""
     from .accuracy import _aggregate
 
     if not samples_by_q:
@@ -764,7 +764,7 @@ __all__ = [
     "posterior_a_better_than_b",
     "posterior_normal_fit",
     "pairwise_paired_bootstrap",
-    # v5 multi-metric bootstrap
+    # Multi-metric bootstrap
     "MetricFn",
     "MetricBootstrapResult",
     "metric_paired_bootstrap",

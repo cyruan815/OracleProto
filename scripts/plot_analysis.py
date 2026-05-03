@@ -3,8 +3,8 @@
 CLI:
     python scripts/plot_analysis.py runs/<run_id>
 
-Reads `runs/<run_id>/analysis/*.{csv,json}` produced by Phase 1-3 and emits
-PNGs into `runs/<run_id>/analysis/figs/`. Matplotlib is loaded lazily so the
+Reads `runs/<run_id>/analysis/*.{csv,json}` produced by `run_analysis` and
+emits PNGs into `runs/<run_id>/analysis/figs/`. Matplotlib is loaded lazily so the
 core analysis path stays free of plot-time dependencies; missing matplotlib
 prints a helpful install hint and exits 1.
 
@@ -80,7 +80,7 @@ def _to_int(s: str | None) -> int | None:
 
 
 # --------------------------------------------------------------------------- #
-# Grid-search loaders (Phase 2 of `react-tavily-grid-search`)
+# Grid-search loaders
 # --------------------------------------------------------------------------- #
 
 
@@ -236,9 +236,9 @@ def plot_delta_bi_forest(
 def plot_fss_bar_with_ci(
     plt, summary_rows: list[dict], pairwise_rows: list[dict], out_path: Path
 ) -> None:
-    """v5 main figure: horizontal bar of `fss` per model with half-CI from
-    the v5 multi-metric paired bootstrap (rows where `metric == 'fss'`).
-    Mirrors `plot_bi_bar_with_ci` for FSS — Decision 15."""
+    """Main figure: horizontal bar of `fss` per model with half-CI from
+    the multi-metric paired bootstrap (rows where `metric == 'fss'`).
+    Mirrors `plot_bi_bar_with_ci` for FSS."""
     if not summary_rows:
         return
     fss_by_model: dict[str, float] = {}
@@ -284,8 +284,8 @@ def plot_fss_bar_with_ci(
 def plot_delta_fss_forest(
     plt, pairwise_rows: list[dict], out_path: Path
 ) -> None:
-    """v5 forest plot of pairwise ΔFSS with 95% CI; rows where
-    `metric == 'fss'` from `pairwise_bootstrap.csv`. Decision 15."""
+    """Forest plot of pairwise ΔFSS with 95% CI; rows where
+    `metric == 'fss'` from `pairwise_bootstrap.csv`."""
     rows = []
     for r in pairwise_rows:
         if r.get("metric") != "fss":
@@ -327,8 +327,8 @@ def plot_delta_fss_forest(
 def plot_entropy_accuracy_grid(
     plt, bins_rows: list[dict], out_dir: Path,
 ) -> list[Path]:
-    """v5 entropy-Acc joint grid — one PNG per model with 3 buckets × 3 metrics
-    (Acc / MV Acc / Fleiss κ). Per-model bucket boundaries differ (Decision 5)."""
+    """Entropy-Acc joint grid — one PNG per model with 3 buckets × 3 metrics
+    (Acc / MV Acc / Fleiss κ). Per-model bucket boundaries differ."""
     if not bins_rows:
         return []
     by_model: dict[str, list[dict]] = {}
@@ -532,7 +532,7 @@ def plot_difficulty_grid(
 
 
 # --------------------------------------------------------------------------- #
-# Grid-search plots (Phase 2 of `react-tavily-grid-search`)
+# Grid-search plots
 # --------------------------------------------------------------------------- #
 
 
@@ -899,7 +899,7 @@ def _render_grid_figures(
     analysis_dir: Path,
     figs_dir: Path,
 ) -> list[Path]:
-    """Phase 2 entry: emit `figs/grid_*.png` when manifest carries a grid block.
+    """Grid-figure entry: emit `figs/grid_*.png` when manifest carries a grid block.
 
     Best-effort like the rest of `render_all` — a missing CSV or manifest
     block silently skips its plot. Returns the list of PNG paths actually
@@ -1007,33 +1007,33 @@ def render_all(run_dir: Path) -> list[Path]:
     pdp_rows = _read_csv(analysis_dir / "tool_usage_pdp.csv")
     entropy_acc_rows = _read_csv(analysis_dir / "entropy_accuracy_bins.csv")
 
-    # v5 main figure: FSS bar with CI.
+    # Main figure: FSS bar with CI.
     if summary_rows:
         out = figs_dir / "fss_bar_with_ci.png"
         plot_fss_bar_with_ci(plt, summary_rows, pairwise_v5_rows, out)
         if out.exists():
             written.append(out)
 
-    # v5 main figure: ΔFSS forest.
+    # Main figure: ΔFSS forest.
     if pairwise_v5_rows:
         out = figs_dir / "delta_fss_forest.png"
         plot_delta_fss_forest(plt, pairwise_v5_rows, out)
         if out.exists():
             written.append(out)
 
-    # v5 main figure: per-model entropy-Acc grid (Decision 9).
+    # Main figure: per-model entropy-Acc grid.
     if entropy_acc_rows:
         new_pngs = plot_entropy_accuracy_grid(plt, entropy_acc_rows, figs_dir)
         written.extend(p for p in new_pngs if p not in written)
 
-    # Appendix: BI bar with CI (companion to FSS, for BLF anchoring — Decision 15).
+    # Appendix: BI bar with CI (companion to FSS, for BLF anchoring).
     if summary_rows:
         out = figs_dir / "bi_bar_with_ci.png"
         plot_bi_bar_with_ci(plt, summary_rows, paired_rows, out)
         if out.exists():
             written.append(out)
 
-    # Appendix: ΔBI forest plot (v4 carry-over).
+    # Appendix: ΔBI forest plot.
     if paired_rows:
         out = figs_dir / "delta_bi_forest.png"
         plot_delta_bi_forest(plt, paired_rows, out)

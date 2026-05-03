@@ -292,7 +292,7 @@ class Settings(BaseSettings):
     REACT_MIN_SEARCH_CALLS: int = 0
     # Max number of nudges to inject, preventing infinite nudge loops between LLM and system. REACT_MAX_STEPS is still the hard ceiling.
     REACT_MAX_NUDGES: int = 2
-    # v5.1 harness-resilience switches.
+    # Harness-resilience switches.
     # REACT_FINAL_ANSWER_RETRY=True: when the loop ends normally but final_raw=="", call LLM once more with tools=[].
     #   Default False - superseded by force-final-answer-near-limit-v1 (last-step hard switch to tools=[] within the loop),
     #   kept as an optional out-of-loop emergency backstop. Enabling costs one extra LLM step (react_steps + 1).
@@ -321,7 +321,7 @@ class Settings(BaseSettings):
     GRID_DEFAULT_R: int | None = None
     GRID_DEFAULT_C: int | None = None
 
-    # Master switch for the structured confidence protocol (v4). When enabled, a belief protocol section
+    # Master switch for the structured confidence protocol. When enabled, a belief protocol section
     # is appended at the end of the user prompt (positioned after the reflection protocol), requiring the
     # LLM to emit a <belief>...</belief> JSON before \\boxed{...}, carrying probabilities / confidence /
     # key_evidence / counterevidence / decision_rule. Independent of the reflection protocol; does not enter
@@ -671,7 +671,7 @@ class Settings(BaseSettings):
             )
         if self.REACT_MAX_NUDGES < 0:
             raise ValueError("REACT_MAX_NUDGES must be >= 0")
-        # v5.1 harness-resilience switches: pydantic has already validated the bool type; this is just
+        # Harness-resilience switches: pydantic has already validated the bool type; this is just
         # a defensive type guard to prevent tests from injecting arbitrary values via model_copy(update={...}).
         if not isinstance(self.REACT_FINAL_ANSWER_RETRY, bool):
             raise ValueError(

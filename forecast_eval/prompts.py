@@ -22,7 +22,7 @@ _BACKTICK_SAFE_ASCII_RANGE = set(range(ord("A"), ord("Z") + 1))
 # direction self-check", driven mostly by the protocol itself rather than a
 # hard minimum count.
 #
-# v4 adds BELIEF_PROTOCOL: a tail-attached section parallel to the reflection
+# BELIEF_PROTOCOL: a tail-attached section parallel to the reflection
 # protocol, requiring the LLM to emit a strict <belief>...</belief> JSON block
 # before \\boxed{...}, so probability-family metrics (Brier / NLL / MBS / ECE /
 # calibration curves) can be computed directly. Likewise NOT included in
@@ -53,7 +53,7 @@ REFLECTION_PROTOCOL = """\
 """
 
 
-# Belief protocol (v4). Appended AFTER reflection protocol when both are enabled.
+# Belief protocol. Appended AFTER reflection protocol when both are enabled.
 # Like reflection it's a tail-attachment to the user message: NOT part of
 # `prompt_templates`, so `prompt_templates_hash` is unchanged; the fingerprint
 # lives in `run_meta.belief_protocol_text` / `belief_protocol_hash`.

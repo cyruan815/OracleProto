@@ -141,12 +141,12 @@ def _write_manifest(
     # `reflection_protocol_hash` and `belief_protocol_hash` live at the top
     # level so users can grep manifest.json without opening any DB. The full
     # texts stay inside `run_meta.{reflection,belief}_protocol_text`.
-    # `analysis_schema` lets the analysis layer dispatch on which v4 metric
+    # `analysis_schema` lets the analysis layer dispatch on which metric
     # families to compute (probabilistic family vs accuracy-only fallback).
     #
-    # `models` and `model_files` carry the *virtual* slug list so the v4
+    # `models` and `model_files` carry the *virtual* slug list so the
     # analysis main path (which iterates `manifest.models`) naturally walks
-    # every grid cell. The new top-level `grid` section captures the cartesian
+    # every grid cell. The top-level `grid` section captures the cartesian
     # skeleton (R / C lists + default anchors + real_models) for analysis/grid
     # to consume without opening per-cell .db files.
     r_list = list(settings.TAVILY_MAX_RESULTS)
@@ -369,7 +369,7 @@ async def _run_async(
 
     # Cartesian-expand (real_model, R, C) -> virtual slug list. Single-value
     # R / C in .env (length-1 lists) reduce this to one virtual slug per model,
-    # which is exactly the v4 single-cell behavior with a longer .db filename.
+    # which is exactly the single-cell behavior with a longer .db filename.
     real_models = list(settings.MODELS)
     r_list = list(settings.TAVILY_MAX_RESULTS)
     c_list = list(settings.REACT_MAX_SEARCH_CALLS)

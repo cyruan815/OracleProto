@@ -35,7 +35,7 @@ reading ``per_model_composite_by_question_type.csv`` directly gives the
 "summary table weighted by subtype", and downstream scripts only need to
 swap the file path.
 
-## Per-bucket slicing for the v5 discrete family
+## Per-bucket slicing for the discrete family
 
 ``fss`` / ``cohen_kappa`` / ``hamming_score`` / ``fleiss_kappa`` /
 ``mean_entropy`` / ``vci`` / ``mvg`` are computed globally per model at the
@@ -44,8 +44,8 @@ weighted bucket aggregation they must be sliced per bucket before being
 computed — :func:`slice_v5_metrics_by_bucket` in this module takes care of
 that. Its results **also** flow back into ``writers._write_slice_csv``, so
 the two detail tables ``per_model_by_*.csv`` carry these columns as well
-(without disturbing the existing "v3 + prob" column order — they are simply
-appended at the tail).
+(without disturbing the existing accuracy + probabilistic column order —
+they are simply appended at the tail).
 """
 from __future__ import annotations
 
@@ -105,17 +105,17 @@ KNOWN_METRICS: frozenset[str] = frozenset(
         "avg_reasoning_tokens",
         "avg_nudges_used",
         "final_answer_retry_rate",
-        # v5 discrete (FSS family)
+        # Discrete (FSS family)
         "fss",
         "fss_pe_mean",
         "cohen_kappa",
         "hamming_score",
-        # v5 consistency family
+        # Consistency family
         "fleiss_kappa",
         "mean_entropy",
         "vci",
         "mvg",
-        # v4 probabilistic family
+        # Probabilistic family
         "bi",
         "bi_dec",
         "nll",
@@ -128,13 +128,13 @@ KNOWN_METRICS: frozenset[str] = frozenset(
 
 
 # --------------------------------------------------------------------------- #
-# Per-bucket slicing for the v5 discrete family
+# Per-bucket slicing for the discrete family
 # --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
 class V5SliceResult:
-    """v5 discrete-family slice result for a single (model, bucket).
+    """Discrete-family slice result for a single (model, bucket).
 
     ``fss`` carries the two columns ``fss / fss_pe_mean``, so the original
     ``fss(...)`` dict is preserved; ``cohen_kappa`` / ``hamming_score`` are
@@ -155,7 +155,7 @@ def slice_v5_metrics_by_bucket(
     *,
     key_fn: Callable[[SampleRow], str],
 ) -> dict[str, V5SliceResult]:
-    """Recompute the v5 discrete-family metrics on each bucket grouped by
+    """Recompute the discrete-family metrics on each bucket grouped by
     ``key_fn(sample)``.
 
     The top of ``__init__.py`` invokes this once with

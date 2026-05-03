@@ -90,13 +90,13 @@ class SampleResult:
     system_fingerprint: str | None
     service_tier: str | None
 
-    # v4 belief observability (BELIEF_PROTOCOL). All None / 0 when the
+    # Belief observability (BELIEF_PROTOCOL). All None / 0 when the
     # protocol is disabled or when belief parsing failed for every step.
     belief_final: str | None
     belief_trace: str | None
     belief_parse_ok: int
 
-    # v5.1 (harness-resilience) — 1 iff the ReAct loop exited with an empty
+    # Harness-resilience indicator: 1 iff the ReAct loop exited with an empty
     # `final_raw` and the no-tool bail-out retry kicked in. 0 otherwise. The
     # field has a default so legacy callers (cutoff / error-row builders)
     # don't need to pass it explicitly.

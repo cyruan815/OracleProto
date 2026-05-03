@@ -1,4 +1,4 @@
-"""Post-run statistics for one evaluation run (v5: discrete-native primary).
+"""Post-run statistics for one evaluation run.
 
 Reads `RUNS_ROOT/{run_id}/db/*.db` (one SQLite per model), computes the metric
 suite from `ANALYSIS_DESIGN_v5.md`, and writes the results as CSV/Markdown/JSON
@@ -14,14 +14,14 @@ Entry points:
 
 Module layout:
 
-* `flatten.py`     — `_flatten_db` pivot + `SampleRow` (incl. v4 `probabilities`).
-* `accuracy.py`    — pass@1 + v5 FSS / Cohen κ / Hamming.
-* `consistency.py` — v5 K-trial Fleiss κ / entropy / entropy-Acc bins / VCI / MVG.
+* `flatten.py`     — `_flatten_db` pivot + `SampleRow` (incl. `probabilities`).
+* `accuracy.py`    — pass@1 + FSS / Cohen κ / Hamming.
+* `consistency.py` — K-trial Fleiss κ / entropy / entropy-Acc bins / VCI / MVG.
 * `proper_score.py` — BS / NLL / MBS / BI / ABI (companion probabilistic).
 * `aggregation.py` — K-trial aggregators + LOO shrinkage.
-* `inference.py`   — v4 BS-paired bootstrap + v5 multi-metric paired bootstrap.
-* `behavior.py`    — belief evolution + reflection A/B + tool PDP + confidence (v3 / v4 carry-over).
-* `grid.py`        — grid (R, C) analysis (orthogonal to v5).
+* `inference.py`   — BS-paired bootstrap + multi-metric paired bootstrap.
+* `behavior.py`    — belief evolution + reflection A/B + tool PDP + confidence.
+* `grid.py`        — grid (R, C) analysis.
 * `writers.py`     — CSV / Markdown / JSON serialisation.
 
 External callers should only import `run_analysis` from this module.
@@ -121,7 +121,7 @@ from .writers import (
 
 
 # --------------------------------------------------------------------------- #
-# Phase 2 helpers (live here so __init__.py owns orchestration)
+# Helpers (live here so __init__.py owns orchestration)
 # --------------------------------------------------------------------------- #
 
 
@@ -372,7 +372,7 @@ def run_analysis(
     prob_report = build_probabilistic_report(samples_by_model, gt_map_global)
 
     # ------------------------------------------------------------------ #
-    # v5 discrete-native family per model: FSS / Cohen κ / Hamming /
+    # Discrete-native family per model: FSS / Cohen κ / Hamming /
     # ConsistencyReport / per-model entropy-Acc bins. All return None /
     # empty-list on K=1 fixtures or missing data — graceful degradation.
     # ------------------------------------------------------------------ #
@@ -399,12 +399,12 @@ def run_analysis(
         )
 
     # ------------------------------------------------------------------ #
-    # composite-score-by-subtype: re-run the v5 discrete family
+    # composite-score-by-subtype: re-run the discrete family
     # (FSS / Cohen κ / Hamming / Consistency) on each bucket sliced by
     # question_type / choice_type. These values are then:
     #   * fed into ``per_model_by_question_type.csv`` /
-    #     ``per_model_by_choice_type.csv`` (which carry v5 columns rather
-    #     than NULL placeholders);
+    #     ``per_model_by_choice_type.csv`` (which carry the recomputed
+    #     columns rather than NULL placeholders);
     #   * fed into :func:`compute_composite` for weighted aggregation.
     # ------------------------------------------------------------------ #
     v5_slice_by_qtype: dict[str, dict[str, V5SliceResult]] = {}
@@ -453,7 +453,7 @@ def run_analysis(
         )
 
     written: list[Path] = []
-    # v5: per_model_summary.csv carries v3 + FSS + Consistency + v4
+    # per_model_summary.csv carries accuracy + FSS + Consistency +
     # probabilistic columns; markdown synthesises them with the K=5
     # disclaimer footnote.
     if summary_payload:
@@ -526,7 +526,7 @@ def run_analysis(
     ))
 
     # ------------------------------------------------------------------ #
-    # v5 K-trial consistency outputs — always produced; rows with K=1
+    # K-trial consistency outputs — always produced; rows with K=1
     # carry NULL aggregates but the row is present so the writer schema
     # stays uniform.
     # ------------------------------------------------------------------ #
@@ -544,9 +544,9 @@ def run_analysis(
         ))
 
     # ------------------------------------------------------------------ #
-    # v5 multi-metric paired bootstrap on FSS / Acc / MV_Acc / Fleiss κ /
+    # Multi-metric paired bootstrap on FSS / Acc / MV_Acc / Fleiss κ /
     # EBI. Skips metrics that return None on the data (e.g. EBI on
-    # v3-style fixtures, Fleiss κ on K=1).
+    # legacy fixtures, Fleiss κ on K=1).
     # ------------------------------------------------------------------ #
     if len(samples_by_model_by_q) >= 2:
         metric_results = pairwise_metric_bootstrap(
@@ -559,9 +559,8 @@ def run_analysis(
             ))
 
     # ------------------------------------------------------------------ #
-    # v4 probabilistic deliverables — kept (Decision 3) as companion
-    # outputs; calibration / reliability / Murphy decomposition removed
-    # (Decision 2).
+    # Probabilistic deliverables — kept as companion outputs; calibration
+    # / reliability / Murphy decomposition removed.
     # ------------------------------------------------------------------ #
     rows_by_model = prob_report.rows_by_model
     has_any_rows = any(rows for rows in rows_by_model.values())
@@ -577,7 +576,7 @@ def run_analysis(
             ))
 
         # Inference: pairwise paired bootstrap + Holm + posterior (BS-based,
-        # kept for grid.py dependency and the v4 probabilistic narrative).
+        # kept for grid.py dependency and the probabilistic narrative).
         from .probabilistic import _build_crowd_gammas_per_model
 
         crowd_gammas_by_model = _build_crowd_gammas_per_model(rows_by_model)
@@ -618,8 +617,8 @@ def run_analysis(
                     ))
 
     # ------------------------------------------------------------------ #
-    # Phase 3 deliverables — behavior, reflection A/B, tool PDP, confidence.
-    # All four blocks degrade gracefully on v3 fixtures where belief_trace
+    # Behavior / reflection A/B / tool PDP / confidence deliverables.
+    # All four blocks degrade gracefully on legacy fixtures where belief_trace
     # is uniformly NULL (empty CSVs / skipped writes).
     # ------------------------------------------------------------------ #
     behavior_rows = build_belief_evolution_rows(samples_by_model, gt_map_global)
@@ -637,7 +636,7 @@ def run_analysis(
     confidence_rows = confidence_calibration(samples_by_model)
     numeric_confidence_rows = numeric_confidence_calibration(samples_by_model)
     # The confidence rows always have ≥1 model entry, but the values are
-    # mostly None on v3 fixtures (no parsed beliefs). Suppress writing when
+    # mostly None on legacy fixtures (no parsed beliefs). Suppress writing when
     # every numeric / hit_rate is None so the CSV doesn't add noise.
     if any(r.n_samples > 0 for r in confidence_rows):
         written.append(_write_confidence_calibration_csv(
@@ -669,11 +668,10 @@ def run_analysis(
     conflict_models = confidence_conflict_models(confidence_rows)
 
     # ------------------------------------------------------------------ #
-    # Phase 1 of `react-tavily-grid-search` — grid CSVs over (R, C) cells.
-    # Skipped (returns []) when manifest has no `grid` segment so legacy
-    # v4 single-cell runs stay byte-identical. Wrapped best-effort to
-    # mirror the reflection A/B pattern: a Phase-1 failure here MUST NOT
-    # mask the v4 main flow's outputs.
+    # Grid CSVs over (R, C) cells. Skipped (returns []) when manifest has
+    # no `grid` segment so legacy single-cell runs stay byte-identical.
+    # Wrapped best-effort to mirror the reflection A/B pattern: a failure
+    # here MUST NOT mask the main flow's outputs.
     # ------------------------------------------------------------------ #
     try:
         from .grid import run_grid_analysis
@@ -694,11 +692,11 @@ def run_analysis(
             "grid analysis failed; continuing without grid_*.csv outputs"
         )
 
-    # `per_model_summary.md` is written last so it includes the v5 discrete
-    # family (FSS / Cohen κ / Fleiss κ / mean entropy / VCI / MVG) alongside
-    # the v3 accuracy columns and v4 companion probabilistic columns. The
-    # `conflict*` marker (Phase 3 confidence A/B) survives — the v5
-    # `cal*` marker is gone (calibration deprecated).
+    # `per_model_summary.md` is written last so it includes the discrete
+    # family (FSS / Cohen κ / Fleiss κ / mean entropy / VCI / MVG)
+    # alongside accuracy and companion probabilistic columns. The
+    # `conflict*` marker (confidence A/B) survives — the `cal*` marker is
+    # gone (calibration deprecated).
     if summary_payload:
         written.append(_write_per_model_summary_md(
             analysis_dir / "per_model_summary.md",

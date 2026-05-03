@@ -44,9 +44,9 @@ def _belief_to_step_dict(step: int, b: Belief | None) -> dict[str, Any] | None:
     """Project a parsed `Belief` into the per-step trace dict, or None on
     parse failure. The `delta_reason` slot summarises *why this step changed*
     by taking the first key_evidence bullet (or the first open_questions
-    bullet as a fallback) — this is what the v4 behavior analysis layer will
-    consume to plot belief evolution. `counterevidence` is the raw list (may
-    be empty) so Phase-3 `counterevidence_engagement` can do letter-matching
+    bullet as a fallback) — this is what the behavior analysis layer
+    consumes to plot belief evolution. `counterevidence` is the raw list (may
+    be empty) so `counterevidence_engagement` can do letter-matching
     against the final choice without re-parsing the boxed answer.
     """
     if b is None:
@@ -81,7 +81,7 @@ def _record_step(
     that message is the one the loop is about to append, so the count reflects
     "tool calls emitted by THIS step" (not total). `latency_ms` is the wall
     clock for this single `llm.chat` invocation, computed by the caller via
-    `time.monotonic()`. `belief` is the v4 per-step `Belief` (or None when
+    `time.monotonic()`. `belief` is the per-step `Belief` (or None when
     the protocol is disabled or the block failed to parse) — the entry's
     `belief` slot is always present (None when missing) so the JSON schema
     is uniform across protocol-on / protocol-off runs.
@@ -124,10 +124,10 @@ def _record_search_call(
         )
         return
     # search-leak-filter-v1: when the leak filter ran, surface its audit on the
-    # search_calls entry. `n_results` keeps its v5 meaning ("results the main
-    # LLM actually saw") so old analysis scripts reading entry["n_results"]
-    # still get a sensible single number — they just now see the post-detector
-    # count when the filter was active.
+    # search_calls entry. `n_results` means "results the main LLM actually
+    # saw", so old analysis scripts reading entry["n_results"] still get a
+    # sensible single number — they just see the post-detector count when
+    # the filter was active.
     audit = result.audit
     if audit is not None:
         # `published_dates` keeps *raw* ordering (length == n_results_raw) so
@@ -500,7 +500,7 @@ async def run_react(
             messages.append(tool_result_message(tc_id, result.to_llm_payload()))
 
     # Loop exited either by break or by exhausting REACT_MAX_STEPS.
-    # v5.1 (harness-resilience) D2: if the loop exited cleanly with an empty
+    # Harness-resilience D2: if the loop exited cleanly with an empty
     # `final_raw` (e.g. step budget consumed by tool_calls and the model never
     # produced a content turn), nudge once with `tools=[]` to force a
     # `\boxed{...}` answer. We do NOT increment `nudges_used` (semantically
@@ -599,7 +599,7 @@ def _finalize_belief_fields(
 ) -> tuple[str | None, str | None, int]:
     """Aggregate per-step Beliefs into the three persisted fields.
 
-    Spec invariants (from the v4 react-loop / answer-scoring deltas):
+    Spec invariants (from the react-loop / answer-scoring spec):
     - Protocol disabled → all three are None / None / 0.
     - Last step's belief drives `belief_final` and `belief_parse_ok` (no
       "borrowing" from earlier successful parses if the final step failed).

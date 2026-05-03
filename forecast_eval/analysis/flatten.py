@@ -43,10 +43,10 @@ _ANALYSIS_FIELDS: tuple[str, ...] = (
     "belief_final",
     "belief_trace",
     "belief_parse_ok",
-    # v5.1 (harness-resilience): 0/1 indicator for the no-tool bail-out retry.
-    # NULL on legacy v4 rows (analysis treats NULL as "feature not enabled" =
-    # 0 for arithmetic but distinguishes for `final_answer_retry_rate=None`
-    # when no eligible row carries the column at all).
+    # 0/1 indicator for the no-tool bail-out retry. NULL on legacy rows
+    # (analysis treats NULL as "feature not enabled" = 0 for arithmetic but
+    # distinguishes for `final_answer_retry_rate=None` when no eligible row
+    # carries the column at all).
     "final_answer_retry_used",
 )
 
@@ -82,11 +82,11 @@ class SampleRow:
     finish_reason: str | None
     nudges_used: int | None
 
-    # v4 belief columns (raw and derived).
+    # Belief columns (raw and derived).
     belief_final: str | None
     belief_trace: str | None
     belief_parse_ok: int | None
-    # `probabilities` is the per-letter vector used by Phase 1 metrics:
+    # `probabilities` is the per-letter vector used by probabilistic metrics:
     #   * If `belief_final` parses → the JSON probabilities, ordered by letter.
     #   * Else if `parse_ok=1` and we have a boxed letter set → §2.4 fallback.
     #   * Else None (sample excluded from probabilistic metrics).
@@ -96,8 +96,8 @@ class SampleRow:
     # reviewer can judge the calibration signal.
     is_fallback: bool
 
-    # v5.1 harness-resilience indicator. None on legacy v4 DBs (no column),
-    # 0/1 on v5+. Default keeps the dataclass backwards-compatible with
+    # Harness-resilience indicator. None on legacy DBs (no column), 0/1
+    # otherwise. Default keeps the dataclass backwards-compatible with
     # positional constructors used in test fixtures.
     final_answer_retry_used: int | None = None
 
@@ -187,12 +187,12 @@ def _flatten_db(
 ) -> list[SampleRow]:
     """Pivot the wide run_results table into per-sample rows joined with question metadata.
 
-    v5.1 (harness-resilience) added `s{i}_final_answer_retry_used` to
-    `_ANALYSIS_FIELDS`. Legacy v4 DBs that haven't been re-opened under the
-    v5 code path don't have that column yet, so we resolve each field name
-    against `PRAGMA table_info(run_results)` and substitute a literal NULL
-    placeholder for any missing column. Analysis stays read-only — we never
-    ALTER a v4 DB just because we're computing summary metrics on it.
+    `s{i}_final_answer_retry_used` is in `_ANALYSIS_FIELDS` but absent
+    from legacy DBs that haven't been re-opened under the current code
+    path. We resolve each field name against `PRAGMA table_info(run_results)`
+    and substitute a literal NULL placeholder for any missing column.
+    Analysis stays read-only — we never ALTER a DB just because we're
+    computing summary metrics on it.
     """
     existing_cols = {
         r["name"] for r in conn.execute("PRAGMA table_info(run_results)").fetchall()

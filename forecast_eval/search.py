@@ -245,8 +245,8 @@ async def tavily_search(
                 httpx.ConnectError,
                 httpx.ReadTimeout,
                 httpx.ConnectTimeout,
-                # v5.1 (harness-resilience): transient-network family aligned
-                # with errors.classify. RemoteProtocolError (server disconnect
+                # Transient-network family aligned with errors.classify.
+                # RemoteProtocolError (server disconnect
                 # mid-response) is caught here so the runner does not see
                 # UNKNOWN, which it never retries — see search-tool spec.
                 httpx.WriteTimeout,
