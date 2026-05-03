@@ -728,22 +728,6 @@ If you are new to the project, we suggest reading in this order:
 
 ---
 
-## 10. Version history
-
-| Version | Headline change                                                                                    | Default behaviour                                                  |
-| ------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| v3      | Wide-table schema, per-sample observability columns                                                | strict-letter scoring, no belief, no detector                      |
-| v4      | Belief protocol via companion JSON block; probabilistic suite (BI / NLL / MBS / ABI)                | `BELIEF_PROTOCOL=false`; v3 byte-equivalent until enabled          |
-| v5      | Discrete-native pivot: FSS / Cohen κ / Fleiss κ / Hamming as primary; dropped reliability and Murphy figures at $`K=5`$ | exam-style and composite weights are the headline   |
-| v5.1    | Harness resilience: in-loop force-final, budget-drop tools, retry backstop; widened error needles  | force-final on, retry-backstop off by default                      |
-| v5.2    | Stage-2 LLM detector for retrieval-content leakage                                                 | `ENABLE_SEARCH_LEAK_FILTER=true` (default-strict, fail-closed)     |
-
-Migrations are forward-only: every old DB auto-migrates via `ALTER TABLE ADD COLUMN` on
-first re-open. Pinned by `tests/test_db_v4_migration.py` and
-`tests/test_db_v5_migration.py`.
-
----
-
 > **One sentence.** OracleProto turns LLM forecasting evaluation from a one-off live
 > competition into a dataset-level, auditable, reusable, and trainable capability, by making
 > the information boundary part of the data rather than part of the prompt.
