@@ -8,17 +8,6 @@
 
 </div>
 
-OracleProto reconstructs resolved events into time-bounded forecasting samples. Every
-invocation of `evaluation.py` materialises one run unit
-
-$`\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)`$,
-
-and admits question $`q_i`$ to model $`M`$ only when $`\kappa_M \le \chi_i < \tau_i`$,
-where $`\kappa_M`$ is the model training cutoff and $`\tau_i`$ the event resolution
-time. This README covers the code layout and how to run an evaluation. The rationale
-for every constraint lives in [`DESIGN.md`](./DESIGN.md); the field-level mapping
-symbol → module → DB column → pin test in [`FRAME.md`](./FRAME.md).
-
 ---
 
 ## Overview

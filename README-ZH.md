@@ -8,16 +8,6 @@
 
 </div>
 
-OracleProto 将已解算的事件重构为带时间边界的预测样本。`evaluation.py` 的每一次
-调用物化为一个运行单元
-
-$`\mathcal{R}=(\mathcal{D}, M, \kappa_M, \delta, T, C, R, \Psi, \phi, \Gamma)`$，
-
-并仅当 $`\kappa_M \le \chi_i < \tau_i`$ 时将问题 $`q_i`$ 准入给模型 $`M`$，其中
-$`\kappa_M`$ 是模型训练截止，$`\tau_i`$ 是事件解算时间。本 README 只讲代码结构
-与如何运行一次评测。每道约束的论证见 [`DISIGN-ZH.md`](./DISIGN-ZH.md)；每个符号 →
-模块 → DB 列 → pin test 的字段级映射见 [`FRAME-ZH.md`](./FRAME-ZH.md)。
-
 ---
 
 ## 概述
