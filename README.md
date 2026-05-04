@@ -23,19 +23,7 @@ symbol → module → DB column → pin test in [`FRAME.md`](./FRAME.md).
 
 ## Overview
 
-**Challenge.** Forecasting evaluation for LLMs sits between two unstable extremes. Prospective live benchmarks stay contamination-free but lose validity once events resolve, so each leaderboard is a one-way temporal stream. Retrospective benchmarks are easy to replay, yet a resolved question whose outcome already lives in the model's parameters tests recall rather than forecasting. Prompt-level "act as if you were on date X" instructions cannot close the gap between simulated ignorance and the true knowledge boundary the model never crossed.
-
-**Method.** OracleProto encodes the boundary into the dataset rather than the prompt. Within $`\mathcal{R}`$, four channels are gated independently before any output is scored:
-- **L1, parametric memory.** Admit $`q_i`$ to $`M`$ only when $`\kappa_M \le \chi_i < \tau_i`$; questions whose answer the model could have memorised are filtered before scheduling rather than recorded as a forecasting failure.
-- **L2, tool-mediated retrieval.** Every search call carries the tool-side cutoff $`\chi_i = \tau_i - \delta`$, fixed by the evaluator and never by the model.
-- **L3, retrieval-content audit.** An auxiliary LLM detector reads each snippet against $`\chi_i`$ and drops anything that leaks the post-cutoff outcome; its prompt SHA-256 is part of the run hash.
-- **L4, provider-side browsing ban.** A route allow-list and a request-time check reject any model or endpoint that performs unbounded native browsing.
-
-Predictions are constrained to a finite answer space, normalised by $`\phi`$, and scored at four levels (parseability, item, question, model), so one run admits cross-model comparison without per-model rescaling.
-
-**What is built.** A resolved event from FutureX-Past becomes a replayable forecasting sample for any model with $`\kappa_M \le \chi_i`$. Each invocation of `evaluation.py` produces one self-contained `runs/{run_id}/` directory: a `manifest.json` carrying the full configuration hash chain, one SQLite per model that any third party can re-score offline, and a CSV catalogue regenerated from the raw observations. The bundled `forecast_eval_set_example.db` ships 80 curated questions with resolution dates spanning 2026-03-12 to 2026-04-14, ready to drop into any OpenAI-compatible endpoint. The same dataset stays byte-comparable across the model panel, across calendar years, and across teams; the per-step retrieval trace and the boxed final answer can be reused as SFT and outcome-based RL signal without altering the formal contract.
-
-**Vision.** Forecasting is the native capability LLMs need on the path from text generation to real-world decision support: finance, policy, public safety, scientific research. Making the dataset itself the central object of evaluation, rather than a single live snapshot or a particular agent stack, turns one-shot scoring into a cumulative data asset that can be audited, reused, extended across model knowledge cutoffs, and recycled as training signal. The same artefact then serves at once as evaluation set, training corpus, and audit trail for the forecasting capability behind real decisions.
+Prospective forecasting benchmarks expire once events resolve; retrospective ones risk testing recall, since prompt-level instructions cannot recreate a knowledge boundary the model never crossed. OracleProto closes this gap at the dataset level: knowledge-cutoff sample admission, multi-layer temporal masking, and a content-level LLM detector together turn each resolved event into a replayable forecasting sample within $`\mathcal{R}`$, packaged as a self-contained `runs/{run_id}/` that stays byte-comparable across models, years, and teams. The dataset itself thereby becomes the central object of evaluation, a cumulative asset that is at once evaluation set, training signal for SFT or outcome-based RL, and audit trail for the forecasting capability behind real-world decision support.
 
 ---
 
