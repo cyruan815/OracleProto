@@ -1684,7 +1684,7 @@ pytest tests/ -q
 ### 12.2 Conda 环境
 
 ```yaml
-name: forecast
+name: oracleproto
 channels:
   - conda-forge
 dependencies:
@@ -1708,7 +1708,7 @@ dependencies:
 
 ```bash
 conda env create -f environment.yml
-conda activate forecast
+conda activate oracleproto
 cp .env.example .env
 # 编辑 .env：LLM_API_KEY、TAVILY_API_KEY、LEAK_DETECTOR_API_KEY、MODELS、MODEL_TRAINING_CUTOFFS
 python evaluation.py --question-type yes_no

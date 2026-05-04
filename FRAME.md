@@ -1762,7 +1762,7 @@ only then open up to a full evaluation.
 ### 12.2 Conda environment
 
 ```yaml
-name: forecast
+name: oracleproto
 channels:
   - conda-forge
 dependencies:
@@ -1786,7 +1786,7 @@ To create the environment:
 
 ```bash
 conda env create -f environment.yml
-conda activate forecast
+conda activate oracleproto
 cp .env.example .env
 # Edit .env: LLM_API_KEY, TAVILY_API_KEY, LEAK_DETECTOR_API_KEY, MODELS, MODEL_TRAINING_CUTOFFS
 python evaluation.py --question-type yes_no
