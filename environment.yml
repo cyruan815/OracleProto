@@ -1,4 +1,4 @@
-name: forecast
+name: oracleproto
 channels:
   - conda-forge
 dependencies:
