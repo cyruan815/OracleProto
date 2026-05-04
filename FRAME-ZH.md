@@ -9,7 +9,7 @@
 
 ## 如何阅读本文档
 
-本文档是一份自顶向下的参考资料。第 1–4 节确立"度量的对象是什么"，
+本文档是一份自顶向下的参考资料。第 1–4 节确立“度量的对象是什么”，
 第 5–8 节描述流水线如何产出度量值，第 9–12 节涵盖将这些度量值转化为
 可上报数字的分析机制与运维机制。每一节都可以独立检索，但靠后的章节
 会假定读者已熟悉 §1 的符号表。
@@ -21,7 +21,7 @@
 * `test_<name>.py` 指向 `tests/` 下的文件。仓库共附带 33 个测试文件，
   约包含 560 个独立用例，全部离线运行。
 
-正文中的记号 $`X \to Y`$ 表示"X 解析为 / 产生 Y"；$`X = Y`$ 保留其
+正文中的记号 $`X \to Y`$ 表示“X 解析为 / 产生 Y”；$`X = Y`$ 保留其
 数学含义。
 
 ---
@@ -94,7 +94,7 @@ $`H_{\mathrm{aux}}`$，按下表映射到代码库。每个符号对应一个配
 7. **三个独立指纹而非单一指纹。** `prompt_templates_hash`、
    `reflection_protocol_hash` 与 `belief_protocol_hash` 并排存放于
    `run_meta` 与 manifest 顶层（db.py:L143–L150、evaluation.py:L171–L178），
-   因此在 {模板, 反思, 信念} 任一轴向上的消融实验互不冲撞。
+   因此在 {模板、反思、信念} 任一轴向上的消融实验互不冲撞。
 8. **综合准确率（Composite Accuracy）是头条指标。** 默认子类型权重
    为 `yes_no=0.15`、`binary_named=0.15`、`multiple_choice=0.70`
    （config.py:L365）；按指标的覆写值会针对已知指标名称白名单做校验，
@@ -408,7 +408,7 @@ CONFLICT(question_id) DO UPDATE SET s{i}_* = excluded.s{i}_*`，
 ### 4.2 通道 1：参数化知识
 
 若一道题的解算时间早于模型的训练截止，则其答案很可能已经处于训练
-语料中；模型是在"记起"答案而非预测它。这类样本无法反映原生预测能力，
+语料中；模型是在“记起”答案而非预测它。这类样本无法反映原生预测能力，
 应当从模型的可评测子集 $`\mathcal{D}^{\mathrm{pred}}_M`$ 中移除。
 
 每个模型的 $`\kappa_M`$ 在 `.env` 中通过 `MODEL_TRAINING_CUTOFFS` 声明，
@@ -426,7 +426,7 @@ if cutoff is not None and q.end_time <= cutoff:
 
 被过滤的 `(question, model, sample_idx)` 行依然落在 `run_results`
 中，`error="skipped_training_cutoff"`、`parse_ok=0`、`correct=NULL`，
-所有数值字段为零。这样"每个模型过滤掉了多少题"可直接从 DB 审计，
+所有数值字段为零。这样“每个模型过滤掉了多少题”可直接从 DB 审计，
 并喂给报表中按模型的排除计数列。续跑永远不会重试这些行。
 
 `test_training_cutoff.py` 分三部分固定该契约：对于
@@ -506,8 +506,8 @@ raw_content     — result.raw_content 或 "(empty)"
 cutoff_date     — 调用方传入的 χ_i
 ```
 
-问题文本、选项与正确答案绝不会被传入。把探测器框定为"答案审计器"会
-制造二阶泄漏，因为探测器可能据此合理化"伪造证据与已知答案一致"而
+问题文本、选项与正确答案绝不会被传入。把探测器框定为“答案审计器”会
+制造二阶泄漏，因为探测器可能据此合理化“伪造证据与已知答案一致”而
 放行。
 
 输出 schema 是严格的 JSON，包含两个字段：
@@ -525,7 +525,7 @@ content、raw_content）；审计字段则保留以供事后审查。
 `failed:auth` 且永不向上传播；该条目立即被丢弃
 （leak_filter.py:L281–L288）。其他可重试错误耗尽序列后，裁决变为
 `failed:<kind>`，并由 `LEAK_DETECTOR_FAIL_ACTION` 接管：默认 `drop`
-丢弃条目，`keep` 则放行。该默认值将残余偏向"不确定就丢弃"，因为
+丢弃条目，`keep` 则放行。该默认值将残余偏向“不确定就丢弃”，因为
 探测器抖动与条目内容不相关。
 
 每次调用都会向 `s{i}_search_calls[*].audit` 追加一个审计字典
@@ -563,7 +563,7 @@ leak_detector_prompt_version  — 人类可读标签，默认 "v1"
 防御。
 
 第一道是 **slug 禁令**。以 `:online` 结尾的 slug（OpenRouter 的
-"在线增强"变体命名）在启动时被 `Settings` 校验拒绝
+“在线增强”变体命名）在启动时被 `Settings` 校验拒绝
 （config.py:L599–L614），并由 `llm._assert_no_browsing`
 （llm.py:L74–L98）在传输层再次断言。由 `test_llm_no_browsing.py`
 固定。
@@ -573,7 +573,7 @@ leak_detector_prompt_version  — 人类可读标签，默认 "v1"
 工具。
 
 如果某厂商强制附加无法关闭的浏览能力，应在 README 与报告中将其标记为
-"不适合严格评测"，因为框架无法防御 API 不暴露的能力。
+“不适合严格评测”，因为框架无法防御 API 不暴露的能力。
 
 ### 4.6 威胁模型与残余面
 
@@ -589,8 +589,8 @@ leak_detector_prompt_version  — 人类可读标签，默认 "v1"
 | 问题文本中的时间线索                          | 否             | 数据固有；作为评测偏差接受                                                        |
 | 训练后的外部知识回流                          | 否             | 作为评测偏差接受                                                                  |
 
-立场是明确的：这是一个可审计、可复现、可比较的框架，并非"所有泄漏
-都被堵死"的证明。
+立场是明确的：这是一个可审计、可复现、可比较的框架，并非“所有泄漏
+都被堵死”的证明。
 
 ### 4.7 渲染器 $`R`$
 
@@ -961,9 +961,9 @@ PRAGMA busy_timeout = 5000;
 | `s{i}_messages_trace`             | 完整 `messages` 列表的 JSON，或在 `WRITE_MESSAGES_TRACE=False` 时为 NULL。                                                                                          |
 | `s{i}_search_calls`               | 每次调用的元数据：`query`、`end_date`、`n_results`、`published_dates`。启用泄漏过滤后还包括 `n_results_raw / n_results_kept / detector_verdicts / detector_latency_ms / detector_error_kind`。 |
 | `s{i}_error`                      | 重试后的错误分类；正常完成（含拒绝或解析失败）为 NULL。                                                                                                            |
-| `s{i}_created_at`                 | 写入时刻的 UTC ISO-8601；这是判定"该槽位已被填充"的唯一信号。                                                                                                      |
+| `s{i}_created_at`                 | 写入时刻的 UTC ISO-8601；这是判定“该槽位已被填充”的唯一信号。                                                                                                      |
 | `s{i}_finish_reason`              | 末轮的 `ChatCompletion.choices[0].finish_reason`；错误行为 NULL。                                                                                                  |
-| `s{i}_nudges_used`                | 该样本内"严格地板未达 → 已注入提醒"的计数，由 `REACT_MAX_NUDGES` 封顶。                                                                                            |
+| `s{i}_nudges_used`                | 该样本内“严格地板未达 → 已注入提醒”的计数，由 `REACT_MAX_NUDGES` 封顶。                                                                                            |
 | `s{i}_step_metrics`               | 每轮快照的 JSON 数组：`step / prompt / completion / reasoning / latency_ms / finish_reason / n_tool_calls`。                                                       |
 | `s{i}_response_id`                | 末轮的 `ChatCompletion.id`。                                                                                                                                     |
 | `s{i}_system_fingerprint`         | 末轮的 `ChatCompletion.system_fingerprint`（厂商提供时）；可用于侦测厂商侧的模型路由变化。                                                                            |
@@ -987,7 +987,7 @@ PRAGMA busy_timeout = 5000;
   `prompts.BELIEF_PROTOCOL` 文本计算哈希。
 
 这三个哈希既存在于 `run_meta`，也出现在 `manifest.json` 顶层
-（evaluation.py:L171–L178），因此"不打开 DB 即可 grep 协议指纹"
+（evaluation.py:L171–L178），因此“不打开 DB 即可 grep 协议指纹”
 覆盖每条协议轴。
 
 ### 6.4 续跑查询
@@ -1155,8 +1155,8 @@ GRID_DEFAULT_C=
 写入 `run_meta.config_snapshot` 之前，
 `db.compute_redacted_config_snapshot` 会对每个敏感字段脱敏。脱敏格式
 为前 4 字符加长度与 `sha256[:12]`。`TAVILY_API_KEY` 是 `list[str]`，
-持久化为 `[{prefix, sha256_12, length, provider}, ...]`，使"本次运行
-使用了哪些 key"可被审计。敏感明文绝不持久化。
+持久化为 `[{prefix, sha256_12, length, provider}, ...]`，使“本次运行
+使用了哪些 key”可被审计。敏感明文绝不持久化。
 
 ---
 
@@ -1268,12 +1268,12 @@ logger.add(
 
 | 问题                                                                     | 优先读                       | 然后                                  |
 | ------------------------------------------------------------------------ | ---------------------------- | ------------------------------------- |
-| "整体上谁最准？"                                                          | §9.6 Composite Accuracy      | §9.5 FSS、§9.10 配对自助               |
-| "性价比最高的是谁？"                                                      | §9.7 Per-correct cost        | §9.6 Composite Accuracy                |
-| "在重复采样下排名稳健吗？"                                                | §9.4 多试验一致性            | §9.10 配对自助、§9.3 pass@k             |
-| "模型究竟有多大概率提交可解析答案？"                                      | §9.1 有效性                   | §9.7 Per-correct cost                  |
-| "泄漏屏障守住了吗？"                                                      | §4.4 探测器审计              | §4.6 残余面                             |
-| "模型把 token 与工具调用花在了哪里？"                                     | §9.11 行为诊断                | §9.12 输出产物                          |
+| “整体上谁最准？”                                                          | §9.6 Composite Accuracy      | §9.5 FSS、§9.10 配对自助               |
+| “性价比最高的是谁？”                                                      | §9.7 Per-correct cost        | §9.6 Composite Accuracy                |
+| “在重复采样下排名稳健吗？”                                                | §9.4 多试验一致性            | §9.10 配对自助、§9.3 pass@k             |
+| “模型究竟有多大概率提交可解析答案？”                                      | §9.1 有效性                   | §9.7 Per-correct cost                  |
+| “泄漏屏障守住了吗？”                                                      | §4.4 探测器审计              | §4.6 残余面                             |
+| “模型把 token 与工具调用花在了哪里？”                                     | §9.11 行为诊断                | §9.12 输出产物                          |
 
 ### 9.1 有效性（$`\mathcal{E}^{\mathrm{valid}}`$）
 
@@ -1437,7 +1437,7 @@ $`|\mathcal{D}^{\mathrm{eval}}| \cdot n \cdot \text{Composite Accuracy}_m`$
 上调权重。
 
 $`C^{\mathrm{total}}_m`$ 直接来自 OpenRouter 账单接口。平台账单是唯一
-可被第三方核验的财务事实，因而避免了由"标价 × token 用量"计算导致
+可被第三方核验的财务事实，因而避免了由“标价 × token 用量”计算导致
 的口径偏差，这类偏差通常源自推理 token 计费、prompt cache 折扣、
 工具调用计费与厂商路由。
 
@@ -1600,7 +1600,7 @@ OpenRouter 以 fixture 或 mock 替身存在，因为单次端到端评测代价
 
 ### 11.2 测试到不变量映射
 
-测试充当 $`\mathcal{R}`$ 各组成"按宣传实现"的证明。
+测试充当 $`\mathcal{R}`$ 各组成“按宣传实现”的证明。
 
 | 组件 / 主张                                                                                | 固定测试                                                                                                                                       |
 | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
