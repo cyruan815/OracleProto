@@ -12,7 +12,7 @@
 
 ## 概述
 
-前瞻式预测基准事件一旦解算就失效；回顾式基准容易测成事实回忆，因为 prompt 层面的指令重建不出模型从未越过的知识边界。OracleProto 在数据集层面合上这道缺口：知识截止级样本准入、多层时间掩码、内容级 LLM detector，三者在 $`\mathcal{R}`$ 之内把每一道已解算事件转为可重放的预测样本，封装为自包含的 `runs/{run_id}/`，在模型、年份、团队之间保持字节级可比。数据集本身由此成为评测的中心对象，一份兼任评测集、SFT 或 outcome-based RL 训练信号、真实决策支持背后预测能力审计轨迹的累积数据资产。
+预测基准始终面临一道结构性张力：前瞻式基准一旦事件解算便会失效，回顾式基准则容易把事实回忆当成预测能力来度量——prompt 层面的指令无法把模型推回它已经越过的知识边界。OracleProto 在数据集层面而非 prompt 层面合上这道缺口：每一道已解算事件都被改写为受模型自身知识截止约束的预测样本，封装为自包含的运行单元，在模型、年份与团队之间保持字节级可比。数据集由此成为评测的单元、训练信号与审计轨迹。
 
 ---
 
@@ -37,9 +37,9 @@ runs/, logs/                         # 运行产物（已 gitignore）
 forecast_eval_set_example.db         # 随仓 80 题样例数据集（故意不忽略）
 ```
 
-L1–L4 标注残余泄漏被控制的四条通道：参数化记忆、工具中介检索、检索内容语义、
+L1–L4 标注残余泄漏被控制的四条通道：参数化记忆、工具中介检索、检索内容审计、
 供应商原生浏览禁令。`tests/` 固定每条契约；改动以上任一文件而不重跑对应
-pin test 即破坏可复现性。
+pin test 即会破坏可复现性。
 
 ---
 
@@ -64,9 +64,10 @@ cp .env.example .env
 
 填入 `LLM_API_KEY`（配合 `LLM_BASE_URL` 使用任何 OpenAI 兼容端点）、
 `TAVILY_API_KEY`、`LEAK_DETECTOR_API_KEY`、`MODELS`、`MODEL_TRAINING_CUTOFFS`。
-$`\kappa_M`$ 对每个待评测模型必填；保守约定为**所披露月份的最后一日**，这样
-绝不会准入答案可能已被模型记忆的问题。`Settings._post_validate`（`config.py`）
-在任何 LLM 调用离开进程之前对缺失 key、`:online` slug 与其他配置错误快速失败。
+$`\kappa_M`$ 对每个待评测模型必填；当 model card 仅以月级粒度披露 cutoff
+时，保守约定为**所披露月份的最后一日**，这样可以确保不让答案已可能被模型
+记忆的问题进入评测样本。`Settings._post_validate`（`config.py`）在任何
+LLM 调用发出之前就会对缺失 key、`:online` slug 与其他配置错误快速失败。
 带注释的 [`.env.example`](./.env.example) 是每个选项的唯一权威。
 
 ### 2.3 测试
@@ -93,8 +94,8 @@ python evaluation.py --question-type multiple_choice --choice-type multi
 ```
 
 每次调用创建 `runs/{run_id}/`，`run_id` 形如 `YYYYMMDD-HHMMSS-{4-char hex}`。
-在 `.env` 中设置 `RUN_ID=<existing-id>` 续接到同一文件夹；已完成槽位被跳过，
-`skipped_training_cutoff` 永不重试，瞬时错误按原策略重试。
+在 `.env` 中设置 `RUN_ID=<existing-id>` 即可在同一目录中续跑该运行；已完成
+槽位被跳过，`skipped_training_cutoff` 行永不重试，瞬时错误按原退避策略重试。
 
 ---
 
@@ -102,10 +103,10 @@ python evaluation.py --question-type multiple_choice --choice-type multi
 
 仓库随附 `forecast_eval_set_example.db`，包含 80 道人工策展的问题，覆盖 yes/no、
 binary-named、单/多答案多项选择，事件解算日期跨越 2026-03-12 至 2026-04-14。
-接入其他语料，把 `SOURCE_DB` 与 `SOURCE_TABLE` 指向遵循 [`FRAME-ZH.md`](./FRAME-ZH.md)
-§2.1 七列 schema 的 SQLite，并附带一行携带八条 prompt 模板键（§2.3）的
-`dataset_metadata`。$`\mathcal{D}`$ 是 $`\mathcal{R}`$ 的可替换输入，框架其余
-部分原样运行。
+若要接入其他语料，把 `SOURCE_DB` 与 `SOURCE_TABLE` 指向一个遵循
+[`FRAME-ZH.md`](./FRAME-ZH.md) §2.1 七列 schema 的 SQLite 数据库，并提供一行
+`dataset_metadata`，其中包含八条 prompt 模板键（§2.3）。$`\mathcal{D}`$ 是
+$`\mathcal{R}`$ 的可替换输入，框架其余部分无需改动即可继续运行。
 
 ---
 
@@ -136,6 +137,6 @@ DB schema、`analysis/` 下的 CSV 目录、模型 slug 文件名映射，见
 
 | 想知道                                                      | 读                                  |
 | ----------------------------------------------------------- | ----------------------------------- |
-| 每道约束为何存在；威胁模型；契约旋钮                          | [`DISIGN-ZH.md`](./DESIGN-ZH.md)          |
+| 每道约束为何存在；威胁模型；契约旋钮                          | [`DESIGN-ZH.md`](./DESIGN-ZH.md)          |
 | 字段级规范：符号 → 模块 → DB 列 → pin test                  | [`FRAME-ZH.md`](./FRAME-ZH.md)            |
 | 每个选项的默认值与校验规则                                  | [`.env.example`](./.env.example)    |

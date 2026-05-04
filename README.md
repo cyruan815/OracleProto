@@ -12,7 +12,7 @@
 
 ## Overview
 
-Prospective forecasting benchmarks expire once events resolve; retrospective ones risk testing recall, since prompt-level instructions cannot recreate a knowledge boundary the model never crossed. OracleProto closes this gap at the dataset level: knowledge-cutoff sample admission, multi-layer temporal masking, and a content-level LLM detector together turn each resolved event into a replayable forecasting sample within $`\mathcal{R}`$, packaged as a self-contained `runs/{run_id}/` that stays byte-comparable across models, years, and teams. The dataset itself thereby becomes the central object of evaluation, a cumulative asset that is at once evaluation set, training signal for SFT or outcome-based RL, and audit trail for the forecasting capability behind real-world decision support.
+Forecasting benchmarks live with a structural tension: forward-looking ones expire the moment their events resolve, while retrospective ones risk testing recall, because prompt-level instructions cannot push a model back across a knowledge boundary it has already crossed. OracleProto closes the gap at the dataset layer rather than the prompt layer, rewriting each resolved event into a forecasting sample bounded by the model's own knowledge cutoff and packaging it as a self-contained run that stays byte-comparable across models, years, and teams. The dataset itself becomes the unit of evaluation, the training signal, and the audit trail.
 
 ---
 
@@ -38,7 +38,7 @@ forecast_eval_set_example.db         # bundled 80-question dataset (intentionall
 ```
 
 L1–L4 mark the four channels through which residual leakage is controlled: parametric
-memory, tool-mediated retrieval, retrieval-content semantics, and the
+memory, tool-mediated retrieval, retrieval-content audit, and the
 provider-native-browsing ban. `tests/` pins each contract; touching any of the four
 files above without rerunning the matching pin test breaks reproducibility.
 
@@ -65,12 +65,13 @@ cp .env.example .env
 
 Fill `LLM_API_KEY` (with `LLM_BASE_URL` for any OpenAI-compatible endpoint),
 `TAVILY_API_KEY`, `LEAK_DETECTOR_API_KEY`, `MODELS`, and `MODEL_TRAINING_CUTOFFS`.
-$`\kappa_M`$ is mandatory for every evaluated model; the conservative convention is
-the **last day of the disclosed month**, which never admits a question whose answer
-the model could already have memorised. `Settings._post_validate` (`config.py`)
-fails fast on missing keys, `:online` slugs, and other configuration errors before
-any LLM call leaves the process. The annotated [`.env.example`](./.env.example) is
-the single source of truth for every option.
+Declare $`\kappa_M`$ for every evaluated model. When a model card discloses the
+cutoff only at month granularity, take the **last day of the disclosed month** as
+the conservative choice: this convention never admits a question whose answer the
+model could already have memorised. `Settings._post_validate` (`config.py`) fails
+fast on missing keys, `:online` slugs, and other configuration errors before any
+LLM call is issued. The annotated [`.env.example`](./.env.example) is the single
+source of truth for every option.
 
 ### 2.3 Tests
 
@@ -96,9 +97,9 @@ python evaluation.py --question-type multiple_choice --choice-type multi
 ```
 
 Each invocation creates `runs/{run_id}/` with `run_id` of the form
-`YYYYMMDD-HHMMSS-{4-char hex}`. Set `RUN_ID=<existing-id>` in `.env` to resume into
-the same folder; finished slots are skipped, `skipped_training_cutoff` is never
-retried, and transient errors retry under the original policy.
+`YYYYMMDD-HHMMSS-{4-char hex}`. Set `RUN_ID=<existing-id>` in `.env` to resume that
+run in place; finished slots are skipped, `skipped_training_cutoff` rows are never
+retried, and transient errors retry under the original backoff policy.
 
 ---
 
@@ -107,9 +108,9 @@ retried, and transient errors retry under the original policy.
 The bundled `forecast_eval_set_example.db` carries 80 curated questions across
 yes/no, binary-named, and single-/multi-answer multiple-choice, with resolution
 dates spanning 2026-03-12 to 2026-04-14. To plug in another corpus, point
-`SOURCE_DB` and `SOURCE_TABLE` at a SQLite that follows the seven-column schema in
-[`FRAME.md`](./FRAME.md) §2.1, with a `dataset_metadata` row carrying the eight
-prompt template keys (§2.3). $`\mathcal{D}`$ is a replaceable input of
+`SOURCE_DB` and `SOURCE_TABLE` at a SQLite database that follows the seven-column
+schema in [`FRAME.md`](./FRAME.md) §2.1, plus a `dataset_metadata` row carrying the
+eight prompt template keys (§2.3). $`\mathcal{D}`$ is a replaceable input to
 $`\mathcal{R}`$, so the rest of the framework runs unchanged.
 
 ---
