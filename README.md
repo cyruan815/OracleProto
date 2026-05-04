@@ -4,7 +4,7 @@
 
 <em>A reproducible framework for benchmarking LLM native forecasting via knowledge cutoff and temporal masking</em>
 
-[English](./README.md) | [中文文档](./README-ZH.md)
+[English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto)
 
 </div>
 
