@@ -4,7 +4,7 @@
 
 <em>通过知识截止与时间掩码,对 LLM 原生预测能力进行基准评测的可复现框架</em>
 
-[English](./README.md) | [中文文档](./README-ZH.md)
+[English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto)
 
 </div>
 
