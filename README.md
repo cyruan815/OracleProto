@@ -8,7 +8,9 @@
 [![GitHub Forks](https://img.shields.io/github/forks/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/network)
 [![GitHub Issues](https://img.shields.io/github/issues/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/issues)
 [![GitHub Pull Requests](https://img.shields.io/github/issues-pr/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/pulls)
-[![GitHub License](https://img.shields.io/github/license/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/blob/main/LICENSE)
+
+![GitHub License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)
+![Python Version](https://img.shields.io/badge/Python-3.12-brightgreen?style=for-the-badge)
 
 [English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto) | Paper
 
