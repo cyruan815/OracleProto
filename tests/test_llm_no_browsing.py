@@ -28,6 +28,7 @@ class _StubSettings:
     LLM_BACKOFF_RATE_LIMIT_S: list[int] = None  # type: ignore[assignment]
     LLM_BACKOFF_SERVER_5XX_S: list[int] = None  # type: ignore[assignment]
     MODEL_MAX_TOKENS_PARAM: dict = None  # type: ignore[assignment]
+    MODEL_OMIT_SAMPLING_FIELDS: dict = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.LLM_BACKOFF_NETWORK_S is None:
@@ -40,6 +41,8 @@ class _StubSettings:
             self.LLM_REASONING_MODEL_PATTERNS = ["o1", "o3", "o4", "r1", "qwq"]
         if self.MODEL_MAX_TOKENS_PARAM is None:
             self.MODEL_MAX_TOKENS_PARAM = {}
+        if self.MODEL_OMIT_SAMPLING_FIELDS is None:
+            self.MODEL_OMIT_SAMPLING_FIELDS = {}
 
 
 def _success_body() -> dict[str, object]:
@@ -213,6 +216,83 @@ async def test_max_tokens_param_does_not_affect_other_models() -> None:
 
 
 @respx.mock
+async def test_omit_top_p_for_declared_model() -> None:
+    """Models declared with `=top_p` keep `temperature` but drop `top_p` from the request body."""
+    route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
+        return_value=httpx.Response(200, json=_success_body())
+    )
+    settings = _StubSettings()
+    settings.MODEL_OMIT_SAMPLING_FIELDS = {"gemini-3.1-pro-preview": ["top_p"]}
+    await chat(
+        model="gemini-3.1-pro-preview",
+        messages=[{"role": "user", "content": "hi"}],
+        settings=settings,
+        client=_new_client(settings),
+    )
+    body = json.loads(route.calls.last.request.content.decode("utf-8"))
+    assert body.get("temperature") == settings.LLM_TEMPERATURE
+    assert "top_p" not in body
+
+
+@respx.mock
+async def test_omit_temperature_for_declared_model() -> None:
+    """Symmetric case: `=temperature` keeps `top_p` but drops `temperature`."""
+    route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
+        return_value=httpx.Response(200, json=_success_body())
+    )
+    settings = _StubSettings()
+    settings.MODEL_OMIT_SAMPLING_FIELDS = {"some/picky-model": ["temperature"]}
+    await chat(
+        model="some/picky-model",
+        messages=[{"role": "user", "content": "hi"}],
+        settings=settings,
+        client=_new_client(settings),
+    )
+    body = json.loads(route.calls.last.request.content.decode("utf-8"))
+    assert "temperature" not in body
+    assert body.get("top_p") == settings.LLM_TOP_P
+
+
+@respx.mock
+async def test_omit_sampling_does_not_affect_other_models() -> None:
+    """Omission applies only to the declared slug; other models keep both fields."""
+    route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
+        return_value=httpx.Response(200, json=_success_body())
+    )
+    settings = _StubSettings()
+    settings.MODEL_OMIT_SAMPLING_FIELDS = {"gemini-3.1-pro-preview": ["top_p"]}
+    await chat(
+        model="openai/gpt-4o-mini",
+        messages=[{"role": "user", "content": "hi"}],
+        settings=settings,
+        client=_new_client(settings),
+    )
+    body = json.loads(route.calls.last.request.content.decode("utf-8"))
+    assert body.get("temperature") == settings.LLM_TEMPERATURE
+    assert body.get("top_p") == settings.LLM_TOP_P
+
+
+@respx.mock
+async def test_omit_sampling_ignored_when_reasoning_pattern_matches() -> None:
+    """Reasoning-model pattern still wins: both fields are omitted regardless of MODEL_OMIT_SAMPLING_FIELDS."""
+    route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
+        return_value=httpx.Response(200, json=_success_body())
+    )
+    settings = _StubSettings()
+    # Even if the user only declared `=top_p`, a slug containing "r1" still drops both.
+    settings.MODEL_OMIT_SAMPLING_FIELDS = {"deepseek/deepseek-r1": ["top_p"]}
+    await chat(
+        model="deepseek/deepseek-r1",
+        messages=[{"role": "user", "content": "hi"}],
+        settings=settings,
+        client=_new_client(settings),
+    )
+    body = json.loads(route.calls.last.request.content.decode("utf-8"))
+    assert "temperature" not in body
+    assert "top_p" not in body
+
+
+@respx.mock
 async def test_auth_error_raises_auth_error_not_retried() -> None:
     route = respx.post(re.compile(r"https://openrouter\.ai/api/v1/chat/completions")).mock(
         return_value=httpx.Response(401, json={"error": {"message": "bad key"}})
@@ -275,4 +355,40 @@ def test_settings_rejects_malformed_max_tokens_param_pair(
 ) -> None:
     _settings_env(monkeypatch, MODEL_MAX_TOKENS_PARAM="openai/gpt-5")
     with pytest.raises(ValueError, match="model=param_name"):
+        Settings(_env_file=None)
+
+
+def test_settings_parses_omit_sampling_fields_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    _settings_env(
+        monkeypatch,
+        MODEL_OMIT_SAMPLING_FIELDS=(
+            "gemini-3.1-pro-preview=top_p,foo=temperature,foo=top_p"
+        ),
+    )
+    s = Settings(_env_file=None)
+    assert s.MODEL_OMIT_SAMPLING_FIELDS == {
+        "gemini-3.1-pro-preview": ["top_p"],
+        "foo": ["temperature", "top_p"],
+    }
+
+
+def test_settings_omit_sampling_fields_defaults_to_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    _settings_env(monkeypatch)
+    s = Settings(_env_file=None)
+    assert s.MODEL_OMIT_SAMPLING_FIELDS == {}
+
+
+def test_settings_rejects_unknown_omit_sampling_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings_env(monkeypatch, MODEL_OMIT_SAMPLING_FIELDS="foo=max_tokens")
+    with pytest.raises(ValueError, match="temperature"):
+        Settings(_env_file=None)
+
+
+def test_settings_rejects_malformed_omit_sampling_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings_env(monkeypatch, MODEL_OMIT_SAMPLING_FIELDS="foo")
+    with pytest.raises(ValueError, match="model=temperature"):
         Settings(_env_file=None)

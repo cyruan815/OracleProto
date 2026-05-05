@@ -137,6 +137,7 @@ def _parse_overrides_dict(
 
 
 _MAX_TOKENS_PARAM_ALLOWED = {"max_tokens", "max_completion_tokens"}
+_OMIT_SAMPLING_FIELDS_ALLOWED = {"temperature", "top_p"}
 
 
 def _parse_max_tokens_param(raw: str | dict[str, Any] | None) -> dict[str, str]:
@@ -166,6 +167,46 @@ def _parse_max_tokens_param(raw: str | dict[str, Any] | None) -> dict[str, str]:
                 f"{sorted(_MAX_TOKENS_PARAM_ALLOWED)}"
             )
         out[model_slug] = name
+    return out
+
+
+def _parse_omit_sampling_fields(
+    raw: str | dict[str, Any] | None,
+) -> dict[str, list[str]]:
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        items: list[tuple[str, str]] = []
+        for k, v in raw.items():
+            if isinstance(v, (list, tuple, set)):
+                items.extend((str(k), str(x)) for x in v)
+            else:
+                items.append((str(k), str(v)))
+    else:
+        items = []
+        for pair in str(raw).split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if "=" not in pair:
+                raise ValueError(
+                    f"MODEL_OMIT_SAMPLING_FIELDS entry must be 'model=temperature' "
+                    f"or 'model=top_p', got: {pair!r}"
+                )
+            model_slug, name = pair.split("=", 1)
+            items.append((model_slug.strip(), name.strip()))
+    out: dict[str, list[str]] = {}
+    for model_slug, name in items:
+        if not model_slug:
+            raise ValueError("MODEL_OMIT_SAMPLING_FIELDS has an empty model slug")
+        if name not in _OMIT_SAMPLING_FIELDS_ALLOWED:
+            raise ValueError(
+                f"MODEL_OMIT_SAMPLING_FIELDS[{model_slug}]={name!r} must be one of "
+                f"{sorted(_OMIT_SAMPLING_FIELDS_ALLOWED)}"
+            )
+        bucket = out.setdefault(model_slug, [])
+        if name not in bucket:
+            bucket.append(name)
     return out
 
 
@@ -231,6 +272,15 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_S: int = 240
     LLM_TEMPERATURE: float = 0.7
     LLM_TOP_P: float = 1.0
+    # Per-model omission of individual sampling fields. Use when a non-reasoning model rejects
+    # `temperature` and `top_p` together (e.g., providers returning 400 with "cannot both be
+    # specified") but still accepts custom sampling on the kept field. Format:
+    # "<model_slug>=temperature" or "<model_slug>=top_p" with multiple entries comma-separated;
+    # repeating the same slug accumulates fields, e.g. "foo=temperature,foo=top_p" omits both
+    # (in which case prefer LLM_REASONING_MODEL_PATTERNS instead). Allowed values: temperature, top_p.
+    # Reasoning models matched by LLM_REASONING_MODEL_PATTERNS already omit both fields and ignore
+    # this map entirely.
+    MODEL_OMIT_SAMPLING_FIELDS: Annotated[dict[str, list[str]], NoDecode] = Field(default_factory=dict)
     LLM_MAX_CONCURRENCY: int = 5
     LLM_RETRY_MAX: int = 5
     LLM_BACKOFF_NETWORK_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [2, 5, 15, 30, 60])
@@ -483,6 +533,11 @@ class Settings(BaseSettings):
     @classmethod
     def _parse_max_tokens_param_field(cls, v: Any) -> dict[str, str]:
         return _parse_max_tokens_param(v)
+
+    @field_validator("MODEL_OMIT_SAMPLING_FIELDS", mode="before")
+    @classmethod
+    def _parse_omit_sampling_fields_field(cls, v: Any) -> dict[str, list[str]]:
+        return _parse_omit_sampling_fields(v)
 
     @field_validator("COMPOSITE_WEIGHTS_QTYPE", mode="before")
     @classmethod

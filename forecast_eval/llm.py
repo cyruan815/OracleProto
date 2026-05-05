@@ -176,10 +176,15 @@ async def chat(
     if tools:
         base_kwargs["tools"] = tools
     if not skip_sampling:
-        base_kwargs["temperature"] = (
-            temperature if temperature is not None else settings.LLM_TEMPERATURE
+        omit_fields = set(
+            (getattr(settings, "MODEL_OMIT_SAMPLING_FIELDS", {}) or {}).get(model, [])
         )
-        base_kwargs["top_p"] = top_p if top_p is not None else settings.LLM_TOP_P
+        if "temperature" not in omit_fields:
+            base_kwargs["temperature"] = (
+                temperature if temperature is not None else settings.LLM_TEMPERATURE
+            )
+        if "top_p" not in omit_fields:
+            base_kwargs["top_p"] = top_p if top_p is not None else settings.LLM_TOP_P
 
     while True:
         attempt += 1
