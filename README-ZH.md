@@ -13,7 +13,7 @@
 
 [English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto)
 
-查看论文：[OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking](/static/paper/OracleProto.pdf)
+查看我们的论文：[OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking](/static/paper/OracleProto.pdf)
 
 访问我们的排行榜：[oracleproto.pages.dev](https://oracleproto.pages.dev)
 
@@ -120,7 +120,24 @@ python -m forecast_eval.analysis runs/{run_id}
 
 ---
 
-## 5. 引用
+## 5. 联系与合作
+
+如有代码使用、数据集构建、复现问题等，欢迎直接联系项目开发者：
+- **马一丁**：[yidingma@bupt.edu.cn](mailto:yidingma@bupt.edu.cn)
+- **阮承沄**：[ruanchengyun815@bupt.edu.cn](mailto:ruanchengyun815@bupt.edu.cn)
+
+如需联合研究、数据与评测基准共建、论文合作等，请联系课题负责人：
+- **黄凯博**（通讯作者）：[huangkaibo@bupt.edu.cn](mailto:huangkaibo@bupt.edu.cn)
+- **杨忠良**（通讯作者）：[yangzl@bupt.edu.cn](mailto:yangzl@bupt.edu.cn)
+
+---
+
+## 6. 论文
+
+查看我们的论文：[OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking](/static/paper/OracleProto.pdf)
+
+---
+## 7. 引用
 
 如果您在研究中使用了本项目，请引用我们的论文：
 
