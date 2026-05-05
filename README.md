@@ -23,11 +23,11 @@ Visit Our Leaderboards: [oracleproto.pages.dev](https://oracleproto.pages.dev)
 
 ## Overview
 
-- **Background & Challenges**: As LLMs evolve into real-world decision-support systems, evaluating their forecasting capability faces a dilemma: live benchmarks are pristine but expire once events resolve, while reproducible retrospective benchmarks struggle to differentiate genuine forecasting from facts models memorized during pre-training, as simply prompting them to "pretend not to know" cannot replace a genuine knowledge boundary.
-
-- **Architecture & Methods**: We propose OracleProto, a reproducible framework that rigorously reconstructs resolved events into time-bounded forecasting samples by combining model-cutoff-aligned sample admission, tool-level temporal masking, content-level leakage detection, discrete answer normalization, and hierarchical scoring.
-
-- **Experimental Results**: Instantiated on a FutureX-Past-derived dataset with six contemporary LLMs, experiments show that OracleProto distinguishes forecasting quality, sampling stability, and cost efficiency under controlled information boundaries. It successfully reduces residual leakage to the 1% level (an order of magnitude below tool-only temporal filtering), turning LLM forecasting from a one-off evaluation into an auditable, reusable dataset-level capability, and providing a unified interface for fair cross-model comparison and a controlled signal source for downstream SFT and RL.
+- **Background & Challenges:** Evaluating LLM forecasting faces a dilemma: live benchmarks **expire easily**, and retrospective benchmarks suffer from **data leakage**. Prompting cannot establish a genuine **knowledge boundary**.
+  
+- **Architecture & Methods:** The OracleProto framework combines model knowledge cutoffs and temporal masking to rigorously reconstruct historical events into **reproducible, time-bounded forecasting samples**.
+  
+- **Experimental Results:** Tests on six contemporary LLMs show that OracleProto effectively distinguishes models' forecasting quality, stability, and cost efficiency. It reduces the leakage rate to 1%, providing a controlled signal source for **model comparison, supervised fine-tuning, and reinforcement learning**.
 
 <div align="center">
 
