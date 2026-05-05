@@ -4,10 +4,6 @@
 
 <em>A reproducible framework for benchmarking LLM native forecasting via knowledge cutoff and temporal masking</em>
 
-[![GitHub Stars](https://img.shields.io/github/stars/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/network)
-[![GitHub Issues](https://img.shields.io/github/issues/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/issues)
-
 ![GitHub License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)
 ![Python Version](https://img.shields.io/badge/Python-3.12-brightgreen?style=for-the-badge)
 
