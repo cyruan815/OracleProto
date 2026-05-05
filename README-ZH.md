@@ -4,7 +4,13 @@
 
 <em>通过知识截止与时间掩码，对 LLM 原生预测能力进行基准评测的可复现框架</em>
 
-[English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto)
+[![GitHub Stars](https://img.shields.io/github/stars/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/network)
+[![GitHub Issues](https://img.shields.io/github/issues/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/issues)
+[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/pulls)
+[![GitHub License](https://img.shields.io/github/license/MaYiding/OracleProto?style=flat-square)](https://github.com/MaYiding/OracleProto/blob/main/LICENSE)
+
+[English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto) | 论文
 
 访问我们的排行榜：[oracleproto.pages.dev](https://oracleproto.pages.dev)
 
