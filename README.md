@@ -16,6 +16,14 @@ Visit Our Leaderboards: [oracleproto.pages.dev](https://oracleproto.pages.dev)
 
 Forecasting benchmarks live with a structural tension: forward-looking ones expire the moment their events resolve, while retrospective ones risk testing recall, because prompt-level instructions cannot push a model back across a knowledge boundary it has already crossed. OracleProto closes the gap at the dataset layer rather than the prompt layer, rewriting each resolved event into a forecasting sample bounded by the model's own knowledge cutoff and packaging it as a self-contained run that stays byte-comparable across models, years, and teams. The dataset itself becomes the unit of evaluation, the training signal, and the audit trail.
 
+<div align="center">
+
+<img src="static/images/Framework.png" alt="Framework of OracleProto" width="100%">
+
+Framework of OracleProto
+
+</div>
+
 ---
 
 ## 1. Code map
