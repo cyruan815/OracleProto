@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>OracleProto</h1>
+<img src="static/images/OracleProto_Logo_Horizontal.png.png" alt="OracleProto Logo" width="100%">
 
 <em>通过知识截止与时间掩码，对 LLM 原生预测能力进行基准评测的可复现框架</em>
 
