@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="static/images/OracleProto_Logo_Horizontal.png.png" alt="OracleProto Logo" width="100%">
+<img src="static/images/OracleProto_Logo_Horizontal.png" alt="OracleProto Logo" width="100%">
 
 <em>A reproducible framework for benchmarking LLM native forecasting via knowledge cutoff and temporal masking</em>
 
