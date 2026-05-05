@@ -6,6 +6,8 @@
 
 [English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto)
 
+Visit Our Leaderboards: [oracleproto.pages.dev](https://oracleproto.pages.dev)
+
 </div>
 
 ---
