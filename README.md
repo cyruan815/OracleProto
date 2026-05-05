@@ -145,6 +145,8 @@ For joint research, dataset and benchmark co-development, or paper collaboration
 
 View Our Paper: [OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking](/static/paper/OracleProto.pdf)
 
+Temporary Online Quick Preview：[Preview Link](https://online.fliphtml5.com/OracleProto/OracleProto/)
+
 ---
 
 ## 7. Citation
