@@ -14,7 +14,7 @@ Visit Our Leaderboards: [oracleproto.pages.dev](https://oracleproto.pages.dev)
 
 ## Overview
 
-Forecasting benchmarks live with a structural tension: forward-looking ones expire the moment their events resolve, while retrospective ones risk testing recall, because prompt-level instructions cannot push a model back across a knowledge boundary it has already crossed. OracleProto closes the gap at the dataset layer rather than the prompt layer, rewriting each resolved event into a forecasting sample bounded by the model's own knowledge cutoff and packaging it as a self-contained run that stays byte-comparable across models, years, and teams. The dataset itself becomes the unit of evaluation, the training signal, and the audit trail.
+As Large Language Models (LLMs) evolve toward real-world decision-support systems, evaluating their "native forecasting capability" faces a fundamental tension: prospective live benchmarks offer a gold standard for contamination control but expire immediately upon event resolution, while reproducible retrospective benchmarks are highly prone to mistaking pre-training memorization for genuine forecasting. To address this challenge, we propose OracleProto, a reproducible evaluation framework for LLM native forecasting capability. By jointly enforcing model knowledge cutoff alignment, tool-level temporal masking, content-level leakage detection, and standardized hierarchical scoring, the framework reconstructs resolved events into forecasting samples with strict temporal boundaries. Evaluations across six mainstream LLMs demonstrate that OracleProto effectively distinguishes forecasting quality, stability, and cost efficiency under controlled information boundaries, while reducing the residual leakage rate to the 1% level. Ultimately, OracleProto transforms one-off forecasting evaluation into an auditable, reusable dataset-level capability that provides a controlled signal source for subsequent supervised fine-tuning (SFT) and reinforcement learning (RL).
 
 <div align="center">
 
@@ -47,11 +47,6 @@ runs/, logs/                         # run artefacts
 forecast_eval_set_example.db         # bundled example dataset
 ```
 
-L1–L4 mark the four channels through which residual leakage is controlled: parametric
-memory, tool-mediated retrieval, retrieval-content audit, and the
-provider-native-browsing ban. `tests/` pins each contract; touching any of the four
-files above without rerunning the matching pin test breaks reproducibility.
-
 ---
 
 ## 2. Quickstart
@@ -62,10 +57,6 @@ files above without rerunning the matching pin test breaks reproducibility.
 conda env create -f environment.yml
 conda activate oracleproto
 ```
-
-Python 3.12. Core dependencies: `openai`, `tavily-python`, `pydantic>=2.6`, `loguru`,
-`httpx`, `tenacity`, `pytest`. `matplotlib` stays out of `environment.yml` and is
-installed on demand for plotting.
 
 ### 2.2 Configure `.env`
 
@@ -100,12 +91,8 @@ retry under the original backoff policy.
 ## 3. Bring your own dataset
 
 The bundled `forecast_eval_set_example.db` carries 80 curated questions across
-yes/no, binary-named, and single-/multi-answer multiple-choice, with resolution
-dates spanning 2026-03-12 to 2026-04-14. To plug in another corpus, point
-`SOURCE_DB` and `SOURCE_TABLE` at a SQLite database that follows the seven-column
-schema in [`FRAME.md`](./FRAME.md) §2.1, plus a `dataset_metadata` row carrying the
-eight prompt template keys (§2.3). $`\mathcal{D}`$ is a replaceable input to
-$`\mathcal{R}`$, so the rest of the framework runs unchanged.
+three question types, with dates spanning 2026-03-12 to 2026-04-14. To plug in
+another corpus, swap `SOURCE_DB` and `SOURCE_TABLE` in `.env`.
 
 ---
 
@@ -127,15 +114,4 @@ composite, …) is recomputed by `forecast_eval/analysis/`, which runs at the en
 python -m forecast_eval.analysis runs/{run_id}
 ```
 
-The DB schema, the CSV catalogue under `analysis/`, and the model-slug filename
-mapping are specified in [`FRAME.md`](./FRAME.md) §6 and §9.
-
 ---
-
-## 5. Documentation map
-
-| Where to look                                                | Read                                |
-| ------------------------------------------------------------ | ----------------------------------- |
-| Why each constraint exists; threat model; contract knobs     | [`DESIGN.md`](./DESIGN.md)          |
-| Field-level spec: symbol → module → DB column → pin test     | [`FRAME.md`](./FRAME.md)            |
-| Every option's default and validation rule                   | [`.env.example`](./.env.example)    |
