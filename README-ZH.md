@@ -11,7 +11,7 @@
 ![GitHub License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)
 ![Python Version](https://img.shields.io/badge/Python-3.12-brightgreen?style=for-the-badge)
 
-[English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto) | 论文
+[English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto)
 
 查看论文：[OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking](/static/paper/OracleProto.pdf)
 
