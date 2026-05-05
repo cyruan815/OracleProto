@@ -99,9 +99,7 @@ runs/{run_id}/
 └─ logs/{run_id}.log
 ```
 
-DB 仅存原始观测。每一项聚合（$`\text{pass@1}`$、FSS、BI、composite 等）由
-`forecast_eval/analysis/` 重算，该步骤在 `evaluation.py` 末尾自动运行，亦可
-独立调用：
+DB 仅存原始观测。每一项聚合（$`\text{pass@1}`$、FSS、BI、composite 等）由 `forecast_eval/analysis/` 重算，该步骤在 `evaluation.py` 末尾自动运行，亦可独立调用：
 
 ```bash
 python -m forecast_eval.analysis runs/{run_id}
