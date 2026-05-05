@@ -32,11 +32,11 @@ forecast_eval/                       # core package
 ├─ types.py / errors.py / config.py  # data models / typed exceptions / Settings
 ├─ db.py / loader.py                 # SQLite schema migrations / dataset sync
 └─ tavily_keys.py / tools.py         # API-key rotation / tool schemas
-evaluation.py                        # entrypoint: one R per (model × question)
-scripts/                             # offline tooling: dataset build, sensitivity sweeps, plots
-tests/                               # pytest pin tests — assertion-as-contract
-runs/, logs/                         # run artefacts (gitignored)
-forecast_eval_set_example.db         # bundled 80-question dataset (intentionally not ignored)
+evaluation.py                        # entrypoint
+scripts/                             # offline tooling
+tests/                               # tests
+runs/, logs/                         # run artefacts
+forecast_eval_set_example.db         # bundled example dataset
 ```
 
 L1–L4 mark the four channels through which residual leakage is controlled: parametric
@@ -65,15 +65,10 @@ installed on demand for plotting.
 cp .env.example .env
 ```
 
-Fill `LLM_API_KEY` (with `LLM_BASE_URL` for any OpenAI-compatible endpoint),
-`TAVILY_API_KEY`, `LEAK_DETECTOR_API_KEY`, `MODELS`, and `MODEL_TRAINING_CUTOFFS`.
-Declare $`\kappa_M`$ for every evaluated model. When a model card discloses the
-cutoff only at month granularity, take the **last day of the disclosed month** as
-the conservative choice: this convention never admits a question whose answer the
-model could already have memorised. `Settings._post_validate` (`config.py`) fails
-fast on missing keys, `:online` slugs, and other configuration errors before any
-LLM call is issued. The annotated [`.env.example`](./.env.example) is the single
-source of truth for every option.
+Fill `LLM_API_KEY`, `LLM_BASE_URL`, `MODELS`, `MODEL_TRAINING_CUTOFFS`,
+`TAVILY_API_KEY`, `LEAK_DETECTOR_API_KEY`, `LEAK_DETECTOR_BASE_URL`,
+`LEAK_DETECTOR_MODEL`. The inline notes in [`.env.example`](./.env.example)
+cover the rest.
 
 ### 2.3 Tests
 
@@ -81,27 +76,16 @@ source of truth for every option.
 pytest tests/ -q
 ```
 
-`tests/` is the contract layer. The CI baseline (`test_prompts`, `test_parser`,
-`test_training_cutoff`, `test_llm_no_browsing`, `test_analysis`) pins the renderer,
-the parser, the L1 admissibility filter, the L4 browsing ban, and the aggregator.
-
 ### 2.4 Run
 
 ```bash
-# smoke: cheapest model, single sample, yes_no only
-MODELS=openai/gpt-4o-mini SAMPLING_N=1 python evaluation.py --question-type yes_no
-
-# full sweep across MODELS × SAMPLING_N
 python evaluation.py
-
-# filter combinations: AND across flags, OR within each flag
-python evaluation.py --question-type multiple_choice --choice-type multi
 ```
 
 Each invocation creates `runs/{run_id}/` with `run_id` of the form
 `YYYYMMDD-HHMMSS-{4-char hex}`. Set `RUN_ID=<existing-id>` in `.env` to resume that
-run in place; finished slots are skipped, `skipped_training_cutoff` rows are never
-retried, and transient errors retry under the original backoff policy.
+run in place; completed or ineligible questions are skipped, and transient errors
+retry under the original backoff policy.
 
 ---
 

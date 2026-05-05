@@ -21,7 +21,7 @@
 ## 1. 代码地图
 
 ```
-forecast_eval/                       # 核心 Python 包
+forecast_eval/                       # 核心代码
 ├─ runner.py                         # build_task_plan + 调度（L1：κ_M ≤ χ_i 可允许性过滤）
 ├─ react.py                          # ReAct 循环 + Tavily end_date 注入（L2：时间掩码）
 ├─ leak_filter.py                    # 检索内容审计（L3）
@@ -32,11 +32,11 @@ forecast_eval/                       # 核心 Python 包
 ├─ types.py / errors.py / config.py  # 数据模型 / 类型化异常 / Settings
 ├─ db.py / loader.py                 # SQLite schema 迁移 / 数据集同步
 └─ tavily_keys.py / tools.py         # API key 轮转 / 工具 schema
-evaluation.py                        # 入口：为每个 (model × question) 编排一个 R
-scripts/                             # 离线工具：数据集构建、灵敏度扫描、绘图
-tests/                               # pytest pin test —— 断言即契约
-runs/, logs/                         # 运行产物（已 gitignore）
-forecast_eval_set_example.db         # 随仓 80 题样例数据集（故意不忽略）
+evaluation.py                        # 入口
+scripts/                             # 离线工具
+tests/                               # 测试
+runs/, logs/                         # 运行产物
+forecast_eval_set_example.db         # 样例数据集
 ```
 
 L1–L4 标注残余泄漏被控制的四条通道：参数化记忆、工具中介检索、检索内容审计、
@@ -64,13 +64,7 @@ Python 3.12。核心依赖：`openai`、`tavily-python`、`pydantic>=2.6`、`log
 cp .env.example .env
 ```
 
-填入 `LLM_API_KEY`（配合 `LLM_BASE_URL` 使用任何 OpenAI 兼容端点）、
-`TAVILY_API_KEY`、`LEAK_DETECTOR_API_KEY`、`MODELS`、`MODEL_TRAINING_CUTOFFS`。
-$`\kappa_M`$ 对每个待评测模型必填；当 model card 仅以月级粒度披露 cutoff
-时，保守约定为**所披露月份的最后一日**，这样可以确保不让答案已可能被模型
-记忆的问题进入评测样本。`Settings._post_validate`（`config.py`）在任何
-LLM 调用发出之前就会对缺失 key、`:online` slug 与其他配置错误快速失败。
-带注释的 [`.env.example`](./.env.example) 是每个选项的唯一权威。
+填入 `LLM_API_KEY`、`LLM_BASE_URL`、`MODELS`、`MODEL_TRAINING_CUTOFFS`、`TAVILY_API_KEY`、`LEAK_DETECTOR_API_KEY`、`LEAK_DETECTOR_BASE_URL`、`LEAK_DETECTOR_MODEL`。其他解释说明见 [`.env.example`](./.env.example) 中的注释。
 
 ### 2.3 测试
 
@@ -78,26 +72,14 @@ LLM 调用发出之前就会对缺失 key、`:online` slug 与其他配置错误
 pytest tests/ -q
 ```
 
-`tests/` 即契约层。CI 基线（`test_prompts`、`test_parser`、`test_training_cutoff`、
-`test_llm_no_browsing`、`test_analysis`）固定渲染器、解析器、L1 可允许性过滤、
-L4 浏览禁令与聚合器。
-
 ### 2.4 运行
 
 ```bash
-# 冒烟：最便宜模型、单样本、仅 yes_no
-MODELS=openai/gpt-4o-mini SAMPLING_N=1 python evaluation.py --question-type yes_no
-
-# 全量扫描 MODELS × SAMPLING_N
 python evaluation.py
-
-# 过滤组合：标志间为 AND，标志内为 OR
-python evaluation.py --question-type multiple_choice --choice-type multi
 ```
 
 每次调用创建 `runs/{run_id}/`，`run_id` 形如 `YYYYMMDD-HHMMSS-{4-char hex}`。
-在 `.env` 中设置 `RUN_ID=<existing-id>` 即可在同一目录中续跑该运行；已完成
-槽位被跳过，`skipped_training_cutoff` 行永不重试，瞬时错误按原退避策略重试。
+在 `.env` 中设置 `RUN_ID=<existing-id>` 即可在同一目录中续跑该运行；已完成的题目或不符合条件的题目将被跳过，瞬时错误按原退避策略重试。
 
 ---
 
