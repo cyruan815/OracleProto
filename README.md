@@ -30,10 +30,10 @@ Framework of OracleProto
 
 ```
 forecast_eval/                       # core package
-├─ runner.py                         # build_task_plan + scheduler (L1: κ_M ≤ χ_i admissibility)
-├─ react.py                          # ReAct loop + Tavily end_date injection (L2: temporal masking)
-├─ leak_filter.py                    # retrieval-content auditor (L3)
-├─ llm.py                            # OpenAI-compatible client; enforces no provider-side browsing (L4)
+├─ runner.py                         # build_task_plan + scheduler
+├─ react.py                          # ReAct loop + Tavily end_date injection
+├─ leak_filter.py                    # retrieval-content auditor
+├─ llm.py                            # OpenAI-compatible client; enforces no provider-side browsing
 ├─ search.py                         # Tavily wrapper
 ├─ analysis/                         # scoring and diagnostics: accuracy, FSS, BI, composite, behavior
 ├─ prompts.py / parser.py            # input renderer R / output parser Ψ

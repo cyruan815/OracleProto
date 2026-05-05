@@ -30,10 +30,10 @@ OracleProto 框架图
 
 ```
 forecast_eval/                       # 核心代码
-├─ runner.py                         # build_task_plan + 调度（L1：κ_M ≤ χ_i 可允许性过滤）
-├─ react.py                          # ReAct 循环 + Tavily end_date 注入（L2：时间掩码）
-├─ leak_filter.py                    # 检索内容审计（L3）
-├─ llm.py                            # OpenAI 兼容客户端；强制禁止供应商原生浏览（L4）
+├─ runner.py                         # build_task_plan + 调度
+├─ react.py                          # ReAct 循环 + Tavily end_date 注入
+├─ leak_filter.py                    # 检索内容审计
+├─ llm.py                            # OpenAI 兼容客户端；强制禁止供应商原生浏览
 ├─ search.py                         # Tavily 包装
 ├─ analysis/                         # 评分与诊断：accuracy、FSS、BI、composite、behavior
 ├─ prompts.py / parser.py            # 输入渲染器 R / 输出解析器 Ψ
