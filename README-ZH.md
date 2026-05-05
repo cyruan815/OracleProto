@@ -115,3 +115,17 @@ python -m forecast_eval.analysis runs/{run_id}
 ```
 
 ---
+
+## 5. 引用
+
+如果您在研究中使用了本项目，请引用我们的论文：
+
+```
+@article{OracleProto,
+  title={OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking},
+  author={Yiding Ma, Chengyun Ruan, Kaibo Huang, Zhongliang Yang, Linna Zhou},
+  year={2026}
+}
+```
+
+---
