@@ -9,7 +9,7 @@
 
 [English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto)
 
-查看我们的论文：[OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking](/static/paper/OracleProto.pdf)
+查看我们的论文：[arXiv](http://arxiv.org/abs/2605.03762)
 
 访问我们的排行榜：[oracleproto.pages.dev](https://oracleproto.pages.dev)
 
@@ -130,9 +130,7 @@ python -m forecast_eval.analysis runs/{run_id}
 
 ## 6. 论文
 
-查看我们的论文：[OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking](/static/paper/OracleProto.pdf)
-
-临时在线快速预览：[预览链接](https://online.fliphtml5.com/OracleProto/OracleProto/)
+查看我们的论文：[arXiv](http://arxiv.org/abs/2605.03762)
 
 ---
 ## 7. 引用
@@ -143,6 +141,7 @@ python -m forecast_eval.analysis runs/{run_id}
 @article{OracleProto,
   title={OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking},
   author={Yiding Ma, Chengyun Ruan, Kaibo Huang, Zhongliang Yang, Linna Zhou},
+  journal={arXiv preprint arXiv:2605.03762},
   year={2026}
 }
 ```

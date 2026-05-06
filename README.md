@@ -9,7 +9,7 @@
 
 [English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto)
 
-View Our Paper: [OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking](/static/paper/OracleProto.pdf)
+View Our Paper: [arXiv](http://arxiv.org/abs/2605.03762)
 
 Visit Our Leaderboards: [oracleproto.pages.dev](https://oracleproto.pages.dev)
 
@@ -139,9 +139,7 @@ For joint research, dataset and benchmark co-development, or paper collaboration
 
 ## 6. Paper
 
-View Our Paper: [OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking](/static/paper/OracleProto.pdf)
-
-Temporary Online Quick Preview：[Preview Link](https://online.fliphtml5.com/OracleProto/OracleProto/)
+View Our Paper: [arXiv](http://arxiv.org/abs/2605.03762)
 
 ---
 
@@ -153,6 +151,7 @@ If you use this project in your research, please cite our paper:
 @article{OracleProto,
   title={OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking},
   author={Yiding Ma, Chengyun Ruan, Kaibo Huang, Zhongliang Yang, Linna Zhou},
+  journal={arXiv preprint arXiv:2605.03762},
   year={2026}
 }
 ```
