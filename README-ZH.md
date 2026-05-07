@@ -63,6 +63,13 @@ forecast_eval_set_example.db         # 样例数据集
 ### 2.1 环境
 
 ```bash
+uv sync
+source .venv/bin/activate
+```
+
+或
+
+```bash
 conda env create -f environment.yml
 conda activate oracleproto
 ```

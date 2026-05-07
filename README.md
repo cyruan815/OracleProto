@@ -63,6 +63,13 @@ forecast_eval_set_example.db         # bundled example dataset
 ### 2.1 Environment
 
 ```bash
+uv sync
+source .venv/bin/activate
+```
+
+or
+
+```bash
 conda env create -f environment.yml
 conda activate oracleproto
 ```
