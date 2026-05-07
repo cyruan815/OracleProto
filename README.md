@@ -62,12 +62,14 @@ forecast_eval_set_example.db         # bundled example dataset
 
 ### 2.1 Environment
 
+Use `uv` :
+
 ```bash
 uv sync
 source .venv/bin/activate
 ```
 
-or
+or use `Conda` :
 
 ```bash
 conda env create -f environment.yml
