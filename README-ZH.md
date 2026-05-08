@@ -4,6 +4,16 @@
 
 <em>通过知识截止与时间掩码，对 LLM 原生预测能力进行基准评测的可复现框架</em>
 
+$\Large \text{预测} = \text{信息搜集} \times \text{证据整合} \times \text{情势研判} \times \text{行动决策}$
+
+传统基准考的是“你记得住答案吗”
+<br>
+OracleProto 问的是“你能预测未来吗”
+
+<b>愿每一次预测都可复现，愿 AI 真正走向辅助决策</b>
+<br>
+服务于每一个人对美好生活的判断与选择
+
 ![GitHub License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)
 ![Python Version](https://img.shields.io/badge/Python-3.12-brightgreen?style=for-the-badge)
 
@@ -27,14 +37,17 @@
 
 <div align="center">
 
-<img src="static/images/Framework.png" alt="Framework of OracleProto" width="100%">
+<img src="static/images/Framework.png" alt="OracleProto 框架图" width="100%">
 
 OracleProto 框架图
+
+<img src="static/images/preview/2-ZH.png" alt="OracleProto 在线排行榜一览" width="100%">
+
+OracleProto 在线排行榜速览
 
 </div>
 
 ---
-
 ## 1. 代码结构
 
 ```

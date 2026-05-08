@@ -4,6 +4,14 @@
 
 <em>A reproducible framework for benchmarking LLM native forecasting via knowledge cutoff and temporal masking</em>
 
+$\Large \text{Forecasting} = \text{Gathering} \times \text{Synthesis} \times \text{Judgment} \times \text{Decision}$
+
+Traditional benchmarks ask: “Can you recall the answer?”<br>
+OracleProto asks: “Can you predict the future?”
+
+<b>May every forecast be reproducible, may AI truly become decision support</b><br>
+In service of every person’s judgments and choices for a good life
+
 ![GitHub License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)
 ![Python Version](https://img.shields.io/badge/Python-3.12-brightgreen?style=for-the-badge)
 
@@ -30,6 +38,10 @@ Visit Our Leaderboards: [oracleproto.pages.dev](https://oracleproto.pages.dev)
 <img src="static/images/Framework.png" alt="Framework of OracleProto" width="100%">
 
 Framework of OracleProto
+
+<img src="static/images/preview/2-EN.png" alt="Online Leaderboard Overview of OracleProto" width="100%">
+
+Online Leaderboard Overview of OracleProto
 
 </div>
 
