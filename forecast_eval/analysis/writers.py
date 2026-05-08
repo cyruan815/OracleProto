@@ -310,50 +310,41 @@ def _write_per_model_composite_csv(
 
 def _write_composite_meta_json(
     path: Path,
-    qtype_report: CompositeReport | None,
-    ctype_report: CompositeReport | None,
+    report: CompositeReport,
 ) -> Path:
     """Audit trail: write a weights snapshot plus every (model, metric)'s
     buckets_used / weights_used_normalized / value / bucket_values.
 
-    Coexists with the CSVs in the same analysis directory; for any column
-    in the CSV, the JSON shows which buckets the composite actually used,
-    the normalized weights, and the raw per-bucket slice values.
+    Coexists with ``per_model_composite.csv`` in the same analysis directory;
+    for any column in the CSV, the JSON shows which buckets the composite
+    actually used, the normalized weights, and the raw per-bucket slice
+    values.
     """
-
-    def _serialize_report(rep: CompositeReport) -> dict[str, Any]:
-        per_model: dict[str, dict[str, Any]] = {}
-        for model in sorted(rep.per_model.keys()):
-            per_metric_out: dict[str, Any] = {}
-            for metric, info in sorted(rep.per_model[model].items()):
-                per_metric_out[metric] = {
-                    "value": _round(info.value),
-                    "buckets_used": list(info.buckets_used),
-                    "weights_used_normalized": {
-                        b: round(w, 6)
-                        for b, w in info.weights_used_normalized.items()
-                    },
-                    "bucket_values": {
-                        b: (_round(v) if isinstance(v, float) else v)
-                        for b, v in info.bucket_values.items()
-                    },
-                    "weights_kind": info.weights_kind,
-                }
-            per_model[model] = per_metric_out
-        return {
-            "dimension": rep.dimension,
-            "weights_default": dict(rep.weights_default),
-            "overrides": {
-                m: dict(sub) for m, sub in rep.overrides.items()
-            },
-            "per_model": per_model,
-        }
-
-    payload: dict[str, Any] = {}
-    if qtype_report is not None:
-        payload["question_type"] = _serialize_report(qtype_report)
-    if ctype_report is not None:
-        payload["choice_type"] = _serialize_report(ctype_report)
+    per_model: dict[str, dict[str, Any]] = {}
+    for model in sorted(report.per_model.keys()):
+        per_metric_out: dict[str, Any] = {}
+        for metric, info in sorted(report.per_model[model].items()):
+            per_metric_out[metric] = {
+                "value": _round(info.value),
+                "buckets_used": list(info.buckets_used),
+                "weights_used_normalized": {
+                    b: round(w, 6)
+                    for b, w in info.weights_used_normalized.items()
+                },
+                "bucket_values": {
+                    b: (_round(v) if isinstance(v, float) else v)
+                    for b, v in info.bucket_values.items()
+                },
+                "weights_kind": info.weights_kind,
+            }
+        per_model[model] = per_metric_out
+    payload: dict[str, Any] = {
+        "weights_default": dict(report.weights_default),
+        "overrides": {
+            m: dict(sub) for m, sub in report.overrides.items()
+        },
+        "per_model": per_model,
+    }
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -514,31 +505,22 @@ def _write_overall_json(
     run_id: str,
     sampling_n_by_model: dict[str, int],
     per_model: dict[str, Aggregate],
-    per_model_by_qtype: dict[str, dict[str, Aggregate]],
-    per_model_by_ctype: dict[str, dict[str, Aggregate]],
+    per_model_by_difficulty: dict[str, dict[str, Aggregate]],
     error_breakdown: dict[str, tuple[int, Counter]],
     probabilistic_per_model: dict[str, ModelProbabilisticAggregate] | None = None,
-    probabilistic_by_qtype: (
-        dict[str, dict[str, ModelProbabilisticAggregate]] | None
-    ) = None,
-    probabilistic_by_ctype: (
+    probabilistic_by_difficulty: (
         dict[str, dict[str, ModelProbabilisticAggregate]] | None
     ) = None,
     analysis_schema: str | None = None,
-    composite_qtype: CompositeReport | None = None,
-    composite_ctype: CompositeReport | None = None,
+    composite: CompositeReport | None = None,
 ) -> Path:
     payload: dict[str, Any] = {
         "run_id": run_id,
         "sampling_n_by_model": sampling_n_by_model,
         "per_model": {m: agg.as_ordered_dict() for m, agg in per_model.items()},
-        "per_model_by_question_type": {
+        "per_model_by_difficulty": {
             m: {k: agg.as_ordered_dict() for k, agg in by_k.items()}
-            for m, by_k in per_model_by_qtype.items()
-        },
-        "per_model_by_choice_type": {
-            m: {k: agg.as_ordered_dict() for k, agg in by_k.items()}
-            for m, by_k in per_model_by_ctype.items()
+            for m, by_k in per_model_by_difficulty.items()
         },
         "error_breakdown": {
             m: {"total_samples": total, "counts": dict(sorted(counter.items()))}
@@ -548,44 +530,33 @@ def _write_overall_json(
     if probabilistic_per_model is not None:
         payload["probabilistic"] = {
             "per_model": {m: _prob_dict(agg) for m, agg in probabilistic_per_model.items()},
-            "per_model_by_question_type": {
+            "per_model_by_difficulty": {
                 m: {k: _prob_dict(agg) for k, agg in by_k.items()}
-                for m, by_k in (probabilistic_by_qtype or {}).items()
-            },
-            "per_model_by_choice_type": {
-                m: {k: _prob_dict(agg) for k, agg in by_k.items()}
-                for m, by_k in (probabilistic_by_ctype or {}).items()
+                for m, by_k in (probabilistic_by_difficulty or {}).items()
             },
         }
     if analysis_schema is not None:
         payload["analysis_schema"] = analysis_schema
-    if composite_qtype is not None or composite_ctype is not None:
-        payload["composite"] = {}
-        for tag, rep in (
-            ("question_type", composite_qtype),
-            ("choice_type", composite_ctype),
-        ):
-            if rep is None:
-                continue
-            payload["composite"][tag] = {
-                "weights_default": dict(rep.weights_default),
-                "overrides": {m: dict(sub) for m, sub in rep.overrides.items()},
-                "per_model": {
-                    model: {
-                        metric: {
-                            "value": _round(info.value),
-                            "buckets_used": list(info.buckets_used),
-                            "weights_used_normalized": {
-                                b: round(w, 6)
-                                for b, w in info.weights_used_normalized.items()
-                            },
-                            "weights_kind": info.weights_kind,
-                        }
-                        for metric, info in sorted(per_metric.items())
+    if composite is not None:
+        payload["composite"] = {
+            "weights_default": dict(composite.weights_default),
+            "overrides": {m: dict(sub) for m, sub in composite.overrides.items()},
+            "per_model": {
+                model: {
+                    metric: {
+                        "value": _round(info.value),
+                        "buckets_used": list(info.buckets_used),
+                        "weights_used_normalized": {
+                            b: round(w, 6)
+                            for b, w in info.weights_used_normalized.items()
+                        },
+                        "weights_kind": info.weights_kind,
                     }
-                    for model, per_metric in sorted(rep.per_model.items())
-                },
-            }
+                    for metric, info in sorted(per_metric.items())
+                }
+                for model, per_metric in sorted(composite.per_model.items())
+            },
+        }
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",

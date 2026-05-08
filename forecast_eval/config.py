@@ -13,14 +13,15 @@ _PLACEHOLDER_TOKENS = {"REPLACE_ME", "CHANGEME", "PUT_YOUR_KEY_HERE"}
 _RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{4}$")
 _SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# composite-score-by-subtype: subtype bucket constants. `question_type` comes
-# from the questions table CHECK constraint (`yes_no` / `binary_named` / `multiple_choice`);
-# `choice_type` same table (`single` / `multi`). A frozenset is sufficient for validation;
+# Composite difficulty buckets. The four-bucket nested key set comes from
+# factorising the question-type axis (yes_no / binary_named / multiple_choice)
+# by the within-mc answering-mode axis (single / multi); see
+# ``forecast_eval.analysis.composite.bucket_of`` for the (question_type,
+# choice_type) -> bucket mapping. A frozenset is sufficient for validation;
 # an enum class is not needed.
-COMPOSITE_QTYPE_BUCKETS: frozenset[str] = frozenset(
-    {"yes_no", "binary_named", "multiple_choice"}
+COMPOSITE_BUCKETS: frozenset[str] = frozenset(
+    {"yes_no", "binary_named", "mc_single", "mc_multi"}
 )
-COMPOSITE_CTYPE_BUCKETS: frozenset[str] = frozenset({"single", "multi"})
 
 
 def _parse_csv(raw: str | list[Any] | None) -> list[str]:
@@ -403,32 +404,31 @@ class Settings(BaseSettings):
     # Manual version label; sha256(prompt_template) is auto-hashed; this is a human-readable label.
     LEAK_DETECTOR_PROMPT_VERSION: str = "v1"
 
-    # -------- Composite score weights (composite-score-by-subtype) --------
-    # Composite score weighted by subtype: for all metrics (all columns of per_model_summary) on two dimensions
-    # independently perform "compute per bucket first -> synthesize by weight -> exclude missing buckets and renormalize".
-    # Writes runs/{run_id}/analysis/per_model_composite_by_question_type.csv
-    # and .../per_model_composite_by_choice_type.csv. The legacy per_model_summary.csv and
-    # per_model_by_question_type.csv keep their original "all questions mixed" semantics unchanged.
-    #
-    # Default weights follow the "hard questions discriminate more" principle: yes_no/binary_named at 0.15 each,
-    # multiple_choice at 0.70; single 0.40, multi 0.60.
-    COMPOSITE_WEIGHTS_QTYPE: Annotated[dict[str, float], NoDecode] = Field(
+    # -------- Composite difficulty coefficients --------
+    # The composite difficulty coefficient factorises along two orthogonal
+    # axes: a question-type prior (0.15, 0.15, 0.70) over
+    # {yes_no, binary_named, multiple_choice} and a within-mc answering-mode
+    # split (0.40, 0.60) over {single, multi}. Multiplying the two yields the
+    # four scoring buckets {yes_no, binary_named, mc_single, mc_multi} with
+    # weights (0.15, 0.15, 0.28, 0.42). For all metrics (all columns of
+    # per_model_summary) the analysis layer applies "compute per bucket ->
+    # synthesise by weight -> drop missing buckets and renormalise", writing
+    # runs/{run_id}/analysis/per_model_composite.csv. The legacy
+    # per_model_summary.csv keeps its "all questions mixed" semantics.
+    COMPOSITE_WEIGHTS: Annotated[dict[str, float], NoDecode] = Field(
         default_factory=lambda: {
             "yes_no": 0.15,
             "binary_named": 0.15,
-            "multiple_choice": 0.70,
+            "mc_single": 0.28,
+            "mc_multi": 0.42,
         }
     )
-    COMPOSITE_WEIGHTS_CTYPE: Annotated[dict[str, float], NoDecode] = Field(
-        default_factory=lambda: {"single": 0.40, "multi": 0.60}
-    )
-    # Per-metric overrides: of the form ``"fss=yes_no=0.05,binary_named=0.05,multiple_choice=0.90;
-    # cohen_kappa=..."``. Defaults fall back to the global defaults; misspelled metric names (not in
-    # _SUMMARY_FIELDS + probability-family whitelist) are raised at runtime by analysis.composite.
-    COMPOSITE_WEIGHT_OVERRIDES_QTYPE: Annotated[
-        dict[str, dict[str, float]], NoDecode
-    ] = Field(default_factory=dict)
-    COMPOSITE_WEIGHT_OVERRIDES_CTYPE: Annotated[
+    # Per-metric overrides: of the form ``"fss=yes_no=0.05,binary_named=0.05,
+    # mc_single=0.20,mc_multi=0.70;cohen_kappa=..."``. Defaults fall back to
+    # the global defaults; misspelled metric names (not in _SUMMARY_FIELDS +
+    # probability-family whitelist) are raised at runtime by
+    # analysis.composite.
+    COMPOSITE_WEIGHT_OVERRIDES: Annotated[
         dict[str, dict[str, float]], NoDecode
     ] = Field(default_factory=dict)
 
@@ -539,54 +539,33 @@ class Settings(BaseSettings):
     def _parse_omit_sampling_fields_field(cls, v: Any) -> dict[str, list[str]]:
         return _parse_omit_sampling_fields(v)
 
-    @field_validator("COMPOSITE_WEIGHTS_QTYPE", mode="before")
+    @field_validator("COMPOSITE_WEIGHTS", mode="before")
     @classmethod
-    def _parse_composite_weights_qtype(cls, v: Any) -> dict[str, float]:
+    def _parse_composite_weights(cls, v: Any) -> dict[str, float]:
         # Empty string is treated as "use default dict" - pydantic field default_factory already
         # provides the complete default weights; we only parse when the user explicitly sets a value.
         if v is None or v == "":
             return {
                 "yes_no": 0.15,
                 "binary_named": 0.15,
-                "multiple_choice": 0.70,
+                "mc_single": 0.28,
+                "mc_multi": 0.42,
             }
         return _parse_weights_dict(
             v,
-            allowed_buckets=COMPOSITE_QTYPE_BUCKETS,
-            field_name="COMPOSITE_WEIGHTS_QTYPE",
+            allowed_buckets=COMPOSITE_BUCKETS,
+            field_name="COMPOSITE_WEIGHTS",
         )
 
-    @field_validator("COMPOSITE_WEIGHTS_CTYPE", mode="before")
+    @field_validator("COMPOSITE_WEIGHT_OVERRIDES", mode="before")
     @classmethod
-    def _parse_composite_weights_ctype(cls, v: Any) -> dict[str, float]:
-        if v is None or v == "":
-            return {"single": 0.40, "multi": 0.60}
-        return _parse_weights_dict(
-            v,
-            allowed_buckets=COMPOSITE_CTYPE_BUCKETS,
-            field_name="COMPOSITE_WEIGHTS_CTYPE",
-        )
-
-    @field_validator("COMPOSITE_WEIGHT_OVERRIDES_QTYPE", mode="before")
-    @classmethod
-    def _parse_composite_overrides_qtype(
+    def _parse_composite_overrides(
         cls, v: Any
     ) -> dict[str, dict[str, float]]:
         return _parse_overrides_dict(
             v,
-            allowed_buckets=COMPOSITE_QTYPE_BUCKETS,
-            field_name="COMPOSITE_WEIGHT_OVERRIDES_QTYPE",
-        )
-
-    @field_validator("COMPOSITE_WEIGHT_OVERRIDES_CTYPE", mode="before")
-    @classmethod
-    def _parse_composite_overrides_ctype(
-        cls, v: Any
-    ) -> dict[str, dict[str, float]]:
-        return _parse_overrides_dict(
-            v,
-            allowed_buckets=COMPOSITE_CTYPE_BUCKETS,
-            field_name="COMPOSITE_WEIGHT_OVERRIDES_CTYPE",
+            allowed_buckets=COMPOSITE_BUCKETS,
+            field_name="COMPOSITE_WEIGHT_OVERRIDES",
         )
 
     @field_validator("TAVILY_INCLUDE_RAW_CONTENT", mode="before")
@@ -830,78 +809,44 @@ class Settings(BaseSettings):
                     "LEAK_DETECTOR_MODEL still holds a placeholder token; "
                     "fill a real model slug in .env"
                 )
-        # composite-score-by-subtype post-validation: field_validator (mode=before) does not handle
-        # dicts produced directly by default_factory, nor values injected via model_copy(update=...);
-        # we run through again here to guard against in-code-constructed Settings.
-        for bucket, weight in self.COMPOSITE_WEIGHTS_QTYPE.items():
-            if bucket not in COMPOSITE_QTYPE_BUCKETS:
+        # Composite difficulty post-validation: field_validator (mode=before)
+        # does not handle dicts produced directly by default_factory, nor
+        # values injected via model_copy(update=...); we run through again
+        # here to guard against in-code-constructed Settings.
+        for bucket, weight in self.COMPOSITE_WEIGHTS.items():
+            if bucket not in COMPOSITE_BUCKETS:
                 raise ValueError(
-                    f"COMPOSITE_WEIGHTS_QTYPE bucket {bucket!r} not in "
-                    f"{sorted(COMPOSITE_QTYPE_BUCKETS)}"
+                    f"COMPOSITE_WEIGHTS bucket {bucket!r} not in "
+                    f"{sorted(COMPOSITE_BUCKETS)}"
                 )
             if weight < 0:
                 raise ValueError(
-                    f"COMPOSITE_WEIGHTS_QTYPE[{bucket}] must be >= 0; got {weight}"
+                    f"COMPOSITE_WEIGHTS[{bucket}] must be >= 0; got {weight}"
                 )
-        if not any(w > 0 for w in self.COMPOSITE_WEIGHTS_QTYPE.values()):
+        if not any(w > 0 for w in self.COMPOSITE_WEIGHTS.values()):
             raise ValueError(
-                "COMPOSITE_WEIGHTS_QTYPE requires at least one weight > 0 "
+                "COMPOSITE_WEIGHTS requires at least one weight > 0 "
                 "(otherwise composite score has no defined denominator)"
             )
-        for bucket, weight in self.COMPOSITE_WEIGHTS_CTYPE.items():
-            if bucket not in COMPOSITE_CTYPE_BUCKETS:
-                raise ValueError(
-                    f"COMPOSITE_WEIGHTS_CTYPE bucket {bucket!r} not in "
-                    f"{sorted(COMPOSITE_CTYPE_BUCKETS)}"
-                )
-            if weight < 0:
-                raise ValueError(
-                    f"COMPOSITE_WEIGHTS_CTYPE[{bucket}] must be >= 0; got {weight}"
-                )
-        if not any(w > 0 for w in self.COMPOSITE_WEIGHTS_CTYPE.values()):
-            raise ValueError(
-                "COMPOSITE_WEIGHTS_CTYPE requires at least one weight > 0"
-            )
-        for metric, sub in self.COMPOSITE_WEIGHT_OVERRIDES_QTYPE.items():
+        for metric, sub in self.COMPOSITE_WEIGHT_OVERRIDES.items():
             if not metric:
                 raise ValueError(
-                    "COMPOSITE_WEIGHT_OVERRIDES_QTYPE has an empty metric name"
+                    "COMPOSITE_WEIGHT_OVERRIDES has an empty metric name"
                 )
             for bucket, weight in sub.items():
-                if bucket not in COMPOSITE_QTYPE_BUCKETS:
+                if bucket not in COMPOSITE_BUCKETS:
                     raise ValueError(
-                        f"COMPOSITE_WEIGHT_OVERRIDES_QTYPE[{metric}] bucket "
-                        f"{bucket!r} not in {sorted(COMPOSITE_QTYPE_BUCKETS)}"
+                        f"COMPOSITE_WEIGHT_OVERRIDES[{metric}] bucket "
+                        f"{bucket!r} not in {sorted(COMPOSITE_BUCKETS)}"
                     )
                 if weight < 0:
                     raise ValueError(
-                        f"COMPOSITE_WEIGHT_OVERRIDES_QTYPE[{metric}][{bucket}] "
+                        f"COMPOSITE_WEIGHT_OVERRIDES[{metric}][{bucket}] "
                         f"must be >= 0; got {weight}"
                     )
             if sub and not any(w > 0 for w in sub.values()):
                 raise ValueError(
-                    f"COMPOSITE_WEIGHT_OVERRIDES_QTYPE[{metric}] requires at "
-                    "least one weight > 0"
-                )
-        for metric, sub in self.COMPOSITE_WEIGHT_OVERRIDES_CTYPE.items():
-            if not metric:
-                raise ValueError(
-                    "COMPOSITE_WEIGHT_OVERRIDES_CTYPE has an empty metric name"
-                )
-            for bucket, weight in sub.items():
-                if bucket not in COMPOSITE_CTYPE_BUCKETS:
-                    raise ValueError(
-                        f"COMPOSITE_WEIGHT_OVERRIDES_CTYPE[{metric}] bucket "
-                        f"{bucket!r} not in {sorted(COMPOSITE_CTYPE_BUCKETS)}"
-                    )
-                if weight < 0:
-                    raise ValueError(
-                        f"COMPOSITE_WEIGHT_OVERRIDES_CTYPE[{metric}][{bucket}] "
-                        f"must be >= 0; got {weight}"
-                    )
-            if sub and not any(w > 0 for w in sub.values()):
-                raise ValueError(
-                    f"COMPOSITE_WEIGHT_OVERRIDES_CTYPE[{metric}] requires at "
+                    f"COMPOSITE_WEIGHT_OVERRIDES[{metric}] requires at "
                     "least one weight > 0"
                 )
         return self

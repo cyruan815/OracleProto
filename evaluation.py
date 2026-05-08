@@ -486,12 +486,11 @@ async def _run_async(
         try:
             written = analysis.run_analysis(
                 run_dir,
-                # composite-score-by-subtype: pass through the subtype weights from .env
-                # to the analysis layer; the analysis module does not read .env itself, evaluation supplies them.
-                composite_weights_qtype=settings.COMPOSITE_WEIGHTS_QTYPE,
-                composite_weights_ctype=settings.COMPOSITE_WEIGHTS_CTYPE,
-                composite_overrides_qtype=settings.COMPOSITE_WEIGHT_OVERRIDES_QTYPE,
-                composite_overrides_ctype=settings.COMPOSITE_WEIGHT_OVERRIDES_CTYPE,
+                # Pass through the difficulty-weighted composite settings from
+                # .env to the analysis layer; the analysis module does not
+                # read .env itself, evaluation supplies them.
+                composite_weights=settings.COMPOSITE_WEIGHTS,
+                composite_overrides=settings.COMPOSITE_WEIGHT_OVERRIDES,
             )
             logger.info(
                 "[run={}] analysis written: {}",

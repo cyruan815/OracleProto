@@ -1,23 +1,31 @@
-"""Composite score weighted by subtype (composite-score-by-subtype).
+"""Composite score weighted by composite difficulty coefficient.
 
 This module hosts the aggregation logic for every data column in
-``per_model_summary.csv``, applied independently along two dimensions:
-"compute per bucket -> aggregate by weights -> drop missing buckets and
-renormalize".
+``per_model_summary.csv``: "compute per bucket -> aggregate by weights ->
+drop missing buckets and renormalize".
 
-## Dimensions
+## Buckets
 
-* ``question_type``: ``yes_no`` / ``binary_named`` / ``multiple_choice``
-* ``choice_type``:   ``single`` / ``multi``
+The dataset is partitioned by a *composite difficulty coefficient* that
+factorises along two orthogonal axes. A question-type prior assigns
+weights $(0.15, 0.15, 0.70)$ to ``{yes_no, binary_named, multiple_choice}``,
+and within the multiple_choice family an answering-mode split
+$(0.40, 0.60)$ further partitions ``{single, multi}``. Multiplying the
+two yields the four scoring buckets
 
-Each dimension is aggregated independently; they do not interact
-(``multiple_choice`` internally contains both single and multi, so the two
-dimensions are not orthogonal — but this is exactly what users mean by
-"two ways to slice").
+* ``yes_no``        — weight 0.15
+* ``binary_named``  — weight 0.15
+* ``mc_single``     — weight 0.28
+* ``mc_multi``      — weight 0.42
+
+summing to one. ``yes_no`` and ``binary_named`` carry a degenerate
+single-mode share of 1, so their composite coefficients coincide with
+their question-type priors. Bucket key for a sample is derived from
+``(question_type, choice_type)`` by :func:`bucket_of`.
 
 ## Formula
 
-For each (model, dimension, metric):
+For each (model, metric):
 
 $$
 \\text{composite}_{m} = \\frac{\\sum_{b \\in B_{\\text{valid}}} w_{m,b} \\cdot v_{m,b}}{\\sum_{b \\in B_{\\text{valid}}} w_{m,b}}
@@ -31,9 +39,8 @@ where :math:`B_{\\text{valid}}` is the set of buckets under that
 
 Output columns correspond one-to-one with ``writers._SUMMARY_FIELDS``
 (minus the metadata columns ``model`` / ``sampling_n``) — meaning that
-reading ``per_model_composite_by_question_type.csv`` directly gives the
-"summary table weighted by subtype", and downstream scripts only need to
-swap the file path.
+reading ``per_model_composite.csv`` directly gives the difficulty-weighted
+summary table, and downstream scripts only need to swap the file path.
 
 ## Per-bucket slicing for the discrete family
 
@@ -42,10 +49,7 @@ swap the file path.
 top of ``__init__.py`` (written into ``per_model_summary.csv``), but for
 weighted bucket aggregation they must be sliced per bucket before being
 computed — :func:`slice_v5_metrics_by_bucket` in this module takes care of
-that. Its results **also** flow back into ``writers._write_slice_csv``, so
-the two detail tables ``per_model_by_*.csv`` carry these columns as well
-(without disturbing the existing accuracy + probabilistic column order —
-they are simply appended at the tail).
+that.
 """
 from __future__ import annotations
 
@@ -58,15 +62,41 @@ from .flatten import SampleRow
 from .proper_score import ModelProbabilisticAggregate
 
 
-# Default weights (same values as ``config.Settings`` defaults; used as a
-# zero-config fallback when ``run_analysis`` did not receive Settings).
-# Validation is handled on the Settings side.
-DEFAULT_WEIGHTS_QTYPE: dict[str, float] = {
+# Composite difficulty coefficients. The four-bucket nested weights expand
+# the question-type prior (0.15/0.15/0.70) by the within-mc answering-mode
+# split (0.40/0.60), so 0.70 * 0.40 = 0.28 and 0.70 * 0.60 = 0.42.
+DEFAULT_WEIGHTS: dict[str, float] = {
     "yes_no": 0.15,
     "binary_named": 0.15,
-    "multiple_choice": 0.70,
+    "mc_single": 0.28,
+    "mc_multi": 0.42,
 }
-DEFAULT_WEIGHTS_CTYPE: dict[str, float] = {"single": 0.40, "multi": 0.60}
+
+# Allowed bucket keys; mirrored in ``config.COMPOSITE_BUCKETS`` for
+# Settings-side validation (so the config module does not have to import
+# this module).
+COMPOSITE_BUCKETS: frozenset[str] = frozenset(DEFAULT_WEIGHTS)
+
+
+def bucket_of(question_type: str, choice_type: str) -> str:
+    """Map a sample's ``(question_type, choice_type)`` to a composite bucket key.
+
+    ``yes_no`` and ``binary_named`` collapse to themselves regardless of
+    ``choice_type`` (structurally always single). ``multiple_choice`` splits
+    into ``mc_single`` / ``mc_multi`` by the sample's ``choice_type``.
+    """
+    if question_type in ("yes_no", "binary_named"):
+        return question_type
+    if question_type == "multiple_choice":
+        if choice_type in ("single", "multi"):
+            return f"mc_{choice_type}"
+        raise ValueError(
+            f"bucket_of: choice_type must be 'single' or 'multi' for "
+            f"multiple_choice; got {choice_type!r}"
+        )
+    raise ValueError(
+        f"bucket_of: unexpected question_type {question_type!r}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -78,7 +108,7 @@ DEFAULT_WEIGHTS_CTYPE: dict[str, float] = {"single": 0.40, "multi": 0.60}
 # ``sampling_n``); ``tests/test_composite_score.py`` has an alignment
 # assertion to prevent the two sides from drifting. A misspelled metric name
 # or one not on the allowlist -> ``compute_composite`` raises at the entry,
-# because this must be a user typo in ``COMPOSITE_WEIGHT_OVERRIDES_*``.
+# because this must be a user typo in ``COMPOSITE_WEIGHT_OVERRIDES``.
 KNOWN_METRICS: frozenset[str] = frozenset(
     {
         # accuracy.Aggregate.as_ordered_dict()
@@ -155,14 +185,10 @@ def slice_v5_metrics_by_bucket(
     *,
     key_fn: Callable[[SampleRow], str],
 ) -> dict[str, V5SliceResult]:
-    """Recompute the discrete-family metrics on each bucket grouped by
-    ``key_fn(sample)``.
+    """Recompute the discrete-family metrics on each bucket grouped by ``key_fn(sample)``.
 
-    The top of ``__init__.py`` invokes this once with
-    ``key_fn=lambda s: s.question_type`` and once with
-    ``key_fn=lambda s: s.choice_type``. Empty buckets (no samples) are
-    silently skipped; per-bucket None slots are handled by the caller during
-    aggregation via "drop and renormalize".
+    Empty buckets (no samples) are silently skipped; per-bucket None slots
+    are handled by the caller during aggregation via "drop and renormalize".
     """
     by_bucket: dict[str, list[SampleRow]] = {}
     for s in samples:
@@ -182,8 +208,8 @@ def slice_v5_metrics_by_bucket(
         kappa = cohen_kappa(by_q, gt_map)
         # hamming_score is only defined for multi (accuracy.hamming_score
         # internally skips single), so it must be None under the yes_no /
-        # binary_named buckets; this is the expected behavior — that bucket
-        # is dropped during aggregation.
+        # binary_named / mc_single buckets; this is the expected behavior —
+        # that bucket is dropped during aggregation.
         hamming_v = hamming_score(bucket_samples, gt_map)
         fss_result = fss(bucket_samples, gt_map)
         consistency = build_consistency_report(
@@ -196,6 +222,11 @@ def slice_v5_metrics_by_bucket(
             consistency=consistency,
         )
     return out
+
+
+def difficulty_bucket_key(s: SampleRow) -> str:
+    """``key_fn`` for :func:`slice_v5_metrics_by_bucket` and friends."""
+    return bucket_of(s.question_type, s.choice_type)
 
 
 # --------------------------------------------------------------------------- #
@@ -376,9 +407,8 @@ class CompositeMetricInfo:
 
 @dataclass(frozen=True)
 class CompositeReport:
-    """Aggregation result under one dimension (``question_type`` or ``choice_type``)."""
+    """Aggregation result under the difficulty-weighted composite."""
 
-    dimension: str
     weights_default: dict[str, float]
     overrides: dict[str, dict[str, float]]
     per_model: dict[str, dict[str, CompositeMetricInfo]] = field(
@@ -433,27 +463,21 @@ def _weighted_average(
 
 def compute_composite(
     *,
-    dimension: str,
     bucket_values_per_model: dict[str, dict[str, dict[str, float | None]]],
     weights_default: dict[str, float],
     overrides: dict[str, dict[str, float]],
 ) -> CompositeReport:
-    """Compute the weighted composite for each (model, metric) and return a :class:`CompositeReport`.
+    """Compute the difficulty-weighted composite for each (model, metric) and return a :class:`CompositeReport`.
 
     A misspelled metric name (not in :data:`KNOWN_METRICS`) raises here —
     this is the redemption point of the design's promise that "a misspelled
     metric name must be surfaced to the user".
     """
-    if dimension not in ("question_type", "choice_type"):
-        raise ValueError(
-            f"compute_composite: dimension must be 'question_type' or "
-            f"'choice_type'; got {dimension!r}"
-        )
     for metric in overrides:
         if metric not in KNOWN_METRICS:
             raise ValueError(
-                f"COMPOSITE_WEIGHT_OVERRIDES_{dimension.upper()}[{metric!r}] "
-                f"is not a known metric; pick from {sorted(KNOWN_METRICS)}"
+                f"COMPOSITE_WEIGHT_OVERRIDES[{metric!r}] is not a known "
+                f"metric; pick from {sorted(KNOWN_METRICS)}"
             )
 
     per_model: dict[str, dict[str, CompositeMetricInfo]] = {}
@@ -477,7 +501,6 @@ def compute_composite(
         per_model[model] = per_metric_info
 
     return CompositeReport(
-        dimension=dimension,
         weights_default=dict(weights_default),
         overrides={m: dict(sub) for m, sub in overrides.items()},
         per_model=per_model,
@@ -485,12 +508,14 @@ def compute_composite(
 
 
 __all__ = [
-    "DEFAULT_WEIGHTS_QTYPE",
-    "DEFAULT_WEIGHTS_CTYPE",
+    "DEFAULT_WEIGHTS",
+    "COMPOSITE_BUCKETS",
     "KNOWN_METRICS",
     "V5SliceResult",
     "CompositeMetricInfo",
     "CompositeReport",
+    "bucket_of",
+    "difficulty_bucket_key",
     "slice_v5_metrics_by_bucket",
     "collect_bucket_values",
     "compute_composite",
