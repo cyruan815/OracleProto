@@ -4,7 +4,11 @@
 
 <em>A reproducible framework for benchmarking LLM native forecasting via knowledge cutoff and temporal masking</em>
 
-$$\text{Forecasting} = \text{Gathering} \times \text{Synthesis} \times \text{Judgment} \times \text{Decision}$$
+</div>
+
+$$\Large \text{Forecasting} = \text{Gathering} \times \text{Synthesis} \times \text{Judgment} \times \text{Decision}$$
+
+<div align="center">
 
 Traditional benchmarks ask: “Can you recall the answer?”<br>
 OracleProto asks: “Can you predict the future?”

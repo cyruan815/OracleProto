@@ -4,7 +4,11 @@
 
 <em>通过知识截止与时间掩码，对 LLM 原生预测能力进行基准评测的可复现框架</em>
 
-$$\text{预测} = \text{信息搜集} \times \text{证据整合} \times \text{情势研判} \times \text{行动决策}$$
+</div>
+
+$$\Large \text{预测} = \text{信息搜集} \times \text{证据整合} \times \text{情势研判} \times \text{行动决策}$$
+
+<div align="center">
 
 传统基准考的是“你记得住答案吗”
 <br>
