@@ -206,8 +206,7 @@ def test_run_analysis_produces_all_artefacts(tmp_path: Path) -> None:
     assert {
         "per_model_summary.csv",
         "per_model_summary.md",
-        "per_model_by_question_type.csv",
-        "per_model_by_choice_type.csv",
+        "per_model_by_bucket.csv",
         "error_breakdown.csv",
         "overall.json",
     }.issubset(names)
@@ -287,8 +286,10 @@ def test_overall_json_matches_csv(tmp_path: Path) -> None:
     assert overall["run_id"] == "run1"
     assert set(overall["per_model"]) == {"m/a", "m/b"}
     assert overall["per_model"]["m/a"]["pass_at_1_avg"] == pytest.approx(2 / 6, rel=1e-3)
-    assert set(overall["per_model_by_question_type"]["m/a"]) == {"yes_no", "binary_named", "multiple_choice"}
-    assert set(overall["per_model_by_choice_type"]["m/a"]) == {"single", "multi"}
+    # m/a buckets: q1 (yes_no, single) → yes_no, q2 (binary_named, single) →
+    # binary_named, q3 (multiple_choice, multi) → mc_multi (cutoff-skipped
+    # but still slotted by question_type/choice_type).
+    assert set(overall["per_model_by_difficulty"]["m/a"]) == {"yes_no", "binary_named", "mc_multi"}
 
 
 def test_avg_nudges_used_in_summary(tmp_path: Path) -> None:
