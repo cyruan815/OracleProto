@@ -1,9 +1,9 @@
 """CLI entry: `python -m forecast_eval.analysis RUNS_ROOT/{run_id}`.
 
 Kept as a thin wrapper so `run_analysis` stays importable without argparse
-overhead. composite-score-by-subtype: when ``.env`` is readable, pass the
-subtype weights through to ``run_analysis``; otherwise fall back to default
-weights (synonymous with ``Settings`` defaults).
+overhead. When ``.env`` is readable, pass the composite difficulty weights
+through to ``run_analysis``; otherwise fall back to default weights
+(synonymous with ``Settings`` defaults).
 """
 from __future__ import annotations
 
@@ -30,10 +30,8 @@ def _cli(argv: list[str] | None = None) -> int:
         cfg = None
     if cfg is not None:
         kwargs.update(
-            composite_weights_qtype=cfg.COMPOSITE_WEIGHTS_QTYPE,
-            composite_weights_ctype=cfg.COMPOSITE_WEIGHTS_CTYPE,
-            composite_overrides_qtype=cfg.COMPOSITE_WEIGHT_OVERRIDES_QTYPE,
-            composite_overrides_ctype=cfg.COMPOSITE_WEIGHT_OVERRIDES_CTYPE,
+            composite_weights=cfg.COMPOSITE_WEIGHTS,
+            composite_overrides=cfg.COMPOSITE_WEIGHT_OVERRIDES,
         )
     paths = run_analysis(Path(args.run_dir), **kwargs)
     for p in paths:

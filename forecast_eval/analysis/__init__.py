@@ -45,12 +45,12 @@ from .accuracy import (
 )
 from .aggregation import ShrinkageResult, loo_shrinkage
 from .composite import (
-    DEFAULT_WEIGHTS_CTYPE,
-    DEFAULT_WEIGHTS_QTYPE,
+    DEFAULT_WEIGHTS,
     CompositeReport,
     V5SliceResult,
     collect_bucket_values,
     compute_composite,
+    difficulty_bucket_key,
     slice_v5_metrics_by_bucket,
 )
 from .behavior import (
@@ -265,19 +265,17 @@ def _paired_bootstrap_pairs_by_difficulty(
 def run_analysis(
     run_dir: Path,
     *,
-    composite_weights_qtype: dict[str, float] | None = None,
-    composite_weights_ctype: dict[str, float] | None = None,
-    composite_overrides_qtype: dict[str, dict[str, float]] | None = None,
-    composite_overrides_ctype: dict[str, dict[str, float]] | None = None,
+    composite_weights: dict[str, float] | None = None,
+    composite_overrides: dict[str, dict[str, float]] | None = None,
 ) -> list[Path]:
     """Generate every analysis artefact for the run and return the file paths.
 
-    composite-score-by-subtype: when all four ``composite_*`` parameters are
-    ``None``, fall back to ``composite.DEFAULT_WEIGHTS_*`` + empty overrides
-    (synonymous with ``Settings`` defaults), so unit tests / CLI re-runs can
-    still produce composite output in environments without a ``.env``.
-    ``evaluation.py`` passes the corresponding fields from ``Settings`` through
-    during online evaluation.
+    When ``composite_weights`` / ``composite_overrides`` are ``None``, fall
+    back to ``composite.DEFAULT_WEIGHTS`` + empty overrides (synonymous with
+    ``Settings`` defaults), so unit tests / CLI re-runs can still produce
+    composite output in environments without a ``.env``. ``evaluation.py``
+    passes the corresponding fields from ``Settings`` through during online
+    evaluation.
     """
     run_dir = Path(run_dir)
     manifest_path = run_dir / "manifest.json"
@@ -292,25 +290,15 @@ def run_analysis(
     # "v3 fallback semantics".
     analysis_schema: str | None = manifest.get("analysis_schema")
 
-    # composite-score-by-subtype: resolve weight parameters. None -> default.
-    weights_qtype = (
-        dict(composite_weights_qtype)
-        if composite_weights_qtype is not None
-        else dict(DEFAULT_WEIGHTS_QTYPE)
+    # Resolve weight parameters. None -> default difficulty coefficients.
+    weights = (
+        dict(composite_weights)
+        if composite_weights is not None
+        else dict(DEFAULT_WEIGHTS)
     )
-    weights_ctype = (
-        dict(composite_weights_ctype)
-        if composite_weights_ctype is not None
-        else dict(DEFAULT_WEIGHTS_CTYPE)
-    )
-    overrides_qtype = (
-        {m: dict(sub) for m, sub in composite_overrides_qtype.items()}
-        if composite_overrides_qtype
-        else {}
-    )
-    overrides_ctype = (
-        {m: dict(sub) for m, sub in composite_overrides_ctype.items()}
-        if composite_overrides_ctype
+    overrides = (
+        {m: dict(sub) for m, sub in composite_overrides.items()}
+        if composite_overrides
         else {}
     )
 
@@ -319,8 +307,7 @@ def run_analysis(
     analysis_dir.mkdir(parents=True, exist_ok=True)
 
     per_model_agg: dict[str, Aggregate] = {}
-    per_model_agg_qtype: dict[str, dict[str, Aggregate]] = {}
-    per_model_agg_ctype: dict[str, dict[str, Aggregate]] = {}
+    per_model_agg_difficulty: dict[str, dict[str, Aggregate]] = {}
     per_model_error: dict[str, tuple[int, Counter]] = {}
     per_model_finish_reason: dict[str, Counter] = {}
     sampling_n_by_model: dict[str, int] = {}
@@ -329,8 +316,7 @@ def run_analysis(
     options_map_global: dict[str, list[str]] = {}
 
     summary_payload: dict[str, tuple[int, Aggregate]] = {}
-    slice_qtype_payload: dict[str, tuple[int, dict[str, Aggregate]]] = {}
-    slice_ctype_payload: dict[str, tuple[int, dict[str, Aggregate]]] = {}
+    slice_difficulty_payload: dict[str, tuple[int, dict[str, Aggregate]]] = {}
 
     for model in models:
         db_path = db_dir / model_files[model]
@@ -355,17 +341,16 @@ def run_analysis(
             for qid, opts in options_map.items():
                 options_map_global.setdefault(qid, opts)
             agg = _aggregate(samples, sampling_n, gt_map=gt_map)
-            agg_qtype = _slice_by(samples, lambda s: s.question_type, sampling_n, gt_map)
-            agg_ctype = _slice_by(samples, lambda s: s.choice_type, sampling_n, gt_map)
+            agg_difficulty = _slice_by(
+                samples, difficulty_bucket_key, sampling_n, gt_map,
+            )
             per_model_agg[model] = agg
-            per_model_agg_qtype[model] = agg_qtype
-            per_model_agg_ctype[model] = agg_ctype
+            per_model_agg_difficulty[model] = agg_difficulty
             per_model_error[model] = (len(samples), _error_breakdown(samples))
             per_model_finish_reason[model] = _finish_reason_breakdown(samples)
             samples_by_model[model] = samples
             summary_payload[model] = (sampling_n, agg)
-            slice_qtype_payload[model] = (sampling_n, agg_qtype)
-            slice_ctype_payload[model] = (sampling_n, agg_ctype)
+            slice_difficulty_payload[model] = (sampling_n, agg_difficulty)
         finally:
             conn.close()
 
@@ -399,57 +384,37 @@ def run_analysis(
         )
 
     # ------------------------------------------------------------------ #
-    # composite-score-by-subtype: re-run the discrete family
-    # (FSS / Cohen κ / Hamming / Consistency) on each bucket sliced by
-    # question_type / choice_type. These values are then:
-    #   * fed into ``per_model_by_question_type.csv`` /
-    #     ``per_model_by_choice_type.csv`` (which carry the recomputed
-    #     columns rather than NULL placeholders);
+    # Re-run the discrete family (FSS / Cohen κ / Hamming / Consistency)
+    # on each composite difficulty bucket. These values are then:
+    #   * fed into ``per_model_by_bucket.csv`` (which carries the
+    #     recomputed columns rather than NULL placeholders);
     #   * fed into :func:`compute_composite` for weighted aggregation.
     # ------------------------------------------------------------------ #
-    v5_slice_by_qtype: dict[str, dict[str, V5SliceResult]] = {}
-    v5_slice_by_ctype: dict[str, dict[str, V5SliceResult]] = {}
+    v5_slice_by_difficulty: dict[str, dict[str, V5SliceResult]] = {}
     for model, samples in samples_by_model.items():
-        v5_slice_by_qtype[model] = slice_v5_metrics_by_bucket(
+        v5_slice_by_difficulty[model] = slice_v5_metrics_by_bucket(
             samples, gt_map_global, options_map_global,
-            key_fn=lambda s: s.question_type,
-        )
-        v5_slice_by_ctype[model] = slice_v5_metrics_by_bucket(
-            samples, gt_map_global, options_map_global,
-            key_fn=lambda s: s.choice_type,
+            key_fn=difficulty_bucket_key,
         )
 
     # ------------------------------------------------------------------ #
-    # composite-score-by-subtype: aggregate bucket values -> CompositeReport.
-    # ``per_model_agg_qtype`` / ``per_model_agg_ctype`` are already in
+    # Aggregate bucket values -> CompositeReport.
+    # ``per_model_agg_difficulty`` is already in
     # ``{model: {bucket: Aggregate}}`` form; combined with v5_slice and
-    # prob_report.per_model_by_* they form the input to collect_bucket_values.
+    # prob_report.per_model_by_difficulty it forms the input to
+    # collect_bucket_values.
     # ------------------------------------------------------------------ #
-    bucket_values_qtype = collect_bucket_values(
-        aggregate_slice=per_model_agg_qtype,
-        v5_slice=v5_slice_by_qtype,
-        prob_slice=prob_report.per_model_by_qtype,
+    bucket_values = collect_bucket_values(
+        aggregate_slice=per_model_agg_difficulty,
+        v5_slice=v5_slice_by_difficulty,
+        prob_slice=prob_report.per_model_by_difficulty,
     )
-    bucket_values_ctype = collect_bucket_values(
-        aggregate_slice=per_model_agg_ctype,
-        v5_slice=v5_slice_by_ctype,
-        prob_slice=prob_report.per_model_by_ctype,
-    )
-    composite_qtype: CompositeReport | None = None
-    composite_ctype: CompositeReport | None = None
-    if bucket_values_qtype:
-        composite_qtype = compute_composite(
-            dimension="question_type",
-            bucket_values_per_model=bucket_values_qtype,
-            weights_default=weights_qtype,
-            overrides=overrides_qtype,
-        )
-    if bucket_values_ctype:
-        composite_ctype = compute_composite(
-            dimension="choice_type",
-            bucket_values_per_model=bucket_values_ctype,
-            weights_default=weights_ctype,
-            overrides=overrides_ctype,
+    composite_report: CompositeReport | None = None
+    if bucket_values:
+        composite_report = compute_composite(
+            bucket_values_per_model=bucket_values,
+            weights_default=weights,
+            overrides=overrides,
         )
 
     written: list[Path] = []
@@ -466,40 +431,24 @@ def run_analysis(
             hamming_per_model=hamming_per_model,
             consistency_per_model=consistency_per_model,
         ))
-    if slice_qtype_payload:
+    if slice_difficulty_payload:
         written.append(_write_slice_csv(
-            analysis_dir / "per_model_by_question_type.csv",
-            "question_type",
-            slice_qtype_payload,
-            prob=prob_report.per_model_by_qtype,
-            v5_slice=v5_slice_by_qtype,
+            analysis_dir / "per_model_by_bucket.csv",
+            "bucket",
+            slice_difficulty_payload,
+            prob=prob_report.per_model_by_difficulty,
+            v5_slice=v5_slice_by_difficulty,
         ))
-    if slice_ctype_payload:
-        written.append(_write_slice_csv(
-            analysis_dir / "per_model_by_choice_type.csv",
-            "choice_type",
-            slice_ctype_payload,
-            prob=prob_report.per_model_by_ctype,
-            v5_slice=v5_slice_by_ctype,
-        ))
-    # composite-score-by-subtype: two weighted composite-score summary tables + one audit JSON.
-    if composite_qtype is not None:
+    # Difficulty-weighted composite summary table + one audit JSON.
+    if composite_report is not None:
         written.append(_write_per_model_composite_csv(
-            analysis_dir / "per_model_composite_by_question_type.csv",
-            composite_qtype,
+            analysis_dir / "per_model_composite.csv",
+            composite_report,
             sampling_n_by_model,
         ))
-    if composite_ctype is not None:
-        written.append(_write_per_model_composite_csv(
-            analysis_dir / "per_model_composite_by_choice_type.csv",
-            composite_ctype,
-            sampling_n_by_model,
-        ))
-    if composite_qtype is not None or composite_ctype is not None:
         written.append(_write_composite_meta_json(
             analysis_dir / "composite_meta.json",
-            composite_qtype,
-            composite_ctype,
+            composite_report,
         ))
     if per_model_error:
         written.append(_write_error_breakdown_csv(
@@ -514,15 +463,12 @@ def run_analysis(
         run_id=run_id,
         sampling_n_by_model=sampling_n_by_model,
         per_model=per_model_agg,
-        per_model_by_qtype=per_model_agg_qtype,
-        per_model_by_ctype=per_model_agg_ctype,
+        per_model_by_difficulty=per_model_agg_difficulty,
         error_breakdown=per_model_error,
         probabilistic_per_model=prob_report.per_model,
-        probabilistic_by_qtype=prob_report.per_model_by_qtype,
-        probabilistic_by_ctype=prob_report.per_model_by_ctype,
+        probabilistic_by_difficulty=prob_report.per_model_by_difficulty,
         analysis_schema=analysis_schema,
-        composite_qtype=composite_qtype,
-        composite_ctype=composite_ctype,
+        composite=composite_report,
     ))
 
     # ------------------------------------------------------------------ #

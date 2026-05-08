@@ -187,16 +187,15 @@ def _aggregate_for_subset(
 class ProbabilisticReport:
     """All probabilistic aggregates a single run produces, keyed by model.
 
-    `per_model` is the headline aggregate; `per_model_by_qtype` /
-    `per_model_by_ctype` are slice aggregates for the wider CSVs. Slice
+    `per_model` is the headline aggregate; `per_model_by_difficulty` is the
+    composite-difficulty-bucket slice aggregate for the wider CSV. Slice
     aggregates inherit the same crowd-γ map as the full model — slicing only
     restricts which questions enter the average, not which models contribute
     to the crowd baseline (consistent with paper §A.2's intent).
     """
 
     per_model: dict[str, ModelProbabilisticAggregate]
-    per_model_by_qtype: dict[str, dict[str, ModelProbabilisticAggregate]]
-    per_model_by_ctype: dict[str, dict[str, ModelProbabilisticAggregate]]
+    per_model_by_difficulty: dict[str, dict[str, ModelProbabilisticAggregate]]
     rows_by_model: dict[str, list[_QuestionProbabilityRow]]
 
 
@@ -205,6 +204,8 @@ def build_probabilistic_report(
     gt_map: dict[str, frozenset[str]],
 ) -> ProbabilisticReport:
     """End-to-end: per-model question rows → crowd γ → per-model aggregates."""
+    from .composite import bucket_of
+
     rows_by_model: dict[str, list[_QuestionProbabilityRow]] = {
         m: _build_question_rows_for_model(samples, gt_map)
         for m, samples in samples_by_model.items()
@@ -217,8 +218,7 @@ def build_probabilistic_report(
     uniform_gammas = _build_uniform_gammas(union_rows)
 
     per_model: dict[str, ModelProbabilisticAggregate] = {}
-    per_model_by_qtype: dict[str, dict[str, ModelProbabilisticAggregate]] = {}
-    per_model_by_ctype: dict[str, dict[str, ModelProbabilisticAggregate]] = {}
+    per_model_by_difficulty: dict[str, dict[str, ModelProbabilisticAggregate]] = {}
 
     for m, rows in rows_by_model.items():
         per_model[m] = _aggregate_for_subset(
@@ -227,29 +227,22 @@ def build_probabilistic_report(
             uniform_gammas=uniform_gammas,
         )
 
-        qtype_buckets: dict[str, list[_QuestionProbabilityRow]] = {}
-        ctype_buckets: dict[str, list[_QuestionProbabilityRow]] = {}
+        difficulty_buckets: dict[str, list[_QuestionProbabilityRow]] = {}
         for r in rows:
-            qtype_buckets.setdefault(r.question_type, []).append(r)
-            ctype_buckets.setdefault(r.choice_type, []).append(r)
+            difficulty_buckets.setdefault(
+                bucket_of(r.question_type, r.choice_type), []
+            ).append(r)
 
-        per_model_by_qtype[m] = {
-            qt: _aggregate_for_subset(
+        per_model_by_difficulty[m] = {
+            b: _aggregate_for_subset(
                 rs, crowd_gammas=crowd_gammas[m], uniform_gammas=uniform_gammas,
             )
-            for qt, rs in sorted(qtype_buckets.items())
-        }
-        per_model_by_ctype[m] = {
-            ct: _aggregate_for_subset(
-                rs, crowd_gammas=crowd_gammas[m], uniform_gammas=uniform_gammas,
-            )
-            for ct, rs in sorted(ctype_buckets.items())
+            for b, rs in sorted(difficulty_buckets.items())
         }
 
     return ProbabilisticReport(
         per_model=per_model,
-        per_model_by_qtype=per_model_by_qtype,
-        per_model_by_ctype=per_model_by_ctype,
+        per_model_by_difficulty=per_model_by_difficulty,
         rows_by_model=rows_by_model,
     )
 
