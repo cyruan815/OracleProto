@@ -5,13 +5,6 @@ description = "A reproducible framework for benchmarking LLM native forecasting 
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "MIT"
-authors = [
-    { name = "Yiding Ma", email = "yidingma@bupt.edu.cn" },
-    { name = "Chengyun Ruan", email = "ruanchengyun815@bupt.edu.cn" },
-    { name = "Kaibo Huang", email = "huangkaibo@bupt.edu.cn" },
-    { name = "Zhongliang Yang", email = "yangzl@bupt.edu.cn" },
-    { name = "Linna Zhou" },
-]
 dependencies = [
     "openai>=1.50",
     "tavily-python>=0.5",
