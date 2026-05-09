@@ -100,16 +100,3 @@ forecast_eval_set.db
 forecast_eval_set_smoke.db
 # Note: forecast_eval_set_example.db is intentionally NOT ignored — it is the
 # source dataset shipped with the repo so source_db_hash stays reproducible.
-
-# Local Documentation
-openspec/
-tavily_doc/
-papers/
-repository_doc/
-CLAUDE.md
-Agent.md
-DESIGN.md
-DESIGN-ZH.md
-FRAME.md
-FRAME-ZH.md
-AGENTS.md

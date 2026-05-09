@@ -16,15 +16,6 @@ OracleProto asks: “Can you predict the future?”
 <b>May every forecast be reproducible, may AI truly become decision support</b><br>
 In service of every person’s judgments and choices for a good life
 
-![GitHub License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)
-![Python Version](https://img.shields.io/badge/Python-3.12-brightgreen?style=for-the-badge)
-
-[English](./README.md) | [中文文档](./README-ZH.md) | [Hugging Face](https://huggingface.co/datasets/MaYiding/OracleProto)
-
-View Our Paper: [arXiv](http://arxiv.org/abs/2605.03762)
-
-Visit Our Leaderboards: [oracleproto.pages.dev](https://oracleproto.pages.dev)
-
 </div>
 
 ---
@@ -42,10 +33,6 @@ Visit Our Leaderboards: [oracleproto.pages.dev](https://oracleproto.pages.dev)
 <img src="static/images/Framework.png" alt="Framework of OracleProto" width="100%">
 
 Framework of OracleProto
-
-<img src="static/images/preview/2-EN.png" alt="Online Leaderboard Overview of OracleProto" width="100%">
-
-Online Leaderboard Overview of OracleProto
 
 </div>
 
@@ -147,38 +134,3 @@ composite, …) is recomputed by `forecast_eval/analysis/`, which runs at the en
 ```bash
 python -m forecast_eval.analysis runs/{run_id}
 ```
-
----
-
-## 5. Contact
-
-For questions about code usage, dataset construction, or reproducing results, please reach out to the developers directly:
-- **Yiding Ma**: [yidingma@bupt.edu.cn](mailto:yidingma@bupt.edu.cn)
-- **Chengyun Ruan**: [ruanchengyun815@bupt.edu.cn](mailto:ruanchengyun815@bupt.edu.cn)
-
-For joint research, dataset and benchmark co-development, or paper collaboration, please contact the principal investigators:
-- **Kaibo Huang** (corresponding author): [huangkaibo@bupt.edu.cn](mailto:huangkaibo@bupt.edu.cn)
-- **Zhongliang Yang** (corresponding author): [yangzl@bupt.edu.cn](mailto:yangzl@bupt.edu.cn)
-
----
-
-## 6. Paper
-
-View Our Paper: [arXiv](http://arxiv.org/abs/2605.03762)
-
----
-
-## 7. Citation
-
-If you use this project in your research, please cite our paper:
-
-```
-@article{OracleProto,
-  title={OracleProto: A Reproducible Framework for Benchmarking LLM Native Forecasting via Knowledge Cutoff and Temporal Masking},
-  author={Yiding Ma, Chengyun Ruan, Kaibo Huang, Zhongliang Yang, Linna Zhou},
-  journal={arXiv preprint arXiv:2605.03762},
-  year={2026}
-}
-```
-
----
