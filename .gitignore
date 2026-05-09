@@ -64,6 +64,7 @@ venv.bak/
 .cursor/
 .cursor-tutor/
 .codex/
+.agents/
 .claude/
 .gemini/
 .gemini-cli/
@@ -111,3 +112,4 @@ DESIGN.md
 DESIGN-ZH.md
 FRAME.md
 FRAME-ZH.md
+AGENTS.md
