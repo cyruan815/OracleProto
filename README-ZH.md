@@ -25,7 +25,7 @@ OracleProto 问的是“你能预测未来吗”
 
 查看我们的论文：[arXiv](http://arxiv.org/abs/2605.03762)
 
-访问我们的排行榜：[oracleproto.pages.dev](https://oracleproto.pages.dev)
+访问我们的排行榜：[oracleproto.pages.dev](https://oracleproto.com)
 
 </div>
 

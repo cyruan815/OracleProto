@@ -23,7 +23,7 @@ In service of every person’s judgments and choices for a good life
 
 View Our Paper: [arXiv](http://arxiv.org/abs/2605.03762)
 
-Visit Our Leaderboards: [oracleproto.pages.dev](https://oracleproto.pages.dev)
+Visit Our Leaderboards: [oracleproto.pages.dev](https://oracleproto.com)
 
 </div>
 
