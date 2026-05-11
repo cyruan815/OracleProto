@@ -2,7 +2,7 @@
 
 Run from the repo root:
 
-    python scripts/fss_sensitivity.py runs/<run_id>                  # 4-tier sweep
+    python scripts/fss_sensitivity.py runs/<run_id>                  # 5-tier sweep
     python scripts/fss_sensitivity.py runs/<run_id> --alpha 1 --beta 1   # single point
 
 Reads the run's manifest + per-model DBs the same way `run_analysis` does,
@@ -31,16 +31,18 @@ from forecast_eval.analysis.accuracy import fss  # noqa: E402
 from forecast_eval.analysis.flatten import _answer_gt_for, _flatten_db  # noqa: E402
 
 
-# Default 4-tier sweep:
+# Default 5-tier sweep covering FP-to-FN ratios 1, 2, 4, 6, 8:
 #   (1, 1)   Jaccard / symmetric
-#   (1, 0.5) mild asymmetry
-#   (2, 0.5) default — published main-table value
-#   (3, 0.5) strict asymmetry — multi-selection error costs 6× missed
+#   (1, 0.5) mild asymmetry (2×)
+#   (2, 0.5) default — published main-table value (4×)
+#   (3, 0.5) strict asymmetry (6×)
+#   (4, 0.5) extreme asymmetry (8×)
 DEFAULT_TIERS: list[tuple[float, float]] = [
     (1.0, 1.0),
     (1.0, 0.5),
     (2.0, 0.5),
     (3.0, 0.5),
+    (4.0, 0.5),
 ]
 
 
@@ -79,7 +81,7 @@ def _load_samples_and_gt(
 def _resolve_tiers(args: argparse.Namespace) -> list[tuple[float, float]]:
     """Pick the (α, β) sweep set from CLI args.
 
-    `--all` (default when no `--alpha` / `--beta` given) → 4-tier sweep.
+    `--all` (default when no `--alpha` / `--beta` given) → 5-tier sweep.
     `--alpha A --beta B` → single point.
     """
     if args.alpha is not None and args.beta is not None:
@@ -153,7 +155,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--alpha", type=float, default=None,
-        help="Tversky α (FP weight). Requires --beta. Default: sweep 4 tiers.",
+        help="Tversky α (FP weight). Requires --beta. Default: sweep 5 tiers.",
     )
     p.add_argument(
         "--beta", type=float, default=None,
@@ -161,7 +163,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--all", action="store_true",
-        help="Explicitly request the 4-tier sweep (overrides --alpha/--beta).",
+        help="Explicitly request the 5-tier sweep (overrides --alpha/--beta).",
     )
     return p.parse_args(argv)
 

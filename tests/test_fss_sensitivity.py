@@ -2,7 +2,7 @@
 
 Pins:
 * CLI accepts `--all` and `--alpha A --beta B` modes.
-* 4-tier sweep produces 4 rows per model with the expected (α, β) pairs.
+* 5-tier sweep produces 5 rows per model with the expected (α, β) pairs.
 * The (2, 0.5) row matches `accuracy.fss(samples, gt_map)` byte-for-byte
   (this is the "default-tier ↔ run_analysis main table" parity invariant).
 * The CSV opens with the provenance comment so a reviewer reading the bare
@@ -44,8 +44,8 @@ def _read_sensitivity_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def test_sensitivity_all_tiers_emits_4_rows_per_model(tmp_path: Path) -> None:
-    """Default `--all` sweep → 4 rows per model with the expected (α, β) tiers."""
+def test_sensitivity_all_tiers_emits_5_rows_per_model(tmp_path: Path) -> None:
+    """Default `--all` sweep → 5 rows per model with the expected (α, β) tiers."""
     run_dir = _build_fixture_run(tmp_path)
     sensitivity.run_sensitivity(run_dir)
 
@@ -53,14 +53,14 @@ def test_sensitivity_all_tiers_emits_4_rows_per_model(tmp_path: Path) -> None:
     assert out_path.exists()
     rows = _read_sensitivity_rows(out_path)
 
-    # Two models × 4 tiers = 8 rows.
-    assert len(rows) == 8
+    # Two models × 5 tiers = 10 rows.
+    assert len(rows) == 10
     by_model: dict[str, set[tuple[float, float]]] = {}
     for r in rows:
         by_model.setdefault(r["model"], set()).add(
             (float(r["alpha"]), float(r["beta"]))
         )
-    expected_tiers = {(1.0, 1.0), (1.0, 0.5), (2.0, 0.5), (3.0, 0.5)}
+    expected_tiers = {(1.0, 1.0), (1.0, 0.5), (2.0, 0.5), (3.0, 0.5), (4.0, 0.5)}
     for model, tiers in by_model.items():
         assert tiers == expected_tiers, f"Model {model}: tiers={tiers}"
 
