@@ -1430,3 +1430,81 @@ def test_settings_rejects_lookahead_below_one(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("REACT_FORCE_FINAL_ANSWER_LOOKAHEAD", "0")
     with pytest.raises(ValueError, match="REACT_FORCE_FINAL_ANSWER_LOOKAHEAD"):
         Settings(_env_file=None)
+
+
+# ==================== L2 temporal masking: χ_i = τ_i + δ ====================
+#
+# Without these pins, a sign flip in `_compute_end_date` (e.g. `-timedelta` in
+# place of `+timedelta`) or a dropped `settings.TAVILY_END_DATE_OFFSET_DAYS`
+# handoff in `run_react` would silently invert the temporal mask while every
+# existing test stays green.
+
+
+@pytest.mark.parametrize(
+    "end_time, offset_days, expected",
+    [
+        ("2026-03-01", -1, "2026-02-28"),
+        ("2026-01-01", -1, "2025-12-31"),
+        ("2024-03-01", -1, "2024-02-29"),
+        ("2025-03-01", -1, "2025-02-28"),
+        ("2026-01-18", 0, "2026-01-18"),
+        ("2026-01-18", 5, "2026-01-23"),
+    ],
+)
+def test_compute_end_date_pins_offset_arithmetic(
+    end_time: str, offset_days: int, expected: str
+) -> None:
+    """χ_i = τ_i + δ. Covers cross-month, cross-year, leap-day, δ=0, and δ>0
+    (relaxation) cases — a wider surface than the default δ=-1 alone, so a sign
+    flip is caught regardless of which case the regression hits first."""
+    assert react._compute_end_date(end_time, offset_days) == expected
+
+
+@pytest.mark.parametrize(
+    "offset_env, expected_end_date",
+    [
+        ("-1", "2026-02-28"),
+        ("0", "2026-03-01"),
+        ("3", "2026-03-04"),
+    ],
+)
+async def test_react_injects_end_date_pins_q_end_time_plus_offset(
+    offset_env: str,
+    expected_end_date: str,
+    templates: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end pin for L2: `run_react` must invoke `tavily_search` with
+    `end_date = q.end_time + settings.TAVILY_END_DATE_OFFSET_DAYS`. Three
+    offsets cover the project default, the contract-knob boundary, and a
+    forward relaxation; the suite was previously blind to either the offset
+    handoff dropping or the arithmetic direction flipping."""
+    from forecast_eval.search import SearchResult
+
+    settings = _make_settings(
+        monkeypatch, TAVILY_END_DATE_OFFSET_DAYS=offset_env
+    )
+    captured: dict[str, Any] = {}
+
+    async def capturing_tavily(query: str, end_date: str, *args: Any, **kwargs: Any) -> SearchResult:
+        captured["end_date"] = end_date
+        return SearchResult(query=query, end_date=end_date, answer=None, results=[])
+
+    script = [
+        (_tool_msg("call_1", "evidence?"), "tool_calls", {"response_id": "r0"}),
+        (_final_msg("\\boxed{Yes}"), "stop", {"response_id": "r1"}),
+    ]
+    monkeypatch.setattr(react, "llm_chat", _ScriptedLLM(script))
+    monkeypatch.setattr(react, "tavily_search", capturing_tavily)
+
+    q = _yes_no_question()
+    await react.run_react(
+        q,
+        model=settings.MODELS[0],
+        sample_idx=0,
+        settings=settings,
+        templates=templates,
+        run_id="test",
+    )
+
+    assert captured["end_date"] == expected_end_date

@@ -15,7 +15,6 @@ OracleProto asks: “Can you predict the future?”
 
 <b>May every forecast be reproducible, may AI truly become decision support</b><br>
 In service of every person’s judgments and choices for a good life
-
 </div>
 
 ---
