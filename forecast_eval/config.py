@@ -327,11 +327,11 @@ class Settings(BaseSettings):
     SEARCH_BACKOFF_S: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [2, 5, 15])
 
     # ReAct
-    REACT_MAX_STEPS: int = 12
+    REACT_MAX_STEPS: int = 6
     # Grid-scannable: list of cell-local C values, parsed from CSV. Same shape
     # contract as TAVILY_MAX_RESULTS — dispatcher derives per-cell sub-views
     # carrying a single int; runner / react never see the list form.
-    REACT_MAX_SEARCH_CALLS: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [8])
+    REACT_MAX_SEARCH_CALLS: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [4])
     # Master switch for reflection protocol: when enabled, multi-step reasoning scaffolding is appended
     # at the end of the user prompt, significantly improving search + reflection depth.
     # Not written to prompt_templates (so prompt_templates_hash remains unchanged), but the actual user message
